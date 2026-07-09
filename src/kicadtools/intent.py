@@ -46,6 +46,11 @@ class ElectricalIntent:
     # Why a symbol ended up as a plain ``ElectricalIntent`` instead of a typed
     # subclass. ``None`` on a successfully classified (typed) component.
     classification_note: str | None = field(default=None, compare=False)
+    # Set when the intent type was inferred (see ``kicadtools.classify``) rather
+    # than read from an explicit ``Intent:Type`` property. ``guess_basis`` records
+    # which signal was used, for reporting.
+    intent_guessed: bool = field(default=False, compare=False)
+    guess_basis: str | None = field(default=None, compare=False)
 
     # Registry – maps lower-cased Intent:Type → concrete subclass
     _registry: ClassVar[Dict[str, Type["ElectricalIntent"]]] = {}

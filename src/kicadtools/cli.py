@@ -17,22 +17,39 @@ def _bom(args: argparse.Namespace) -> int:
 
     components = sorted(components, key=lambda c: c.__class__.__name__)
 
+    typed = guessed = untyped_count = 0
     for c in components:
-        # An un-typed (base) component means the schematic didn't tag it with a
-        # recognized Intent:Type — flag it so it can be classified later.
-        untyped = type(c) is ElectricalIntent
-        status = "❌" if untyped else "✅"
+        # Three outcomes: explicitly typed (✅), typed by inference (≈), or a
+        # plain base component we couldn't classify (❌).
+        is_untyped = type(c) is ElectricalIntent
+        if is_untyped:
+            status = "❌"
+            untyped_count += 1
+        elif c.intent_guessed:
+            status = "≈"
+            guessed += 1
+        else:
+            status = "✅"
+            typed += 1
+
         print(
             f"{status}  "
             f"{c.reference:>4}  |  "
             f"{(c.footprint or ''):<40}  |  "
             f"{c.description()}"
         )
-        if args.verbose and untyped:
-            reason = c.classification_note or "could not be classified"
-            print(f"        ↳ {reason}")
+        if args.verbose:
+            if is_untyped:
+                print(f"        ↳ {c.classification_note or 'could not be classified'}")
+            elif c.intent_guessed:
+                print(f"        ↳ guessed from {c.guess_basis}")
 
-    print(f"\n{len(components)} components")
+    print(
+        f"\n{len(components)} components "
+        f"({typed} typed, {guessed} guessed, {untyped_count} unclassified)"
+    )
+    if guessed and not args.verbose:
+        print("Re-run with -v to see how guessed (≈) and unclassified (❌) parts were handled.")
     return 0
 
 
@@ -49,7 +66,7 @@ def main() -> int:
         "-v",
         "--verbose",
         action="store_true",
-        help="For each ❌ (unclassified) component, explain why it wasn't classified",
+        help="Explain each ≈ (guessed) and ❌ (unclassified) component",
     )
     bom.set_defaults(func=_bom)
 
