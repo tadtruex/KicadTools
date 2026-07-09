@@ -24,6 +24,20 @@ kicadtools bom path/to/board.kicad_sch
 Power flags (`#…`), do-not-place parts, and parts excluded from the BOM are
 filtered out. Each remaining component is classified from its `Intent:Type`
 property (resistor, capacitor, diode, …) and printed with a short description.
+Lines are marked `✅` when classified and `❌` when not.
+
+Add `-v` / `--verbose` to explain every `❌` line — i.e. why a component
+couldn't be classified (no `Intent:Type` property, an unrecognized type, or a
+recognized type that failed to build):
+
+```bash
+kicadtools bom -v path/to/board.kicad_sch
+```
+
+```
+❌    R9  |  Resistor_SMD:R_0603_1608Metric  |  No details
+        ↳ no 'Intent:Type' property on the symbol — nothing to classify it by
+```
 
 ## Running the tests
 

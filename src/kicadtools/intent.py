@@ -43,6 +43,9 @@ class ElectricalIntent:
     intent_type: str = field(default="Unknown")
     footprint: str | None = None
     mfr_preferred: List[str] = field(default_factory=list)
+    # Why a symbol ended up as a plain ``ElectricalIntent`` instead of a typed
+    # subclass. ``None`` on a successfully classified (typed) component.
+    classification_note: str | None = field(default=None, compare=False)
 
     # Registry – maps lower-cased Intent:Type → concrete subclass
     _registry: ClassVar[Dict[str, Type["ElectricalIntent"]]] = {}
@@ -86,25 +89,41 @@ class ElectricalIntent:
 
     @classmethod
     def from_dict(cls: Type[_T], data: Dict[str, Any]) -> _T:
-        """Build the most specific ``ElectricalIntent`` possible from *data*."""
+        """Build the most specific ``ElectricalIntent`` possible from *data*.
+
+        When a symbol can't be classified into a typed subclass, a plain
+        ``ElectricalIntent`` is returned with ``classification_note`` set to a
+        human-readable explanation of why.
+        """
         base_kwargs = cls._base_kwargs(data)
         intent_type = base_kwargs["intent_type"]
 
         concrete_cls = ElectricalIntent._registry.get(intent_type.lower())
 
-        if concrete_cls is not None:
-            try:
-                return concrete_cls._from_dict_impl(data)  # type: ignore[return-value]
-            except Exception as exc:
-                print(
-                    f"[ElectricalIntent] Failed to construct subclass "
-                    f"{concrete_cls.__name__} for Intent:Type '{intent_type}' "
-                    f"(reference '{base_kwargs['reference']}'): {exc}. "
-                    f"Falling back to base class."
+        if concrete_cls is None:
+            base = cls(**base_kwargs)  # type: ignore[assignment]
+            if intent_type == "Unknown":
+                base.classification_note = (
+                    "no 'Intent:Type' property on the symbol — nothing to "
+                    "classify it by"
                 )
-                return cls(**base_kwargs)  # type: ignore[return-value]
+            else:
+                known = ", ".join(sorted(ElectricalIntent._registry)) or "(none)"
+                base.classification_note = (
+                    f"Intent:Type '{intent_type}' is not a recognized type "
+                    f"(known types: {known})"
+                )
+            return base  # type: ignore[return-value]
 
-        return cls(**base_kwargs)  # type: ignore[return-value]
+        try:
+            return concrete_cls._from_dict_impl(data)  # type: ignore[return-value]
+        except Exception as exc:
+            base = cls(**base_kwargs)  # type: ignore[assignment]
+            base.classification_note = (
+                f"Intent:Type '{intent_type}' is recognized, but building a "
+                f"{concrete_cls.__name__} failed: {exc}"
+            )
+            return base  # type: ignore[return-value]
 
     def description(self) -> str:
         """Base description – concrete subclasses override this."""

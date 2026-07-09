@@ -20,13 +20,17 @@ def _bom(args: argparse.Namespace) -> int:
     for c in components:
         # An un-typed (base) component means the schematic didn't tag it with a
         # recognized Intent:Type — flag it so it can be classified later.
-        status = "❌" if type(c) is ElectricalIntent else "✅"
+        untyped = type(c) is ElectricalIntent
+        status = "❌" if untyped else "✅"
         print(
             f"{status}  "
             f"{c.reference:>4}  |  "
             f"{(c.footprint or ''):<40}  |  "
             f"{c.description()}"
         )
+        if args.verbose and untyped:
+            reason = c.classification_note or "could not be classified"
+            print(f"        ↳ {reason}")
 
     print(f"\n{len(components)} components")
     return 0
@@ -41,6 +45,12 @@ def main() -> int:
 
     bom = sub.add_parser("bom", help="List the components in a schematic")
     bom.add_argument("schematic", type=Path, help="Path to a .kicad_sch file")
+    bom.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="For each ❌ (unclassified) component, explain why it wasn't classified",
+    )
     bom.set_defaults(func=_bom)
 
     args = parser.parse_args()
