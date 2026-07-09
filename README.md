@@ -82,7 +82,7 @@ kicadtools-cockpit path/to/board.kicad_sch     # path is optional; File → Open
   Description); each guessed (`≈`) row has an **Accept** checkbox, and hovering
   it shows why the type was guessed.
 - **Accept Checked** / **Accept All** mark guesses valid (status → ✔).
-- **Write Accepted Intents…** inserts a `Intent:Type` property onto each accepted
+- **File → Save** (⌘S) inserts an `Intent:Type` property onto each accepted
   symbol, **in place**, as a minimal edit (only new lines added — every other
   byte is untouched, so the git diff is clean). It edits each source file in the
   hierarchy and reloads; the accepted parts then read as explicit `✅`.
@@ -118,5 +118,11 @@ Test schematics live in `tests/data/`.
 
 - `src/kicadtools/sexpr_parser.py` — s-expression schematic reader (files, symbols, properties, instances)
 - `src/kicadtools/intent.py` — component model: `ElectricalIntent` + typed subclasses
+- `src/kicadtools/classify.py` — guess a component's intent type from its properties
 - `src/kicadtools/components.py` — build the component list from a schematic tree
+- `src/kicadtools/writer.py` — surgical `Intent:Type` write-back into the schematic text
 - `src/kicadtools/cli.py` — command-line entry point (`kicadtools`)
+- `src/kicadtools/gui/` — the BOM Cockpit GUI (`kicadtools-cockpit`):
+  - `model.py` — `IntentTableModel` + `NaturalSortProxyModel`
+  - `main_window.py` — the main window (menu, table, Accept buttons)
+  - `app.py` — `QApplication` entry point
