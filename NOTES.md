@@ -3,6 +3,48 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## LCSC resolution — `kicadtools lcsc` (2026-07-09)
+
+Goal: make sure every placed BOM part has an **LCSC** (JLCPCB) number. Pipeline
+per part: (1) has LCSC → trusted; (2) has MPN → JLCPCB search → LCSC; (3) has a
+DigiKey PN → DigiKey → MPN → JLCPCB; (4) none → flagged. Report-only for now
+(no schematic write-back yet — that lands when this is wired into the Cockpit).
+
+Modules (all `src/kicadtools/`):
+- **`partnum.py`** — normalizes the ~dozen part-number field spellings across the
+  boards (`DigiKey PN`, `Digikey`, `DigikeyPartNumber`, `Digi-Key_PN`, …) onto
+  canonical `lcsc/mpn/digikey_pn/manufacturer` by matching alphanumerics-only
+  keys, always preferring a non-empty value. Fixes the old `DigiKeyPN`-only bug.
+- **`suppliers.py`** — `DigiKeyClient` (encapsulated OAuth token, `mpn_for()`) +
+  `jlcpcb_lcsc_for()`. Lifted/cleaned from `Code/Digikey/main.py`.
+- **`resolve.py`** — the state machine (`Resolver`/`Resolution`/`Status`),
+  `iter_bom_part_records()` (raw-props BOM iterator matching `bom_components`),
+  and a SQLite `Cache` (dk→mpn, mpn→lcsc; positive results only).
+- **`cli.py`** — `kicadtools lcsc <sch> [--report csv] [--cache path]
+  [--no-cache] [--delay s]`. Prints ✅ had-LCSC / ➕ resolved / ⚑ flagged +
+  summary; exits non-zero if anything is still flagged. Cache defaults to
+  `~/.kicadtools/lcsc_cache.sqlite`.
+- Tests: `test_partnum.py`, `test_resolve.py` (four states, mocked clients),
+  `test_suppliers.py` (monkeypatched requests). **85 passing, 1 skipped (GUI).**
+
+⚠️ **JLCPCB endpoint changed — important.** The old GET
+`jlcpcb.com/parts/componentSearch` now serves an HTML SPA shell, not JSON. The
+old code's regex fallback then scraped the *first* `C\d+` out of the page
+(`C9900027346`) and returned it for **every** query — silent false positives.
+Now using the JSON API
+`POST …/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList`, and
+crucially **verifying `componentModelEn` matches the queried MPN** (normalized)
+before accepting a hit — an unrelated result can't be returned. Unofficial &
+unauthenticated, so it can still break/rate-limit → part just gets flagged.
+`Code/Digikey/main.py` still has the dead endpoint + regex fallback (untouched).
+
+Live-verified on `tests/data/MotorDriver.kicad_sch`: 82/82 parts get an LCSC
+(62 already had one, 20 resolved), each via a verified MPN match.
+
+Next: wire `resolve.py` into the BOM Cockpit (LCSC column + resolve button), and
+reuse `writer.insert_property` to surgically write the `LCSC` property back into
+the schematic (the M5-ish write-back, deferred here by choice).
+
 ## BOM Cockpit — Milestone 1 done (2026-07-09)
 
 PySide6 GUI (`kicadtools-cockpit`, `src/kicadtools/gui/`) implementing

@@ -1,0 +1,116 @@
+"""Offline tests for the supplier clients (kicadtools.suppliers).
+
+``requests`` is monkeypatched, so no network is touched. The focus is the
+JLCPCB MPN-verification guarantee: a hit is accepted only when its
+``componentModelEn`` actually matches the queried MPN — the guard that stops the
+old endpoint's "first result wins" false positives.
+"""
+import kicadtools.suppliers as suppliers
+from kicadtools.suppliers import DigiKeyClient, jlcpcb_lcsc_for
+
+
+class FakeResp:
+    def __init__(self, payload, status=200, *, raise_json=False):
+        self._payload = payload
+        self.status_code = status
+        self._raise_json = raise_json
+        self.text = "<html>not json</html>" if raise_json else "ok"
+
+    def json(self):
+        if self._raise_json:
+            raise ValueError("no JSON")
+        return self._payload
+
+
+def _list_payload(items):
+    return {"code": 200, "data": {"componentPageInfo": {"list": items}}}
+
+
+def _patch_post(monkeypatch, resp):
+    monkeypatch.setattr(
+        suppliers.requests, "post", lambda *a, **k: resp
+    )
+
+
+def test_exact_mpn_match_returns_code(monkeypatch):
+    payload = _list_payload([
+        {"componentCode": "C237792", "componentModelEn": "RMCF0603FT100K",
+         "stockCount": 5000},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("RMCF0603FT100K") == "C237792"
+
+
+def test_non_matching_results_are_rejected(monkeypatch):
+    # The whole point: an unrelated first result must NOT be returned.
+    payload = _list_payload([
+        {"componentCode": "C9900027346", "componentModelEn": "SOME-OTHER-PART"},
+        {"componentCode": "C111", "componentModelEn": "ALSO-WRONG"},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("RMCF0603FT100K") is None
+
+
+def test_match_is_separator_and_case_insensitive(monkeypatch):
+    payload = _list_payload([
+        {"componentCode": "C1", "componentModelEn": "ece-a1eka470i", "stock": 10},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("ECE-A1EKA470I") == "C1"
+
+
+def test_prefers_in_stock_among_exact_matches(monkeypatch):
+    payload = _list_payload([
+        {"componentCode": "C-nostock", "componentModelEn": "PART1", "stockCount": 0},
+        {"componentCode": "C-stock", "componentModelEn": "PART1", "stockCount": 42},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("PART1") == "C-stock"
+
+
+def test_empty_list_returns_none(monkeypatch):
+    _patch_post(monkeypatch, FakeResp(_list_payload([])))
+    assert jlcpcb_lcsc_for("WHATEVER") is None
+
+
+def test_non_json_returns_none(monkeypatch):
+    # The failure mode of the dead GET endpoint (HTML SPA shell) — must not scrape.
+    _patch_post(monkeypatch, FakeResp(None, raise_json=True))
+    assert jlcpcb_lcsc_for("STM32L552CCT6") is None
+
+
+def test_http_error_returns_none(monkeypatch):
+    _patch_post(monkeypatch, FakeResp(_list_payload([]), status=503))
+    assert jlcpcb_lcsc_for("STM32L552CCT6") is None
+
+
+def test_empty_mpn_short_circuits(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("should not hit the network for an empty MPN")
+
+    monkeypatch.setattr(suppliers.requests, "post", boom)
+    assert jlcpcb_lcsc_for("") is None
+
+
+# --- DigiKey client -------------------------------------------------------
+
+def test_digikey_unconfigured_returns_none(monkeypatch):
+    monkeypatch.delenv("DIGIKEY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("DIGIKEY_CLIENT_SECRET", raising=False)
+    client = DigiKeyClient()
+    assert not client.configured
+    assert client.mpn_for("anything-ND") is None
+
+
+def test_digikey_happy_path(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post(url, **kwargs):
+        calls["n"] += 1
+        if url == suppliers.TOKEN_URL:
+            return FakeResp({"access_token": "tok", "expires_in": 3600})
+        return FakeResp({"Products": [{"ManufacturerProductNumber": "RMCF0603FT100K"}]})
+
+    monkeypatch.setattr(suppliers.requests, "post", fake_post)
+    client = DigiKeyClient(client_id="id", client_secret="secret")
+    assert client.mpn_for("P100KLCT-ND") == "RMCF0603FT100K"
