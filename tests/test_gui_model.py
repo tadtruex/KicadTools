@@ -7,7 +7,11 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt  # noqa: E402
 
 from kicadtools.components import get_components  # noqa: E402
-from kicadtools.gui.model import IntentTableModel  # noqa: E402
+from kicadtools.gui.model import (  # noqa: E402
+    IntentTableModel,
+    NaturalSortProxyModel,
+    natural_key,
+)
 
 DATA = Path(__file__).parent / "data"
 BOARD = DATA / "MotorDriver.kicad_sch"
@@ -64,6 +68,23 @@ def test_accept_all_clears_guesses_and_builds_edits():
     total = sum(len(mapping) for mapping in edits.values())
     # edits dedup by (file, uuid), so may be <= accepted rows (reused subsheets).
     assert 0 < total <= guessed_before
+
+
+def test_natural_key_orders_numbers_numerically():
+    refs = ["C10", "C2", "C1", "R1"]
+    assert sorted(refs, key=natural_key) == ["C1", "C2", "C10", "R1"]
+
+
+def test_proxy_sorts_ref_column_numerically():
+    proxy = NaturalSortProxyModel()
+    proxy.setSourceModel(_model())
+    proxy.sort(1, Qt.AscendingOrder)  # Ref column
+    refs = [proxy.data(proxy.index(r, 1), Qt.DisplayRole) for r in range(proxy.rowCount())]
+    caps = [r for r in refs if r.startswith("C")]
+    assert caps == sorted(caps, key=natural_key)
+    # Specifically, C2 precedes C10 (the lexical-sort failure case).
+    if "C2" in caps and "C10" in caps:
+        assert caps.index("C2") < caps.index("C10")
 
 
 def test_setdata_rejected_on_non_guessed_row():

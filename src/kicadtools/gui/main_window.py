@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -18,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from kicadtools import writer
 from kicadtools.components import bom_components, get_components
-from kicadtools.gui.model import IntentTableModel
+from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 
 
 class MainWindow(QMainWindow):
@@ -29,27 +31,32 @@ class MainWindow(QMainWindow):
 
         self._board: Optional[Path] = None
         self.model = IntentTableModel()
+        # A proxy sits between the view and the model so header clicks can sort
+        # without disturbing the source rows (the accept/check sets are keyed by
+        # source row and stay valid).
+        self.proxy = NaturalSortProxyModel(self)
+        self.proxy.setSourceModel(self.model)
 
         self.table = QTableView()
-        self.table.setModel(self.model)
+        self.table.setModel(self.proxy)
         self.table.setSelectionBehavior(QTableView.SelectRows)
+        self.table.setSortingEnabled(True)  # click a header to sort
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(QHeaderView.Interactive)  # user can drag to resize
         header.setStretchLastSection(True)
+        # Natural (file) order until a header is actually clicked.
+        header.setSortIndicator(-1, Qt.AscendingOrder)
 
         accept_checked = QPushButton("Accept Checked")
         accept_all = QPushButton("Accept All")
-        self._write_btn = QPushButton("Write Accepted Intents…")
         accept_checked.clicked.connect(self._accept_checked)
         accept_all.clicked.connect(self._accept_all)
-        self._write_btn.clicked.connect(self._write)
 
         buttons = QHBoxLayout()
         buttons.addWidget(accept_checked)
         buttons.addWidget(accept_all)
         buttons.addStretch(1)
-        buttons.addWidget(self._write_btn)
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -67,11 +74,19 @@ class MainWindow(QMainWindow):
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
         open_act = file_menu.addAction("&Open Schematic…")
+        open_act.setShortcut(QKeySequence.Open)
         open_act.triggered.connect(self._open_dialog)
-        write_act = file_menu.addAction("&Write Accepted Intents…")
-        write_act.triggered.connect(self._write)
+        self._save_act = file_menu.addAction("&Save")
+        self._save_act.setShortcut(QKeySequence.Save)
+        self._save_act.triggered.connect(self._write)
+        # TODO(later): "Save As…" — write accepted intents to a chosen path
+        # (e.g. writer.sibling_dest via a save dialog) instead of in place.
         file_menu.addSeparator()
         quit_act = file_menu.addAction("&Quit")
+        quit_act.setShortcut(QKeySequence.Quit)
+        # Keep Quit in the File menu: macOS otherwise auto-relocates a "Quit"
+        # action to the application menu.
+        quit_act.setMenuRole(QAction.NoRole)
         quit_act.triggered.connect(self.close)
 
     # ---- open --------------------------------------------------------
@@ -90,6 +105,7 @@ class MainWindow(QMainWindow):
             return
         self._board = path
         self.model.load(components)
+        self.table.resizeColumnsToContents()  # sensible initial widths; still draggable
         self.setWindowTitle(f"BOM Cockpit — {path.name}")
         self._refresh_status()
 

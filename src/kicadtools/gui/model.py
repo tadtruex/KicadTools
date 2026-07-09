@@ -6,13 +6,43 @@ records it for write-back and flips its status to a checkmark.
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QSortFilterProxyModel,
+    Qt,
+)
 
 from kicadtools.intent import ElectricalIntent
+
+
+def natural_key(value) -> tuple:
+    """A sort key that orders embedded numbers numerically, so ``C2`` sorts
+    before ``C10``. Digit runs compare as ints (and ahead of text), so mixed
+    chunks never raise."""
+    s = "" if value is None else str(value)
+    key = []
+    for chunk in re.split(r"(\d+)", s.lower()):
+        if chunk.isdigit():
+            key.append((0, int(chunk)))
+        elif chunk:
+            key.append((1, chunk))
+    return tuple(key)
+
+
+class NaturalSortProxyModel(QSortFilterProxyModel):
+    """Proxy that sorts by :func:`natural_key` of each cell's display text."""
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
+        model = self.sourceModel()
+        left_val = model.data(left, Qt.DisplayRole)
+        right_val = model.data(right, Qt.DisplayRole)
+        return natural_key(left_val) < natural_key(right_val)
 
 _COLUMNS = ["Accept", "Ref", "Status", "Type", "Footprint", "Description"]
 
