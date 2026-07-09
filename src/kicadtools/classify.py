@@ -33,6 +33,40 @@ class IntentGuess:
 
 
 # ----------------------------------------------------------------------
+# LED detection  (shared by the footprint and description strategies)
+# ----------------------------------------------------------------------
+# LEDs are diodes, so a diode symbol/footprint alone can't tell them apart —
+# the give-away is in the text: the word "LED", a wavelength, or a colour.
+# A colour word ("red", "green", …) is common in non-LED contexts ("white
+# ceramic capacitor"), so it's only trusted where the part is already known to
+# be diode-ish; hence the ``allow_color`` gate.
+_LED_COLORS: List[str] = [
+    "warm white", "cool white", "infrared", "ultraviolet",
+    "red", "green", "blue", "yellow", "amber", "white", "orange", "rgb",
+]
+_LED_WAVELENGTH_RE = re.compile(r"\b\d{3,4}\s*nm\b")
+
+
+def _led_signal(props: Dict[str, object], *, allow_color: bool) -> Optional[str]:
+    """Return a human-readable LED signal from the Description/Value text, else
+    ``None``. Colour words count only when *allow_color* is set."""
+    blob = " ".join(str(props.get(k, "")) for k in ("Description", "Value"))
+    text = re.sub(r"[^a-z0-9]+", " ", blob.lower()).strip()
+    if not text:
+        return None
+    if re.search(r"\bled\b", text) or "light emitting diode" in text:
+        return "text mentioning 'LED'"
+    m = _LED_WAVELENGTH_RE.search(text)
+    if m:
+        return f"an LED wavelength {m.group(0).strip()!r} in the text"
+    if allow_color:
+        for color in _LED_COLORS:
+            if re.search(r"\b" + re.escape(color) + r"\b", text):
+                return f"the LED colour {color!r} in the text"
+    return None
+
+
+# ----------------------------------------------------------------------
 # 1. Footprint library  (highest confidence)
 # ----------------------------------------------------------------------
 # A KiCad footprint id is "Library:Name"; the library half is frequently named
@@ -65,6 +99,13 @@ def _by_footprint(props: Dict[str, object]) -> Optional[IntentGuess]:
     lib_lower = library.lower()
     for prefix, intent_type in _FOOTPRINT_LIB_TYPES:
         if lib_lower.startswith(prefix.lower()):
+            if intent_type == "diode":
+                # An LED drawn with a plain diode footprint: let the text override.
+                led = _led_signal(props, allow_color=True)
+                if led is not None:
+                    return IntentGuess(
+                        "led", f"diode-style footprint {library!r} but {led}", "footprint"
+                    )
             return IntentGuess(intent_type, f"footprint library {library!r}", "footprint")
     return None
 
@@ -84,28 +125,39 @@ _DESC_KEYWORDS: Dict[str, List[str]] = {
     "battery": ["battery", "coin cell"],
     "fuse": ["fuse"],
     "ferrite": ["ferrite"],
-    "transistor": ["transistor", "mosfet"],
+    "transistor": [
+        "transistor", "transistor array", "mosfet", "fet", "jfet", "igbt",
+        "bjt", "npn", "pnp", "bipolar", "darlington",
+        "n-channel", "p-channel", "nmos", "pmos",
+    ],
 }
 
 
 def _by_description(props: Dict[str, object]) -> Optional[IntentGuess]:
-    description = props.get("Description")
-    if not isinstance(description, str) or not description.strip():
-        return None
-    text = description.lower()
-
     matched: Dict[str, str] = {}
-    for intent_type, keywords in _DESC_KEYWORDS.items():
-        for kw in keywords:
-            if re.search(r"\b" + re.escape(kw) + r"\b", text):
-                matched[intent_type] = kw
-                break
 
-    # Only trust the description when it points to exactly one type.
+    description = props.get("Description")
+    if isinstance(description, str) and description.strip():
+        text = description.lower()
+        for intent_type, keywords in _DESC_KEYWORDS.items():
+            for kw in keywords:
+                if re.search(r"\b" + re.escape(kw) + r"\b", text):
+                    matched[intent_type] = f"description mentions {kw!r}"
+                    break
+
+    # LED evidence can also live in the Value ("LED_Green", "1515 rgb led") and
+    # covers wavelengths the keyword table doesn't list. Colours are excluded
+    # here (too common elsewhere); they're only trusted in the diode-footprint
+    # case in ``_by_footprint``.
+    led = _led_signal(props, allow_color=False)
+    if led is not None:
+        matched["led"] = led
+
+    # Only trust the text when it points to exactly one type.
     if len(matched) != 1:
         return None
-    intent_type, kw = next(iter(matched.items()))
-    return IntentGuess(intent_type, f"description mentions {kw!r}", "description")
+    intent_type, basis = next(iter(matched.items()))
+    return IntentGuess(intent_type, basis, "description")
 
 
 # ----------------------------------------------------------------------

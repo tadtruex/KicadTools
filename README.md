@@ -39,12 +39,17 @@ the first confident answer (see `src/kicadtools/classify.py`):
 
 1. **Footprint library** — a footprint from a type-named library
    (`Resistor_SMD`, `Capacitor_SMD`, `Diode_SMD`, `LED_SMD`, `Connector_*`, …).
-2. **Description** — an unambiguous type word in the `Description` text.
+2. **Description / value** — an unambiguous type word in the `Description` (or
+   `Value`) text.
 3. **Reference designator** — the prefix letter(s): `R`, `C`, `D`, `L`, `J`, …
 
+LEDs get special handling because they're diodes: a part on a plain diode
+footprint is promoted to an LED when its text carries an LED signal — the word
+"LED", a wavelength (`630nm`), or, in that diode-footprint context, a colour.
+
 If none is confident, the part is left unclassified (`❌`) for now. A guessed
-type whose subclass doesn't exist yet (e.g. connector, battery) also stays `❌`,
-but the reason line names what it looks like.
+type whose subclass doesn't exist yet (e.g. battery) also stays `❌`, but the
+reason line names what it looks like.
 
 ### Explaining the guesses
 

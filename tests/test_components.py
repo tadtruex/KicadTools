@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from kicadtools.components import get_components
-from kicadtools.intent import CapacitorIntent, ElectricalIntent, ResistorIntent
+from kicadtools.intent import (
+    CapacitorIntent,
+    ConnectorIntent,
+    ElectricalIntent,
+    LedIntent,
+    ResistorIntent,
+)
 
 DATA = Path(__file__).parent / "data"
 
@@ -31,6 +37,28 @@ def test_subsheet_instantiated_twice_produces_two_components():
     components = get_components(DATA / "MotorDriver.kicad_sch")
     caps = [c for c in components if c.reference in ("C7", "C1")]
     assert {c.reference for c in caps} == {"C7", "C1"}
+
+
+def test_guessed_connector_is_classified():
+    # J13 (QwiicH) carries no explicit Intent:Type, but its Connector_* footprint
+    # is enough to guess it — and there is now a ConnectorIntent to receive it.
+    components = get_components(DATA / "MotorDriver.kicad_sch")
+    j13 = next(c for c in components if c.reference == "J13")
+    assert isinstance(j13, ConnectorIntent)
+    assert j13.intent_guessed is True
+    assert j13.classification_note is None  # no longer "no classifier yet"
+    assert j13.positions == 4
+
+
+def test_rgb_led_on_custom_footprint_is_classified():
+    # U5 is a "1515 rgb led": custom footprint (no signal) and a U refdes that
+    # would otherwise read as an IC — the LED text in its Value rescues it.
+    components = get_components(DATA / "MotorDriver.kicad_sch")
+    u5 = next(c for c in components if c.reference == "U5")
+    assert isinstance(u5, LedIntent)
+    assert u5.intent_guessed is True
+    assert u5.color == "rgb"
+    assert u5.classification_note is None
 
 
 def test_motordriver_component_counts():

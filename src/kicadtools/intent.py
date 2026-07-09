@@ -8,6 +8,7 @@ factory that returns the most specific type it can build.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Type, TypeVar
 
@@ -235,6 +236,180 @@ class DiodeIntent(ElectricalIntent):
         vm = f", min-V {self.voltage_min}" if self.voltage_min else ""
         cp = f", class {self.class_preferred[0]}" if self.class_preferred else ""
         return f"{self.reference}: diode{vm}{cp}"
+
+
+# LED colours, longest-first so "warm white" wins over "white". Used only to
+# enrich an already-decided LED's description, never to classify.
+_LED_COLORS: List[str] = [
+    "warm white", "cool white", "infrared", "ultraviolet",
+    "red", "green", "blue", "yellow", "amber", "white", "orange", "rgb",
+]
+_LED_WAVELENGTH_RE = re.compile(r"\b(\d{3,4}\s*nm)\b")
+
+
+@intent_subclass("led")
+@dataclass(kw_only=True)
+class LedIntent(ElectricalIntent):
+    """Light-emitting diode.
+
+    All fields optional. Colour and wavelength are parsed out of the ``Value`` /
+    ``Description`` text (``"LED_Green"``, ``"1515 rgb led"``, ``"Red 630nm"`` …)
+    when present.
+    """
+    value: str | None = None
+    color: str | None = None
+    wavelength: str | None = None
+
+    @classmethod
+    def _from_dict_impl(cls, data: Dict[str, Any]) -> "LedIntent":
+        value = data.get("Value") or None
+
+        # Normalise punctuation to spaces so tokens survive separators like the
+        # underscore in "LED_Green".
+        blob = f"{data.get('Value', '')} {data.get('Description', '')}"
+        text = re.sub(r"[^a-z0-9]+", " ", blob.lower()).strip()
+
+        color = next(
+            (c for c in _LED_COLORS if re.search(rf"\b{re.escape(c)}\b", text)),
+            None,
+        )
+        m = _LED_WAVELENGTH_RE.search(text)
+        wavelength = m.group(1).replace(" ", "") if m else None
+
+        return cls(
+            **cls._base_kwargs(data),
+            value=value,
+            color=color,
+            wavelength=wavelength,
+        )
+
+    def description(self) -> str:
+        head = f"{self.color} LED" if self.color else "LED"
+        wl = f" ({self.wavelength})" if self.wavelength else ""
+        return f"{self.reference}: {head}{wl}"
+
+
+# Footprint-name tokens KiCad connector libraries use, e.g.
+# "PinHeader_1x03_P2.54mm_Horizontal" or "JST_SH_SM04B-...1x04-1MP_P1.00mm_...".
+_CONN_POSITIONS_RE = re.compile(r"(\d+)x(\d+)")
+_CONN_PITCH_RE = re.compile(r"P(\d+(?:\.\d+)?mm)")
+
+
+@intent_subclass("connector")
+@dataclass(kw_only=True)
+class ConnectorIntent(ElectricalIntent):
+    """Connector / header.
+
+    All fields are optional — a connector rarely carries a ``Value`` worth
+    reporting, so the pin count and pitch are parsed out of the footprint name
+    (``…_1x04_…P1.00mm…``) when they're present.
+    """
+    value: str | None = None
+    positions: int | None = None   # total number of contacts
+    pitch: str | None = None       # e.g. "2.54mm"
+
+    @classmethod
+    def _from_dict_impl(cls, data: Dict[str, Any]) -> "ConnectorIntent":
+        value = data.get("Value") or None
+
+        positions: int | None = None
+        pitch: str | None = None
+        footprint = data.get("Footprint")
+        if isinstance(footprint, str):
+            m = _CONN_POSITIONS_RE.search(footprint)
+            if m:
+                positions = int(m.group(1)) * int(m.group(2))
+            p = _CONN_PITCH_RE.search(footprint)
+            if p:
+                pitch = p.group(1)
+
+        return cls(
+            **cls._base_kwargs(data),
+            value=value,
+            positions=positions,
+            pitch=pitch,
+        )
+
+    def description(self) -> str:
+        parts = [f"{self.value} connector" if self.value else "connector"]
+        if self.positions:
+            parts.append(f"{self.positions}-pin")
+        if self.pitch:
+            parts.append(f"{self.pitch} pitch")
+        return f"{self.reference}: " + ", ".join(parts)
+
+
+# Transistor family / polarity tokens, most-specific first. Matched against text
+# normalised to spaces (so "P-Channel" reads as "p channel"). Used only to
+# enrich an already-decided transistor's description, never to classify.
+_TRANSISTOR_DEVICES: List[tuple[str, str]] = [
+    ("transistor array", "transistor array"),
+    ("mosfet", "MOSFET"),
+    ("igbt", "IGBT"),
+    ("jfet", "JFET"),
+    ("darlington", "Darlington"),
+    ("bjt", "BJT"),
+]
+_TRANSISTOR_POLARITY: List[tuple[str, str]] = [
+    ("npn", "NPN"),
+    ("pnp", "PNP"),
+    ("nmos", "N-channel"),
+    ("pmos", "P-channel"),
+    ("n channel", "N-channel"),
+    ("p channel", "P-channel"),
+]
+
+
+@intent_subclass("transistor")
+@dataclass(kw_only=True)
+class TransistorIntent(ElectricalIntent):
+    """Transistor — FET, BJT, IGBT or array.
+
+    All fields optional. The device family and polarity are parsed out of the
+    ``Value`` / ``Description`` text (``"P-Channel MOSFET"``, ``"NPN"``,
+    ``"Trench FET"`` …) when present.
+    """
+    value: str | None = None
+    device: str | None = None     # e.g. "MOSFET", "BJT", "IGBT"
+    polarity: str | None = None   # e.g. "N-channel", "PNP"
+
+    @classmethod
+    def _from_dict_impl(cls, data: Dict[str, Any]) -> "TransistorIntent":
+        value = data.get("Value") or None
+
+        blob = f"{data.get('Value', '')} {data.get('Description', '')}"
+        text = re.sub(r"[^a-z0-9]+", " ", blob.lower()).strip()
+
+        def _first(table: List[tuple[str, str]]) -> str | None:
+            return next(
+                (label for token, label in table
+                 if re.search(rf"\b{re.escape(token)}\b", text)),
+                None,
+            )
+
+        device = _first(_TRANSISTOR_DEVICES)
+        polarity = _first(_TRANSISTOR_POLARITY)
+        # A bare "FET" is a field-effect transistor when nothing more specific
+        # matched; a lone NPN/PNP means a BJT; a lone channel means a FET.
+        if device is None and re.search(r"\bfet\b", text):
+            device = "FET"
+        if device is None and polarity in ("NPN", "PNP"):
+            device = "BJT"
+        if device is None and polarity in ("N-channel", "P-channel"):
+            device = "FET"
+
+        return cls(
+            **cls._base_kwargs(data),
+            value=value,
+            device=device,
+            polarity=polarity,
+        )
+
+    def description(self) -> str:
+        head = self.device or "transistor"
+        if self.polarity:
+            head = f"{self.polarity} {head}"
+        return f"{self.reference}: {head}"
 
 
 @intent_subclass("specificpart")
