@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Type, TypeVar
 
 
@@ -52,6 +53,11 @@ class ElectricalIntent:
     # which signal was used, for reporting.
     intent_guessed: bool = field(default=False, compare=False)
     guess_basis: str | None = field(default=None, compare=False)
+    # Provenance — which schematic file and which placed symbol this component
+    # came from. Used to locate the symbol again when writing an accepted
+    # ``Intent:Type`` back into the schematic (see ``kicadtools.writer``).
+    source_file: "Path | None" = field(default=None, compare=False)
+    symbol_uuid: str | None = field(default=None, compare=False)
 
     # Registry – maps lower-cased Intent:Type → concrete subclass
     _registry: ClassVar[Dict[str, Type["ElectricalIntent"]]] = {}

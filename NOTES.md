@@ -3,6 +3,35 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## BOM Cockpit — Milestone 1 done (2026-07-09)
+
+PySide6 GUI (`kicadtools-cockpit`, `src/kicadtools/gui/`) implementing
+`BOMCOCKPIT.md` items 1–6: open a schematic, table of components mirroring
+`bom`, Accept-Checked / Accept-All on guessed rows, then write accepted
+`Intent:Type` back into the schematic.
+
+- **Write path** — `src/kicadtools/writer.py`. `sexpdata.dumps` collapses the
+  whole file to one line (verified on the 634 KB MotorDriver), so writing is a
+  **surgical text insertion** keyed by each symbol's `uuid`: `insert_property`
+  adds one hidden `(property "Intent:Type" …)` after the Reference property,
+  additions-only (clean git diff). Writes **in place** across the hierarchy
+  (grouped by `source_file`); `sibling_dest()` exists for `*.intents.kicad_sch`.
+- **Provenance** — `ElectricalIntent` now carries `source_file` + `symbol_uuid`
+  (set in `get_components`; uuid via `sexpr_parser.symbol_uuid`).
+- **Shared filter** — `components.bom_components()` (power/`#`, dnp, not-in-bom)
+  used by both the CLI and GUI so they show the same set.
+- Tests: 50 passing (`test_writer.py`, `test_gui_model.py` guarded by
+  `importorskip("PySide6")`). Plan file:
+  `~/.claude/plans/fancy-tumbling-heron.md`.
+
+Follow-on milestones (from the spec): **M2** placement view from `.kicad_pcb`;
+**M3** part-number assignment consulting `/Users/d66317d/Code/Boards/Inventory.db`
+(SQLite: Parts/OnHand/PartType/Footprints) first, then DigiKey — reuse
+`Code/Digikey/main.py` (`get_mpn_from_digikey`, `obtain_access_token`; refactor
+out its global token state + fix the merge-conflict marker in its `bom.csv`);
+**M4** JLCPCB/LCSC via `search_lcsc_by_mpn` (Inventory.db has no LCSC column
+yet); **M5** inventory write-back.
+
 ## Where we are (2026-07-08)
 
 Fresh project based on `../kicad_tools` (`/Users/tad/Code/kicad_tools`), started

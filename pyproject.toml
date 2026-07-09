@@ -12,9 +12,11 @@ dependencies = ["sexpdata>=1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+gui = ["PySide6>=6.6"]
 
 [project.scripts]
 kicadtools = "kicadtools.cli:main"
+kicadtools-cockpit = "kicadtools.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

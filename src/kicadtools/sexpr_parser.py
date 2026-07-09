@@ -67,6 +67,19 @@ def iter_symbols_from_sexpr(sexpr) -> Iterable[list]:
             yield node
 
 
+def symbol_uuid(symbol_expr) -> str | None:
+    """Return the ``(uuid "…")`` of a placed ``(symbol …)`` node, or ``None``.
+
+    This is the stable per-instance identifier used to locate the symbol again
+    when writing a property back into the schematic text.
+    """
+    for item in symbol_expr:
+        if isinstance(item, list) and item and item[0] == Symbol("uuid"):
+            value = item[1]
+            return value if isinstance(value, str) else None
+    return None
+
+
 def iter_symbol_instances(symbol_expr) -> Iterable[Tuple[str, str]]:
     """Yield ``(reference, sheet_path)`` for every instance of *symbol_expr*."""
     for item in symbol_expr:

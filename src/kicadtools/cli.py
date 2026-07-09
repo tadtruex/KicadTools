@@ -2,19 +2,12 @@
 import argparse
 from pathlib import Path
 
-from kicadtools.components import get_components
+from kicadtools.components import bom_components, get_components
 from kicadtools.intent import ElectricalIntent
 
 
 def _bom(args: argparse.Namespace) -> int:
-    components = get_components(args.schematic)
-
-    # Drop power flags (#PWR…, #FLG…), do-not-place parts, and parts the
-    # designer excluded from the BOM.
-    components = [c for c in components if not c.reference.startswith("#")]
-    components = [c for c in components if not c.dnp]
-    components = [c for c in components if c.in_bom]
-
+    components = bom_components(get_components(args.schematic))
     components = sorted(components, key=lambda c: c.__class__.__name__)
 
     typed = guessed = untyped_count = 0

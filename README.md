@@ -10,7 +10,7 @@ each placed symbol's properties and per-instance reference designators.
 ```bash
 cd Code/KicadTools
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev]"          # add ,gui  for the BOM Cockpit GUI:  ".[dev,gui]"
 ```
 
 ## Usage
@@ -66,6 +66,30 @@ kicadtools bom -v path/to/board.kicad_sch
 ❌   BT1  |  ECG_Footprints:MPD_BC2032-E2     |  No details
         ↳ looks like 'battery' (reference prefix 'BT'), but there's no classifier for it yet
 ```
+
+## BOM Cockpit (GUI)
+
+A PySide6 desktop app for reviewing the intent-type guesses and writing the
+accepted ones back into the schematic (so the next read has fewer guesses). See
+`BOMCOCKPIT.md` for the full vision; this is Milestone 1.
+
+```bash
+pip install -e ".[dev,gui]"
+kicadtools-cockpit path/to/board.kicad_sch     # path is optional; File → Open too
+```
+
+- The table mirrors the `bom` listing (Ref · Status · Type · Footprint ·
+  Description); each guessed (`≈`) row has an **Accept** checkbox, and hovering
+  it shows why the type was guessed.
+- **Accept Checked** / **Accept All** mark guesses valid (status → ✔).
+- **Write Accepted Intents…** inserts a `Intent:Type` property onto each accepted
+  symbol, **in place**, as a minimal edit (only new lines added — every other
+  byte is untouched, so the git diff is clean). It edits each source file in the
+  hierarchy and reloads; the accepted parts then read as explicit `✅`.
+
+The write is a surgical text insertion, not a re-serialization: round-tripping
+the whole schematic through the s-expression library would collapse it onto one
+line. Rely on git as the backstop.
 
 ## Running the tests
 

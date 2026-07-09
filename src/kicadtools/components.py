@@ -9,7 +9,19 @@ from kicadtools.sexpr_parser import (
     iter_symbol_instances,
     iter_symbols_from_sexpr,
     load_schematic_tree,
+    symbol_uuid,
 )
+
+
+def bom_components(components: List[ElectricalIntent]) -> List[ElectricalIntent]:
+    """Drop the parts the BOM listing hides: power/flag symbols (``#…`` refs),
+    do-not-place parts, and parts excluded from the BOM. Used by both the CLI
+    ``bom`` command and the GUI so they show the same set."""
+    return [
+        c
+        for c in components
+        if not c.reference.startswith("#") and not c.dnp and c.in_bom
+    ]
 
 
 def get_components(root_path: Path) -> List[ElectricalIntent]:
@@ -27,9 +39,10 @@ def get_components(root_path: Path) -> List[ElectricalIntent]:
     """
     components: List[ElectricalIntent] = []
 
-    for _sch_path, sexpr in load_schematic_tree(Path(root_path)):
+    for sch_path, sexpr in load_schematic_tree(Path(root_path)):
         for symbol in iter_symbols_from_sexpr(sexpr):
             props = extract_properties(symbol)
+            uuid = symbol_uuid(symbol)
 
             for ref, _sheet_path in iter_symbol_instances(symbol):
                 props["Reference"] = ref
@@ -46,6 +59,9 @@ def get_components(root_path: Path) -> List[ElectricalIntent]:
                 except Exception as exc:
                     print(f"❌  Construction failed for {ref}: {exc}")
                     continue
+
+                intent.source_file = sch_path
+                intent.symbol_uuid = uuid
 
                 if guess is not None:
                     intent.intent_guessed = True
