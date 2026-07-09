@@ -154,15 +154,25 @@ class Resolver:
         jlcpcb: Callable[[str], Optional[str]] = jlcpcb_lcsc_for,
         cache: Optional[Cache] = None,
         delay: float = 0.0,
+        progress: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self.digikey = digikey if digikey is not None else DigiKeyClient()
         self.jlcpcb = jlcpcb
         self.cache = cache
         self.delay = delay
+        # progress(reference, message) — fired only for real network calls (not
+        # cache hits), so a caller can show which lookup is in flight.
+        self.progress = progress
+        self._ref: str = ""
+
+    def _emit(self, message: str) -> None:
+        if self.progress:
+            self.progress(self._ref, message)
 
     def _mpn_for(self, dk_pn: str) -> Optional[str]:
         if self.cache and (hit := self.cache.get_mpn(dk_pn)):
             return hit
+        self._emit(f"DigiKey lookup for {dk_pn} → MPN…")
         mpn = self.digikey.mpn_for(dk_pn)
         if self.delay:
             time.sleep(self.delay)
@@ -173,6 +183,7 @@ class Resolver:
     def _lcsc_for(self, mpn: str) -> Optional[str]:
         if self.cache and (hit := self.cache.get_lcsc(mpn)):
             return hit
+        self._emit(f"JLCPCB lookup for MPN {mpn} → LCSC…")
         lcsc = self.jlcpcb(mpn)
         if self.delay:
             time.sleep(self.delay)
@@ -181,6 +192,7 @@ class Resolver:
         return lcsc
 
     def resolve(self, record: PartRecord) -> Resolution:
+        self._ref = record.reference
         pn = extract_part_numbers(record.props)
 
         def make(status: Status, entry: str, reason: str, **extra) -> Resolution:

@@ -1,6 +1,8 @@
 """Command-line entry point for KicadTools."""
 import argparse
 import csv
+import shutil
+import sys
 from pathlib import Path
 
 from kicadtools.components import bom_components, get_components
@@ -64,6 +66,33 @@ _STATUS_GLYPH = {
 _DEFAULT_CACHE = Path.home() / ".kicadtools" / "lcsc_cache.sqlite"
 
 
+class _StatusLine:
+    """A single, in-place status line written to stderr via carriage return.
+
+    Kept off stdout so the normal per-part result lines (and any redirect of
+    them to a file) stay clean. ``index`` is the current 1-based part number,
+    read live by the resolver's progress callback.
+    """
+
+    def __init__(self) -> None:
+        self.index = 0
+        self._prev_len = 0
+
+    def show(self, text: str) -> None:
+        width = shutil.get_terminal_size((80, 20)).columns - 1
+        text = text[:width]
+        pad = " " * max(0, self._prev_len - len(text))
+        sys.stderr.write("\r" + text + pad)
+        sys.stderr.flush()
+        self._prev_len = len(text)
+
+    def clear(self) -> None:
+        if self._prev_len:
+            sys.stderr.write("\r" + " " * self._prev_len + "\r")
+            sys.stderr.flush()
+            self._prev_len = 0
+
+
 def _lcsc(args: argparse.Namespace) -> int:
     records = iter_bom_part_records(args.schematic)
 
@@ -83,20 +112,36 @@ def _lcsc(args: argparse.Namespace) -> int:
         args.cache.parent.mkdir(parents=True, exist_ok=True)
         cache = Cache(args.cache)
 
+    total = len(records)
+    status = _StatusLine() if args.verbose else None
+
     resolver = Resolver(digikey=digikey, cache=cache, delay=args.delay)
-    resolutions = resolver.resolve_all(records)
+    if status:
+        # index is set per-part just below; the callback reads it live.
+        resolver.progress = lambda ref, msg: status.show(
+            f"[{status.index}/{total}] {ref}: {msg}"
+        )
 
     counts = {Status.OK: 0, Status.RESOLVED: 0, Status.FLAGGED: 0}
-    for rec, res in zip(records, resolutions):
+    resolutions = []
+    for i, rec in enumerate(records, 1):
+        if status:
+            status.index = i
+            status.show(f"[{i}/{total}] {rec.reference}: reading part numbers…")
+        res = resolver.resolve(rec)
+        resolutions.append(res)
         counts[res.status] += 1
+        if status:
+            status.clear()
+        # flush so progress is visible even when stdout is piped to a file.
         print(
             f"{_STATUS_GLYPH[res.status]}  "
             f"{res.reference:>4}  |  "
             f"{(res.lcsc or '—'):<10}  |  "
-            f"{res.reason}"
+            f"{res.reason}",
+            flush=True,
         )
 
-    total = len(records)
     print(
         f"\n{total} BOM parts "
         f"({counts[Status.OK]} already had LCSC, "
@@ -185,6 +230,12 @@ def main() -> int:
         type=float,
         default=0.5,
         help="Seconds to wait after each live supplier call (default: 0.5)",
+    )
+    lcsc.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show a live status line (current part + lookup in flight)",
     )
     lcsc.set_defaults(func=_lcsc)
 
