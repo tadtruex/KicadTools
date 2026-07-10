@@ -67,6 +67,25 @@ kicadtools bom -v path/to/board.kicad_sch
         ↳ looks like 'battery' (reference prefix 'BT'), but there's no classifier for it yet
 ```
 
+### Normalizing part-number keys
+
+Boards in this repo spell the same part-number field a dozen ways (`DigikeyPN`,
+`Digi-Key_PN`, `Manufacturer_PN`, `MANUFACTURER`, …), often several — mostly
+empty — on one symbol. `normalize` rewrites each placed symbol's part-number
+keys to a single canonical spelling (`LCSC`, `MPN`, `DigiKeyPN`, `Manufacturer`),
+moving the value and dropping the redundant variants:
+
+```bash
+kicadtools normalize -n path/to/board.kicad_sch   # -n / --dry-run: preview only
+kicadtools normalize    path/to/board.kicad_sch   # apply, in place
+```
+
+The dry run prints, per symbol, exactly which keys would be renamed, set, or
+removed. Applying is a surgical text edit (same clean-diff approach as the
+`Intent:Type` write-back) and is idempotent. Fields whose only variants are
+empty are left untouched, and `lib_symbols` template definitions aren't touched —
+only placed instances.
+
 ## BOM Cockpit (GUI)
 
 A PySide6 desktop app for reviewing the intent-type guesses and writing the
@@ -120,7 +139,9 @@ Test schematics live in `tests/data/`.
 - `src/kicadtools/intent.py` — component model: `ElectricalIntent` + typed subclasses
 - `src/kicadtools/classify.py` — guess a component's intent type from its properties
 - `src/kicadtools/components.py` — build the component list from a schematic tree
-- `src/kicadtools/writer.py` — surgical `Intent:Type` write-back into the schematic text
+- `src/kicadtools/partnum.py` — canonical part-number extraction + key-normalization planning
+- `src/kicadtools/writer.py` — surgical property edits (insert/rename/set/remove) in the schematic text
+- `src/kicadtools/normalize.py` — plan + apply part-number key normalization across the tree
 - `src/kicadtools/cli.py` — command-line entry point (`kicadtools`)
 - `src/kicadtools/gui/` — the BOM Cockpit GUI (`kicadtools-cockpit`):
   - `model.py` — `IntentTableModel` + `NaturalSortProxyModel`

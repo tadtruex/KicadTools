@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Type, TypeVar
 
+from kicadtools.partnum import extract_part_numbers
+
 
 def _parse_preferred(value: Any) -> List[str]:
     """Parse a comma-separated string (or any iterable) into a clean list."""
@@ -427,16 +429,17 @@ class SpecificPartIntent(ElectricalIntent):
 
     @classmethod
     def _from_dict_impl(cls, data: Dict[str, Any]) -> "SpecificPartIntent":
-        digikey_pn = data.get("DigiKeyPN")
-        mpn = data.get("mpn")
+        # Read through the alias table so any spelling — DigikeyPN, Digi-Key_PN,
+        # Manufacturer_PN, … — is honoured, not just the two canonical keys.
+        pn = extract_part_numbers(data)
 
-        if digikey_pn is None and mpn is None:
+        if pn.digikey_pn is None and pn.mpn is None:
             raise KeyError("A specific part must define a DigiKey PN or an MPN")
 
         return cls(
             **cls._base_kwargs(data),
-            digikey_pn=digikey_pn,
-            mpn=mpn,
+            digikey_pn=pn.digikey_pn,
+            mpn=pn.mpn,
         )
 
     def description(self) -> str:

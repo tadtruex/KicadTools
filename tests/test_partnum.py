@@ -1,7 +1,20 @@
 """Tests for canonical part-number extraction (kicadtools.partnum)."""
 import pytest
 
-from kicadtools.partnum import PartNumbers, extract_part_numbers
+from kicadtools.partnum import (
+    CANONICAL_KEYS,
+    PartNumbers,
+    extract_part_numbers,
+    normalization_edits,
+)
+
+
+def _by_op(edits):
+    """Group edits by op for order-independent assertions."""
+    out = {"rename": [], "set": [], "remove": []}
+    for e in edits:
+        out[e.op].append(e)
+    return out
 
 
 def test_empty_props_yield_all_none():
@@ -91,3 +104,59 @@ def test_all_four_fields_together():
         "P10.0KLDKR-ND",
         "Stackpole",
     )
+
+
+# ----------------------------------------------------------------------
+# normalization_edits — planning the key rewrites (no schematic I/O)
+# ----------------------------------------------------------------------
+def test_no_edits_when_already_canonical():
+    props = {CANONICAL_KEYS[f]: v for f, v in (
+        ("lcsc", "C1"), ("mpn", "M1"), ("digikey_pn", "D1-ND"),
+        ("manufacturer", "Acme"),
+    )}
+    assert normalization_edits(props) == []
+
+
+def test_empty_variant_is_left_untouched():
+    # No value to relocate -> the planner must not churn a blank property.
+    assert normalization_edits({"DigikeyPN": ""}) == []
+    assert normalization_edits({"Manufacturer_PN": "  "}) == []
+
+
+def test_variant_with_value_is_renamed_to_canonical():
+    edits = normalization_edits({"DigikeyPN": "296-1-ND"})
+    assert len(edits) == 1
+    (e,) = edits
+    assert (e.op, e.old_key, e.key, e.value) == (
+        "rename", "DigikeyPN", "DigiKeyPN", "296-1-ND",
+    )
+
+
+def test_manufacturer_pn_variant_renames_to_mpn():
+    edits = normalization_edits({"Manufacturer_PN": "CL10B472KB8NNNC"})
+    assert [e.op for e in edits] == ["rename"]
+    assert edits[0].key == "MPN" and edits[0].old_key == "Manufacturer_PN"
+
+
+def test_populated_variant_fills_existing_empty_canonical():
+    # Canonical key already present but blank, value under a variant spelling:
+    # set the canonical value and drop the variant (no duplicate left behind).
+    edits = normalization_edits({"DigiKeyPN": "", "Digi-Key_PN": "36-232-ND"})
+    grouped = _by_op(edits)
+    assert len(grouped["set"]) == 1 and grouped["set"][0].value == "36-232-ND"
+    assert grouped["set"][0].key == "DigiKeyPN"
+    assert {e.key for e in grouped["remove"]} == {"Digi-Key_PN"}
+    assert grouped["rename"] == []
+
+
+def test_empty_variant_beside_populated_canonical_is_removed():
+    # Real ECG case: MPN carries the value, an empty Manufacturer_PN sits beside it.
+    edits = normalization_edits({"MPN": "150060RS75000", "Manufacturer_PN": ""})
+    assert [(e.op, e.key) for e in edits] == [("remove", "Manufacturer_PN")]
+
+
+def test_edits_are_pure_and_do_not_mutate_input():
+    props = {"DigikeyPN": "296-1-ND", "MANUFACTURER": "MPD"}
+    before = dict(props)
+    normalization_edits(props)
+    assert props == before

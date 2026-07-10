@@ -15,13 +15,24 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 
 
 def _norm(key: str) -> str:
     """Normalize a property key for alias matching: lower-case, alphanumerics
     only (so ``"Digi-Key_PN "`` and ``"DigiKeyPN"`` both become ``digikeypn``)."""
     return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+# Canonical field -> the single property-key spelling we normalize toward when
+# writing back into a schematic. Reading tolerates every alias below; writing
+# collapses them onto exactly one of these.
+CANONICAL_KEYS: Dict[str, str] = {
+    "lcsc": "LCSC",
+    "mpn": "MPN",
+    "digikey_pn": "DigiKeyPN",
+    "manufacturer": "Manufacturer",
+}
 
 
 # Canonical field -> ordered aliases (already normalized), most-specific first.
@@ -99,3 +110,76 @@ def extract_part_numbers(props: Mapping[str, object]) -> PartNumbers:
         manufacturer=resolved.get("manufacturer"),
         source_key=source_key,
     )
+
+
+@dataclass(frozen=True)
+class PropEdit:
+    """One property edit to apply to a symbol when normalizing its keys.
+
+    * ``rename`` — change property ``old_key``'s key to the canonical ``key``,
+      leaving its value untouched.
+    * ``set``    — set the existing canonical ``key``'s value to ``value``.
+    * ``remove`` — delete the whole ``key`` property node.
+    """
+    op: str                         # "rename" | "set" | "remove"
+    key: str                        # canonical key (rename/set) or key to drop (remove)
+    old_key: Optional[str] = None   # source key, for "rename"
+    value: Optional[str] = None     # the value that ends up under `key` (rename/set)
+
+    def describe(self) -> str:
+        """One-line, human-readable summary for dry-run output."""
+        if self.op == "rename":
+            return f'rename "{self.old_key}" → "{self.key}"  ({self.value})'
+        if self.op == "set":
+            return f'set    "{self.key}" = "{self.value}"'
+        return f'remove "{self.key}"'
+
+
+def normalization_edits(props: Mapping[str, object]) -> List[PropEdit]:
+    """Plan the edits that collapse a symbol's part-number keys onto their
+    canonical spellings (see :data:`CANONICAL_KEYS`).
+
+    For each canonical field that carries a **non-empty** value, the value is
+    moved onto the canonical key and every other variant spelling of that field
+    is dropped. Fields with only empty variants are left untouched (there is no
+    value worth relocating), so the planner never churns blank properties.
+
+    Returns an empty list when the symbol is already canonical — pure analysis,
+    no schematic I/O.
+    """
+    pn = extract_part_numbers(props)
+    values = {
+        "lcsc": pn.lcsc,
+        "mpn": pn.mpn,
+        "digikey_pn": pn.digikey_pn,
+        "manufacturer": pn.manufacturer,
+    }
+    raw_keys = [k for k in props if isinstance(k, str)]
+
+    edits: List[PropEdit] = []
+    for canonical_field, aliases in _ALIASES.items():
+        value = values[canonical_field]
+        if not value:
+            continue  # nothing to preserve — leave any empty variants in place
+        canonical = CANONICAL_KEYS[canonical_field]
+        source = pn.source_key[canonical_field]  # raw key holding the value
+        variants = [k for k in raw_keys if _norm(k) in aliases]
+        others: Tuple[str, ...] = tuple(
+            k for k in variants if k != canonical and k != source
+        )
+
+        if source == canonical:
+            # Already under the canonical key; just clear stray duplicate spellings.
+            edits.extend(PropEdit("remove", k) for k in others)
+        elif canonical in variants:
+            # A (usually empty) canonical property already exists — fill it and
+            # drop the variant the value came from, plus any other spellings.
+            edits.append(PropEdit("set", canonical, value=value))
+            edits.append(PropEdit("remove", source))
+            edits.extend(PropEdit("remove", k) for k in others)
+        else:
+            # Rename the value's key onto the canonical spelling in place.
+            edits.append(PropEdit("rename", canonical, old_key=source, value=value))
+            edits.extend(PropEdit("remove", k) for k in others)
+
+    return edits

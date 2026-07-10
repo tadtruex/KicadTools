@@ -1,7 +1,10 @@
+import pytest
+
 from kicadtools.intent import (
     ConnectorIntent,
     ElectricalIntent,
     LedIntent,
+    SpecificPartIntent,
     TransistorIntent,
 )
 
@@ -118,3 +121,31 @@ def test_connector_without_footprint_hints_is_still_valid():
     assert c.positions is None
     assert c.pitch is None
     assert c.description() == "J1: connector"
+
+
+def _specific(**extra):
+    return {"Reference": "U1", "dnp": False, "in_bom": True,
+            "Intent:Type": "specificpart", **extra}
+
+
+@pytest.mark.parametrize(
+    "key", ["DigiKeyPN", "DigikeyPN", "Digi-Key_PN", "DigiKey PN"]
+)
+def test_specific_part_reads_any_digikey_spelling(key):
+    # The latent mismatch fix: SpecificPartIntent honours every DigiKey spelling,
+    # not just the one canonical key it used to hard-code.
+    c = ElectricalIntent.from_dict(_specific(**{key: "296-1234-5-ND"}))
+    assert isinstance(c, SpecificPartIntent)
+    assert c.digikey_pn == "296-1234-5-ND"
+
+
+def test_specific_part_reads_manufacturer_pn_as_mpn():
+    c = ElectricalIntent.from_dict(_specific(Manufacturer_PN="CL10B472KB8NNNC"))
+    assert isinstance(c, SpecificPartIntent)
+    assert c.mpn == "CL10B472KB8NNNC"
+
+
+def test_specific_part_with_only_empty_variants_is_not_classified():
+    # No usable part number -> falls back to a plain, unclassified intent.
+    c = ElectricalIntent.from_dict(_specific(DigikeyPN=""))
+    assert type(c) is ElectricalIntent

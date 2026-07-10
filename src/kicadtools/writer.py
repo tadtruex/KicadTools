@@ -12,7 +12,7 @@ added lines.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 
 def _find_node_end(text: str, open_paren: int) -> int:
@@ -51,7 +51,7 @@ def _find_node_end(text: str, open_paren: int) -> int:
 def _format_property(key: str, value: str, indent: str) -> str:
     """Render a KiCad ``(property …)`` node, hidden, matching *indent* (the tab
     prefix of its sibling properties)."""
-    esc = value.replace("\\", "\\\\").replace('"', '\\"')
+    esc = _escape(value)
     t = indent
     return (
         f'{t}(property "{key}" "{esc}"\n'
@@ -66,6 +66,50 @@ def _format_property(key: str, value: str, indent: str) -> str:
     )
 
 
+def _read_quoted(text: str, i: int) -> int:
+    """Return the index just past the closing ``"`` of the KiCad string literal
+    that opens at *i* (``text[i]`` must be ``"``), honouring ``\\`` escapes."""
+    if text[i] != '"':
+        raise ValueError("expected a string literal")
+    j = i + 1
+    while j < len(text):
+        ch = text[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == '"':
+            return j + 1
+        j += 1
+    raise ValueError("unterminated string literal")
+
+
+def _symbol_bounds(text: str, symbol_uuid: str) -> Tuple[int, int]:
+    """Return ``(open, end)`` bracketing the placed ``(symbol …)`` block that
+    contains ``(uuid "symbol_uuid")``. Raises ``KeyError`` if the uuid isn't
+    found, ``ValueError`` if it isn't inside a placed symbol."""
+    marker = f'(uuid "{symbol_uuid}")'
+    u = text.find(marker)
+    if u == -1:
+        raise KeyError(f"symbol uuid {symbol_uuid!r} not found")
+
+    # The enclosing placed symbol opens at the nearest preceding one-tab
+    # `(symbol`; its close is the matching paren.
+    sym_open = text.rfind("\n\t(symbol", 0, u)
+    if sym_open == -1:
+        raise ValueError(f"uuid {symbol_uuid!r} is not inside a placed symbol")
+    sym_open = text.index("(", sym_open)
+    return sym_open, _find_node_end(text, sym_open)
+
+
+def _find_property(text: str, sym_open: int, sym_end: int, key: str) -> int:
+    """Return the index of ``(property "key"`` within the symbol block, or -1."""
+    return text.find(f'(property "{key}"', sym_open, sym_end)
+
+
+def _escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def insert_property(text: str, symbol_uuid: str, key: str, value: str) -> str:
     """Return *text* with a new ``(property key value)`` added to the placed
     symbol identified by *symbol_uuid*.
@@ -75,20 +119,10 @@ def insert_property(text: str, symbol_uuid: str, key: str, value: str) -> str:
     indentation. Raises ``KeyError`` if the uuid isn't found, or ``ValueError``
     if the symbol already carries *key*.
     """
-    marker = f'(uuid "{symbol_uuid}")'
-    u = text.find(marker)
-    if u == -1:
-        raise KeyError(f"symbol uuid {symbol_uuid!r} not found")
+    u = text.find(f'(uuid "{symbol_uuid}")')
+    sym_open, sym_end = _symbol_bounds(text, symbol_uuid)
 
-    # Bound the enclosing placed-symbol block: opener is the nearest preceding
-    # one-tab `(symbol`; close is its matching paren.
-    sym_open = text.rfind("\n\t(symbol", 0, u)
-    if sym_open == -1:
-        raise ValueError(f"uuid {symbol_uuid!r} is not inside a placed symbol")
-    sym_open = text.index("(", sym_open)
-    sym_end = _find_node_end(text, sym_open)
-
-    if text.find(f'(property "{key}"', sym_open, sym_end) != -1:
+    if _find_property(text, sym_open, sym_end, key) != -1:
         raise ValueError(f"symbol {symbol_uuid!r} already has a {key!r} property")
 
     ref = text.find('(property "Reference"', u, sym_end)
@@ -100,6 +134,66 @@ def insert_property(text: str, symbol_uuid: str, key: str, value: str) -> str:
     indent = text[line_start:ref]
     node = _format_property(key, value, indent)
     return text[:ref_end] + "\n" + node + text[ref_end:]
+
+
+def set_property_value(text: str, symbol_uuid: str, key: str, value: str) -> str:
+    """Return *text* with the existing *key* property's value replaced by *value*
+    on the placed symbol *symbol_uuid*. Raises ``KeyError`` if the property is
+    absent."""
+    sym_open, sym_end = _symbol_bounds(text, symbol_uuid)
+    p = _find_property(text, sym_open, sym_end, key)
+    if p == -1:
+        raise KeyError(f"symbol {symbol_uuid!r} has no {key!r} property")
+    # The value literal is the first string after the key's own closing quote.
+    val_open = text.index('"', p + len(f'(property "{key}"'))
+    val_end = _read_quoted(text, val_open)
+    return text[:val_open] + f'"{_escape(value)}"' + text[val_end:]
+
+
+def rename_property_key(
+    text: str, symbol_uuid: str, old_key: str, new_key: str
+) -> str:
+    """Return *text* with property *old_key* renamed to *new_key* (value and
+    formatting untouched) on the placed symbol *symbol_uuid*. Raises ``KeyError``
+    if *old_key* is absent, ``ValueError`` if *new_key* already exists."""
+    sym_open, sym_end = _symbol_bounds(text, symbol_uuid)
+    needle = f'(property "{old_key}"'
+    p = text.find(needle, sym_open, sym_end)
+    if p == -1:
+        raise KeyError(f"symbol {symbol_uuid!r} has no {old_key!r} property")
+    if _find_property(text, sym_open, sym_end, new_key) != -1:
+        raise ValueError(
+            f"symbol {symbol_uuid!r} already has a {new_key!r} property"
+        )
+    return text[:p] + f'(property "{_escape(new_key)}"' + text[p + len(needle):]
+
+
+def remove_property(text: str, symbol_uuid: str, key: str) -> str:
+    """Return *text* with the whole *key* property node (and its line) removed
+    from the placed symbol *symbol_uuid*. Raises ``KeyError`` if absent."""
+    sym_open, sym_end = _symbol_bounds(text, symbol_uuid)
+    p = _find_property(text, sym_open, sym_end, key)
+    if p == -1:
+        raise KeyError(f"symbol {symbol_uuid!r} has no {key!r} property")
+    node_end = _find_node_end(text, p)
+    line_start = text.rfind("\n", 0, p) + 1
+    end = node_end + 1 if node_end < len(text) and text[node_end] == "\n" else node_end
+    return text[:line_start] + text[end:]
+
+
+def apply_key_edits(text: str, symbol_uuid: str, edits: Iterable[object]) -> str:
+    """Apply a sequence of :class:`kicadtools.partnum.PropEdit`-shaped edits
+    (``op`` / ``key`` / ``old_key`` / ``value``) to one symbol, in order."""
+    for e in edits:
+        if e.op == "rename":
+            text = rename_property_key(text, symbol_uuid, e.old_key, e.key)
+        elif e.op == "set":
+            text = set_property_value(text, symbol_uuid, e.key, e.value)
+        elif e.op == "remove":
+            text = remove_property(text, symbol_uuid, e.key)
+        else:  # pragma: no cover - guards against a malformed edit
+            raise ValueError(f"unknown edit op {e.op!r}")
+    return text
 
 
 def add_intent_types(text: str, uuid_to_type: Dict[str, str]) -> str:

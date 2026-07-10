@@ -3,6 +3,41 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Part-number key normalization — `kicadtools normalize` (2026-07-10)
+
+Closed the long-standing "DigiKeyPN vs DigikeyPN" mismatch, both on read and on
+write.
+
+- **Read fix** — `SpecificPartIntent._from_dict_impl` now reads through
+  `partnum.extract_part_numbers` instead of hard-coding `data.get("DigiKeyPN")` /
+  `data.get("mpn")`, so any spelling (`DigikeyPN`, `Digi-Key_PN`,
+  `Manufacturer_PN`, …) classifies. ECG's lowercase-k parts were the motivation.
+- **Write** — new `normalize` subcommand rewrites each *placed* symbol's
+  part-number keys to one canonical spelling: `CANONICAL_KEYS` in `partnum.py`
+  (`LCSC` / `MPN` / `DigiKeyPN` / `Manufacturer`). `partnum.normalization_edits`
+  plans the edits (pure, no I/O): for each field with a non-empty value it moves
+  the value onto the canonical key (rename in place, or set-existing-canonical),
+  and drops every other variant (incl. empty duplicates). Fields with only empty
+  variants are left alone — no churn.
+- **Writer primitives** — `writer.py` gained `set_property_value`,
+  `rename_property_key`, `remove_property` (+ shared `_symbol_bounds`), and
+  `apply_key_edits` to run a `PropEdit` plan on one symbol. Same surgical,
+  clean-diff, additions/edits-in-place approach as the Intent:Type insert.
+- **`normalize.py`** — `plan_normalization` (walk tree → per-symbol edits),
+  `compute_file_changes` (group by file, apply in memory → before/after),
+  `write_file_changes`. `lib_symbols` template defs aren't touched (only
+  top-level placed symbols). CLI `main(argv=None)` now takes an argv list.
+- **CLI** — `kicadtools normalize <sch>` applies in place; `-n` / `--dry-run`
+  prints per-symbol what would change and writes nothing.
+- Verified on ECG (69 edits, 64 symbols) and MotorDriver (429 edits across root
+  + subsheet): re-parses valid, idempotent, and lossless — the only multiset
+  change is exact-duplicate values (same PN under two keys) collapsing to one.
+  Tests: `test_normalize.py` + additions to `test_partnum.py`, `test_writer.py`,
+  `test_intent.py`. Full suite **123 passing**.
+
+Not done (by choice): normalizing `lib_symbols` template definitions; a GUI
+surface for this (it's CLI-only for now).
+
 ## BOM Cockpit — LCSC tab (2026-07-09)
 
 Wired the LCSC resolution into the Cockpit GUI as a **second tab**. The window
@@ -182,6 +217,8 @@ kicadtools bom -v ../../ECG/ECG/ECG.kicad_sch
     that lands it `❌`. No board part actually *guesses* transistor yet.
 - Description matching only fires when exactly one type word is present
   (ambiguous → no guess). Revisit if that's too conservative.
-- Latent mismatch: `SpecificPartIntent._from_dict_impl` reads `DigiKeyPN`, but
-  the ECG schematics store the property as `DigikeyPN` (lowercase k). Every ECG
-  part has a `DigikeyPN` — worth normalizing the field lookup.
+- ~~Latent mismatch: `SpecificPartIntent._from_dict_impl` reads `DigiKeyPN`, but
+  the ECG schematics store the property as `DigikeyPN` (lowercase k).~~ **Done
+  (2026-07-10)** — reads through `partnum.extract_part_numbers` now, and the new
+  `kicadtools normalize` command rewrites variant keys to canonical on disk. See
+  the top section.

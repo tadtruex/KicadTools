@@ -7,6 +7,11 @@ from pathlib import Path
 
 from kicadtools.components import bom_components, get_components
 from kicadtools.intent import ElectricalIntent
+from kicadtools.normalize import (
+    compute_file_changes,
+    plan_normalization,
+    write_file_changes,
+)
 from kicadtools.partnum import extract_part_numbers
 from kicadtools.resolve import (
     Cache,
@@ -163,6 +168,39 @@ def _lcsc(args: argparse.Namespace) -> int:
     return 1 if counts[Status.FLAGGED] else 0
 
 
+def _normalize(args: argparse.Namespace) -> int:
+    plan = plan_normalization(args.schematic)
+    if not plan:
+        print("✅  All part-number keys are already canonical — nothing to do.")
+        return 0
+
+    changes = compute_file_changes(plan)
+    total_edits = sum(c.edit_count for c in changes)
+    total_syms = sum(len(c.symbols) for c in changes)
+
+    for ch in changes:
+        print(f"\n{ch.path.name}  ({ch.edit_count} edits, {len(ch.symbols)} symbols)")
+        for sym in ch.symbols:
+            print(f"  {sym.reference}")
+            for edit in sym.edits:
+                print(f"      {edit.describe()}")
+
+    verb = "Would normalize" if args.dry_run else "Normalized"
+    noun = "property" if total_edits == 1 else "properties"
+    print(
+        f"\n{verb} {total_edits} {noun} across {total_syms} "
+        f"symbol(s) in {len(changes)} file(s)."
+    )
+
+    if args.dry_run:
+        print("Dry run — no files written. Re-run without -n/--dry-run to apply.")
+        return 0
+
+    written = write_file_changes(changes)
+    print(f"Wrote {len(written)} file(s).")
+    return 0
+
+
 def _write_report(path, records, resolutions) -> None:
     fields = [
         "Reference", "Value", "Footprint", "Status", "Entry",
@@ -188,7 +226,7 @@ def _write_report(path, records, resolutions) -> None:
             })
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="kicadtools",
         description="Read and analyze KiCad schematics (.kicad_sch).",
@@ -204,6 +242,20 @@ def main() -> int:
         help="Explain each ≈ (guessed) and ❌ (unclassified) component",
     )
     bom.set_defaults(func=_bom)
+
+    norm = sub.add_parser(
+        "normalize",
+        help="Rewrite part-number property keys to their canonical spelling",
+    )
+    norm.add_argument("schematic", type=Path, help="Path to a .kicad_sch file")
+    norm.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Print what would change without writing any files",
+    )
+    norm.set_defaults(func=_normalize)
 
     lcsc = sub.add_parser(
         "lcsc",
@@ -239,7 +291,7 @@ def main() -> int:
     )
     lcsc.set_defaults(func=_lcsc)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     return args.func(args)
 
 

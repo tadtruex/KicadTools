@@ -3,13 +3,19 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
+import pytest
 import sexpdata
 
 from kicadtools.components import get_components
 from kicadtools.intent import LedIntent
+from kicadtools.partnum import PropEdit
 from kicadtools.writer import (
     add_intent_types,
+    apply_key_edits,
     insert_property,
+    remove_property,
+    rename_property_key,
+    set_property_value,
     sibling_dest,
     write_back,
 )
@@ -130,3 +136,96 @@ def test_add_intent_types_applies_many():
     assert out.count('(property "Intent:Type"') == orig.count(
         '(property "Intent:Type"'
     ) + len(picks)
+
+
+# ----------------------------------------------------------------------
+# In-place property edits: rename / set / remove / apply
+# ----------------------------------------------------------------------
+UUID = "abc-0001"
+
+
+def _symbol(*prop_lines: str) -> str:
+    """A minimal but structurally real placed-symbol schematic for edit tests."""
+    props = "\n".join(prop_lines)
+    return (
+        "(kicad_sch\n"
+        "\t(symbol\n"
+        '\t\t(lib_id "Device:R")\n'
+        f'\t\t(uuid "{UUID}")\n'
+        '\t\t(property "Reference" "R1"\n'
+        "\t\t\t(at 0 0 0)\n"
+        "\t\t\t(effects (font (size 1.27 1.27)) (hide yes))\n"
+        "\t\t)\n"
+        f"{props}\n"
+        "\t)\n"
+        ")\n"
+    )
+
+
+def _prop(key: str, value: str) -> str:
+    return (
+        f'\t\t(property "{key}" "{value}"\n'
+        "\t\t\t(at 1 2 90)\n"
+        "\t\t\t(effects (font (size 1.27 1.27)) (hide yes))\n"
+        "\t\t)"
+    )
+
+
+def test_rename_property_key_preserves_value_and_position():
+    text = _symbol(_prop("DigikeyPN", "296-1-ND"))
+    out = rename_property_key(text, UUID, "DigikeyPN", "DigiKeyPN")
+    assert '(property "DigikeyPN"' not in out
+    assert '(property "DigiKeyPN" "296-1-ND"' in out
+    assert "(at 1 2 90)" in out  # position untouched
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
+
+
+def test_rename_onto_existing_key_raises():
+    text = _symbol(_prop("DigikeyPN", "296-1-ND"), _prop("DigiKeyPN", ""))
+    with pytest.raises(ValueError):
+        rename_property_key(text, UUID, "DigikeyPN", "DigiKeyPN")
+
+
+def test_set_property_value_replaces_only_the_value():
+    text = _symbol(_prop("DigiKeyPN", ""))
+    out = set_property_value(text, UUID, "DigiKeyPN", "36-232-ND")
+    assert '(property "DigiKeyPN" "36-232-ND"' in out
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
+
+
+def test_remove_property_deletes_whole_node():
+    text = _symbol(_prop("Manufacturer_PN", ""), _prop("LCSC", "C1"))
+    out = remove_property(text, UUID, "Manufacturer_PN")
+    assert "Manufacturer_PN" not in out
+    assert '(property "LCSC" "C1"' in out  # sibling survives
+    # exactly one property node fewer, and still valid.
+    assert out.count("(property ") == text.count("(property ") - 1
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
+
+
+def test_missing_property_raises():
+    text = _symbol(_prop("LCSC", "C1"))
+    for fn in (
+        lambda: set_property_value(text, UUID, "MPN", "x"),
+        lambda: rename_property_key(text, UUID, "MPN", "MPN2"),
+        lambda: remove_property(text, UUID, "MPN"),
+    ):
+        with pytest.raises(KeyError):
+            fn()
+
+
+def test_apply_key_edits_runs_a_mixed_plan():
+    text = _symbol(
+        _prop("DigikeyPN", "296-1-ND"),   # rename
+        _prop("MPN", "M1"),               # canonical, kept
+        _prop("Manufacturer_PN", ""),     # remove (empty dup of MPN)
+    )
+    edits = [
+        PropEdit("rename", "DigiKeyPN", old_key="DigikeyPN", value="296-1-ND"),
+        PropEdit("remove", "Manufacturer_PN"),
+    ]
+    out = apply_key_edits(text, UUID, edits)
+    assert '(property "DigiKeyPN" "296-1-ND"' in out
+    assert '(property "MPN" "M1"' in out
+    assert "Manufacturer_PN" not in out
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
