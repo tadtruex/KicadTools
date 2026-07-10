@@ -3,6 +3,28 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## BOM Cockpit — LCSC tab (2026-07-09)
+
+Wired the LCSC resolution into the Cockpit GUI as a **second tab**. The window
+is now a `QTabWidget`: "Intents" (the original table) + "LCSC".
+
+- `gui/lcsc.py` — `LcscTableModel` (columns Ref · LCSC · DigiKey · MPN · Status,
+  all sortable via the shared `NaturalSortProxyModel`), populated instantly from
+  the schematic's existing part-number fields (no network on open). `ResolveWorker`
+  (`QObject` on a `QThread`) drives `resolve.Resolver`; emits `progress` →
+  status bar and `row_resolved(row, Resolution)` → `apply_resolution`, so rows
+  fill in as they land and the UI never blocks.
+- `gui/main_window.py` — split into `_build_intent_tab` / `_build_lcsc_tab`;
+  `_make_table` factory (sortable + drag-resize). "Resolve LCSC" button starts
+  the worker; warns if DigiKey creds are missing; uses the shared cache at
+  `~/.kicadtools/lcsc_cache.sqlite` (opened inside the worker thread).
+- Tests: `test_gui_lcsc.py` (offline model tests). Full suite **97 passing**
+  (GUI tests now run — PySide6 6.11 installed into `.venv` via the `gui` extra).
+
+Deliberately NOT done yet: writing the resolved LCSC back into the schematic
+(`writer.insert_property` supports it — same surgical path as Intent:Type); the
+tab is read-only display for now, matching the CLI's report-only stance.
+
 ## LCSC resolution — `kicadtools lcsc` (2026-07-09)
 
 Goal: make sure every placed BOM part has an **LCSC** (JLCPCB) number. Pipeline
