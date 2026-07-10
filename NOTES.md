@@ -25,6 +25,37 @@ Deliberately NOT done yet: writing the resolved LCSC back into the schematic
 (`writer.insert_property` supports it — same surgical path as Intent:Type); the
 tab is read-only display for now, matching the CLI's report-only stance.
 
+**Next step — give the LCSC tab the Intents tab's check/accept + Save flow.**
+Mirror the Intents tab: an *Accept* checkbox on each row whose resolution
+discovered something not already in the schematic, plus *Accept Checked* /
+*Accept All* buttons that flip an accepted row to a checkmark. Then the existing
+**File ▸ Save** should, in one action, surgically insert every accepted new
+property across *both* tabs.
+
+Concretely:
+- Checkable rows are the ones where resolution produced a value the symbol
+  doesn't already carry — primarily a newly resolved `LCSC` (status `➕`), and
+  optionally the `MPN` discovered via DigiKey when the symbol had only a DigiKey
+  PN. Rows that already had an LCSC (`✅`) or that flagged (`⚑`) aren't checkable.
+- `LcscTableModel` grows the same shape as `IntentTableModel`: `_checked` /
+  `_accepted` sets, `flags()` marking the Accept column `ItemIsUserCheckable`,
+  `setData` for the checkbox, `accept_checked()` / `accept_all()`, and an
+  `accepted_edits()` returning `{source_file: {symbol_uuid: {key: value}}}`.
+  Provenance is already on each `PartRecord` (`source_file`, `symbol_uuid`), so
+  keep those on the row when building it.
+- `writer.insert_property` is already generic (key/value) and additions-only, so
+  writing an `LCSC` (and/or `MPN`) property reuses it directly. One wrinkle to
+  handle: a symbol may already carry an *empty* `LCSC` property — `insert_property`
+  raises if the key exists. Add a set-or-insert helper (update the value in place
+  when the property is present-but-empty, insert when absent) rather than only
+  inserting. Watch the field-spelling variants too (`partnum` normalizes on
+  read, but on *write* we must pick one canonical key, e.g. `LCSC`, and target
+  the existing property if the symbol already has one under a variant spelling).
+- `main_window._write` currently gathers `self.model.accepted_edits()` only.
+  Extend it to merge edits from both models — `{file: {uuid: {key: value}}}` —
+  and write once, then reload the board so accepted rows re-read as `✅`.
+  Consider promoting write-back to the CLI in parallel (`kicadtools lcsc --write`).
+
 ## LCSC resolution — `kicadtools lcsc` (2026-07-09)
 
 Goal: make sure every placed BOM part has an **LCSC** (JLCPCB) number. Pipeline
