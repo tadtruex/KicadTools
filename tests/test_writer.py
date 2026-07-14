@@ -11,13 +11,16 @@ from kicadtools.intent import LedIntent
 from kicadtools.partnum import PropEdit
 from kicadtools.writer import (
     add_intent_types,
+    add_properties,
     apply_key_edits,
     insert_property,
     remove_property,
     rename_property_key,
+    set_or_insert_property,
     set_property_value,
     sibling_dest,
     write_back,
+    write_properties,
 )
 
 DATA = Path(__file__).parent / "data"
@@ -212,6 +215,46 @@ def test_missing_property_raises():
     ):
         with pytest.raises(KeyError):
             fn()
+
+
+def test_set_or_insert_updates_present_empty_property():
+    # The LCSC write-back's core wrinkle: a symbol already carrying an *empty*
+    # LCSC property must be filled in place, not duplicated.
+    text = _symbol(_prop("LCSC", ""))
+    out = set_or_insert_property(text, UUID, "LCSC", "C541465")
+    assert '(property "LCSC" "C541465"' in out
+    assert out.count('(property "LCSC"') == 1  # updated, not duplicated
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
+
+
+def test_set_or_insert_inserts_when_absent():
+    text = _symbol(_prop("MPN", "M1"))
+    out = set_or_insert_property(text, UUID, "LCSC", "C111")
+    assert '(property "LCSC" "C111"' in out
+    assert out.count("(property ") == text.count("(property ") + 1
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
+
+
+def test_add_properties_applies_mixed_keys_across_symbols():
+    orig = BOARD.read_text(encoding="utf-8")
+    u5 = _guessed_uuid(BOARD, "U5")
+    plan = {u5: {"Intent:Type": "led", "LCSC": "C999"}}
+    out = add_properties(orig, plan)
+    block_start = out.index(f'(uuid "{u5}")')
+    block = out[block_start : block_start + 4000]
+    assert '(property "Intent:Type" "led"' in block
+    assert '(property "LCSC" "C999"' in block
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
+
+
+def test_write_properties_writes_in_place(tmp_path):
+    work = tmp_path / BOARD.name
+    shutil.copy(BOARD, work)
+    u5 = _guessed_uuid(BOARD, "U5")
+    write_properties(work, {u5: {"LCSC": "C999"}})
+    out = work.read_text(encoding="utf-8")
+    assert '(property "LCSC" "C999"' in out
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
 
 
 def test_apply_key_edits_runs_a_mixed_plan():

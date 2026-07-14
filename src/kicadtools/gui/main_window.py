@@ -1,6 +1,7 @@
 """The BOM Cockpit main window."""
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -98,9 +99,15 @@ class MainWindow(QMainWindow):
 
         self.resolve_btn = QPushButton("Resolve LCSC")
         self.resolve_btn.clicked.connect(self._resolve_lcsc)
+        lcsc_accept_checked = QPushButton("Accept Checked")
+        lcsc_accept_all = QPushButton("Accept All")
+        lcsc_accept_checked.clicked.connect(self._lcsc_accept_checked)
+        lcsc_accept_all.clicked.connect(self._lcsc_accept_all)
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.resolve_btn)
+        buttons.addWidget(lcsc_accept_checked)
+        buttons.addWidget(lcsc_accept_all)
         buttons.addStretch(1)
 
         tab = QWidget()
@@ -221,29 +228,56 @@ class MainWindow(QMainWindow):
         self.model.accept_all()
         self._refresh_status()
 
+    def _lcsc_accept_checked(self) -> None:
+        self.lcsc_model.accept_checked()
+
+    def _lcsc_accept_all(self) -> None:
+        self.lcsc_model.accept_all()
+
     # ---- write -------------------------------------------------------
+    def _merged_edits(self) -> "dict[Path, dict[str, dict[str, str]]]":
+        """Merge accepted edits from both tabs into one
+        ``{file: {uuid: {key: value}}}`` plan. The Intents tab contributes an
+        ``Intent:Type`` per accepted guess; the LCSC tab contributes resolved
+        ``LCSC`` / ``MPN`` values. A symbol touched by both tabs gets both."""
+        merged: dict[Path, dict[str, dict[str, str]]] = defaultdict(dict)
+        for src, uuid_to_type in self.model.accepted_edits().items():
+            for uuid, intent_type in uuid_to_type.items():
+                merged[src].setdefault(uuid, {})["Intent:Type"] = intent_type
+        for src, uuid_to_props in self.lcsc_model.accepted_edits().items():
+            for uuid, props in uuid_to_props.items():
+                merged[src].setdefault(uuid, {}).update(props)
+        return dict(merged)
+
     def _write(self) -> None:
-        edits = self.model.accepted_edits()
+        edits = self._merged_edits()
         if not edits:
             QMessageBox.information(
-                self, "Nothing to write", "Accept one or more guesses first."
+                self,
+                "Nothing to write",
+                "Accept one or more guesses (Intents) or resolved LCSC numbers first.",
             )
             return
-        n = sum(len(m) for m in edits.values())
-        files = "\n".join(f"  • {p.name}  ({len(m)} part{'s' * (len(m) != 1)})" for p, m in edits.items())
+        # Count individual properties, not just symbols — a symbol may carry both
+        # an Intent:Type and an LCSC.
+        n = sum(len(props) for m in edits.values() for props in m.values())
+        files = "\n".join(
+            f"  • {p.name}  ({len(m)} part{'s' * (len(m) != 1)})"
+            for p, m in edits.items()
+        )
         noun = "property" if n == 1 else "properties"
         resp = QMessageBox.question(
             self,
-            "Write Intent:Type properties",
-            f"Write {n} accepted Intent:Type {noun} into these files, in place?\n\n"
+            "Write properties",
+            f"Write {n} accepted {noun} into these files, in place?\n\n"
             f"{files}\n\nThe change is a minimal insertion; git is your backstop.",
             QMessageBox.Yes | QMessageBox.No,
         )
         if resp != QMessageBox.Yes:
             return
         try:
-            for src, uuid_to_type in edits.items():
-                writer.write_back(src, uuid_to_type)
+            for src, uuid_to_props in edits.items():
+                writer.write_properties(src, uuid_to_props)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Write failed", str(exc))
             return

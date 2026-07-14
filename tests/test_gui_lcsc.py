@@ -7,6 +7,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt  # noqa: E402
 
 from kicadtools.gui.lcsc import (  # noqa: E402
+    STATUS_ACCEPTED,
     STATUS_FLAGGED,
     STATUS_HAS,
     STATUS_NEEDS,
@@ -33,6 +34,20 @@ def _rec(ref, **props):
     return PartRecord(ref, props, BOARD, f"uuid-{ref}")
 
 
+def _resolution(ref, uuid, status, *, lcsc=None, resolved_mpn=None, reason="", dk="P-ND"):
+    return Resolution(
+        reference=ref,
+        part=PartNumbers(digikey_pn=dk),
+        status=status,
+        entry="digikey",
+        reason=reason,
+        source_file=BOARD,
+        symbol_uuid=uuid,
+        lcsc=lcsc,
+        resolved_mpn=resolved_mpn,
+    )
+
+
 def test_initial_status_classification():
     recs = [
         _rec("C1", LCSC="C541465"),
@@ -41,51 +56,104 @@ def test_initial_status_classification():
         _rec("J1", Value="conn"),
     ]
     m = LcscTableModel(recs)
-    statuses = [m.data(m.index(r, 4), Qt.DisplayRole) for r in range(4)]
+    statuses = [m.data(m.index(r, 5), Qt.DisplayRole) for r in range(4)]
     assert statuses == [STATUS_HAS, STATUS_NEEDS, STATUS_NEEDS, STATUS_NONE]
 
 
 def test_columns_show_part_numbers():
     m = LcscTableModel([_rec("R1", MPN="RMCF0603FT100K", **{"DigiKey PN": "P1-ND"})])
-    assert m.headerData(0, Qt.Horizontal, Qt.DisplayRole) == "Ref"
-    assert m.columnCount() == 5
-    row = [m.data(m.index(0, c), Qt.DisplayRole) for c in range(5)]
-    assert row[0] == "R1"          # Ref
-    assert row[1] == ""            # LCSC (none yet)
-    assert row[2] == "P1-ND"       # DigiKey
-    assert row[3] == "RMCF0603FT100K"  # MPN
+    assert m.headerData(0, Qt.Horizontal, Qt.DisplayRole) == "Accept"
+    assert m.headerData(1, Qt.Horizontal, Qt.DisplayRole) == "Ref"
+    assert m.columnCount() == 6
+    row = [m.data(m.index(0, c), Qt.DisplayRole) for c in range(6)]
+    assert row[0] == ""            # Accept (checkbox, no text)
+    assert row[1] == "R1"          # Ref
+    assert row[2] == ""            # LCSC (none yet)
+    assert row[3] == "P1-ND"       # DigiKey
+    assert row[4] == "RMCF0603FT100K"  # MPN
 
 
 def test_apply_resolution_fills_lcsc_and_mpn():
     m = LcscTableModel([_rec("U1", **{"DigiKey PN": "P100-ND"})])
-    res = Resolution(
-        reference="U1",
-        part=PartNumbers(digikey_pn="P100-ND"),
-        status=Status.RESOLVED,
-        entry="digikey",
-        reason="LCSC C123 ← MPN ABC",
-        source_file=BOARD,
-        symbol_uuid="uuid-U1",
-        lcsc="C123",
-        resolved_mpn="ABC",
+    res = _resolution(
+        "U1", "uuid-U1", Status.RESOLVED,
+        lcsc="C123", resolved_mpn="ABC", reason="LCSC C123 ← MPN ABC", dk="P100-ND",
     )
     m.apply_resolution(0, res)
-    assert m.data(m.index(0, 1), Qt.DisplayRole) == "C123"   # LCSC
-    assert m.data(m.index(0, 3), Qt.DisplayRole) == "ABC"    # discovered MPN
-    assert m.data(m.index(0, 4), Qt.DisplayRole) == STATUS_RESOLVED
-    assert m.data(m.index(0, 4), Qt.ToolTipRole) == "LCSC C123 ← MPN ABC"
+    assert m.data(m.index(0, 2), Qt.DisplayRole) == "C123"   # LCSC
+    assert m.data(m.index(0, 4), Qt.DisplayRole) == "ABC"    # discovered MPN
+    assert m.data(m.index(0, 5), Qt.DisplayRole) == STATUS_RESOLVED
+    assert m.data(m.index(0, 5), Qt.ToolTipRole) == "LCSC C123 ← MPN ABC"
 
 
 def test_apply_resolution_flagged_keeps_blank_lcsc():
     m = LcscTableModel([_rec("U1", **{"DigiKey PN": "bad-ND"})])
-    res = Resolution(
-        reference="U1", part=PartNumbers(digikey_pn="bad-ND"),
-        status=Status.FLAGGED, entry="digikey",
-        reason="no match", source_file=BOARD, symbol_uuid="uuid-U1",
-    )
+    res = _resolution("U1", "uuid-U1", Status.FLAGGED, reason="no match", dk="bad-ND")
     m.apply_resolution(0, res)
-    assert m.data(m.index(0, 1), Qt.DisplayRole) == ""
-    assert m.data(m.index(0, 4), Qt.DisplayRole) == STATUS_FLAGGED
+    assert m.data(m.index(0, 2), Qt.DisplayRole) == ""
+    assert m.data(m.index(0, 5), Qt.DisplayRole) == STATUS_FLAGGED
+
+
+# ---- accept / write-back flow ---------------------------------------
+
+def test_only_resolved_rows_become_checkable():
+    m = LcscTableModel([
+        _rec("C1", LCSC="C541465"),                    # already has → OK
+        _rec("R1", MPN="RMCF0603FT100K"),              # will resolve
+        _rec("U1", **{"DigiKey PN": "bad-ND"}),        # will flag
+    ])
+    accept = lambda r: bool(m.flags(m.index(r, 0)) & Qt.ItemIsUserCheckable)
+    # Nothing is checkable before resolution.
+    assert [accept(r) for r in range(3)] == [False, False, False]
+
+    m.apply_resolution(0, _resolution("C1", "uuid-C1", Status.OK, lcsc="C541465"))
+    m.apply_resolution(1, _resolution("R1", "uuid-R1", Status.RESOLVED, lcsc="C111"))
+    m.apply_resolution(2, _resolution("U1", "uuid-U1", Status.FLAGGED))
+    # Only the RESOLVED row (with a new value) is checkable.
+    assert [accept(r) for r in range(3)] == [False, True, False]
+
+
+def test_check_accept_and_edits():
+    m = LcscTableModel([
+        _rec("R1", MPN="RMCF0603FT100K"),
+        _rec("U1", **{"DigiKey PN": "P100-ND"}),
+    ])
+    m.apply_resolution(0, _resolution("R1", "uuid-R1", Status.RESOLVED, lcsc="C111"))
+    m.apply_resolution(
+        1, _resolution("U1", "uuid-U1", Status.RESOLVED, lcsc="C222",
+                       resolved_mpn="MPN-U1", dk="P100-ND"),
+    )
+
+    # Check R1 only, accept the checked row.
+    assert m.setData(m.index(0, 0), Qt.Checked, Qt.CheckStateRole) is True
+    m.accept_checked()
+    assert m.data(m.index(0, 5), Qt.DisplayRole) == STATUS_ACCEPTED
+    # An accepted row is no longer checkable / has no check state.
+    assert not (m.flags(m.index(0, 0)) & Qt.ItemIsUserCheckable)
+    assert m.data(m.index(0, 0), Qt.CheckStateRole) is None
+
+    edits = m.accepted_edits()
+    assert edits == {BOARD: {"uuid-R1": {"LCSC": "C111"}}}
+
+    # Accept the rest; U1 discovered an MPN it lacked, so both keys are written.
+    m.accept_all()
+    assert m.accepted_edits() == {
+        BOARD: {
+            "uuid-R1": {"LCSC": "C111"},
+            "uuid-U1": {"LCSC": "C222", "MPN": "MPN-U1"},
+        }
+    }
+
+
+def test_discovered_mpn_not_written_when_symbol_already_had_one():
+    # U1 already carries an MPN, so resolution's resolved_mpn isn't a new value.
+    m = LcscTableModel([_rec("U1", MPN="EXISTING-MPN")])
+    m.apply_resolution(
+        0, _resolution("U1", "uuid-U1", Status.RESOLVED, lcsc="C222",
+                       resolved_mpn="EXISTING-MPN"),
+    )
+    m.accept_all()
+    assert m.accepted_edits() == {BOARD: {"uuid-U1": {"LCSC": "C222"}}}
 
 
 def test_loads_real_board_and_sorts_by_ref():
@@ -94,8 +162,8 @@ def test_loads_real_board_and_sorts_by_ref():
     assert m.rowCount() > 0
     proxy = NaturalSortProxyModel()
     proxy.setSourceModel(m)
-    proxy.sort(0, Qt.AscendingOrder)  # Ref column
-    refs = [proxy.data(proxy.index(r, 0), Qt.DisplayRole) for r in range(proxy.rowCount())]
+    proxy.sort(1, Qt.AscendingOrder)  # Ref column
+    refs = [proxy.data(proxy.index(r, 1), Qt.DisplayRole) for r in range(proxy.rowCount())]
     caps = [r for r in refs if r.startswith("C")]
     if "C2" in caps and "C10" in caps:
         assert caps.index("C2") < caps.index("C10")

@@ -150,6 +150,22 @@ def set_property_value(text: str, symbol_uuid: str, key: str, value: str) -> str
     return text[:val_open] + f'"{_escape(value)}"' + text[val_end:]
 
 
+def set_or_insert_property(
+    text: str, symbol_uuid: str, key: str, value: str
+) -> str:
+    """Return *text* with *key* set to *value* on the placed symbol
+    *symbol_uuid*: update the value in place if the property already exists
+    (including a present-but-empty one), otherwise insert a new one.
+
+    This is the set-or-insert the LCSC write-back needs — a symbol may already
+    carry an empty ``LCSC`` property, which :func:`insert_property` would refuse.
+    """
+    sym_open, sym_end = _symbol_bounds(text, symbol_uuid)
+    if _find_property(text, sym_open, sym_end, key) != -1:
+        return set_property_value(text, symbol_uuid, key, value)
+    return insert_property(text, symbol_uuid, key, value)
+
+
 def rename_property_key(
     text: str, symbol_uuid: str, old_key: str, new_key: str
 ) -> str:
@@ -201,6 +217,35 @@ def add_intent_types(text: str, uuid_to_type: Dict[str, str]) -> str:
     for uuid, intent_type in uuid_to_type.items():
         text = insert_property(text, uuid, "Intent:Type", intent_type)
     return text
+
+
+def add_properties(text: str, uuid_to_props: Dict[str, Dict[str, str]]) -> str:
+    """Apply a ``{uuid: {key: value}}`` plan to one file's text, set-or-insert.
+
+    Generic counterpart to :func:`add_intent_types`: each property is updated in
+    place when the symbol already carries it (even empty) and inserted otherwise,
+    so mixed Intent:Type + LCSC/MPN write-backs share one surgical pass.
+    """
+    for uuid, props in uuid_to_props.items():
+        for key, value in props.items():
+            text = set_or_insert_property(text, uuid, key, value)
+    return text
+
+
+def write_properties(
+    path: Path,
+    uuid_to_props: Dict[str, Dict[str, str]],
+    *,
+    dest: Optional[Callable[[Path], Path]] = None,
+) -> Path:
+    """Read *path*, set-or-insert every ``{uuid: {key: value}}`` property, and
+    write the result (in place by default; pass *dest* to redirect). Returns the
+    path written."""
+    path = Path(path)
+    updated = add_properties(path.read_text(encoding="utf-8"), uuid_to_props)
+    target = dest(path) if dest is not None else path
+    target.write_text(updated, encoding="utf-8")
+    return target
 
 
 def write_back(

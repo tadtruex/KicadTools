@@ -3,6 +3,43 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## LCSC write-back — Cockpit LCSC tab now Accept + Save (2026-07-13)
+
+The planned next step from the LCSC-tab section below is done: the LCSC tab got
+the Intents tab's check/accept + Save flow, so a resolved LCSC (and any MPN
+discovered via DigiKey) can be written surgically back into the schematic.
+
+- **`writer.py`** — new `set_or_insert_property` (update a present-but-empty
+  property in place, else insert — handles the "symbol already carries an empty
+  `LCSC`" wrinkle `insert_property` couldn't) plus generic `add_properties` /
+  `write_properties` over a `{uuid: {key: value}}` plan. `write_back` /
+  `add_intent_types` kept for the existing Intent path + their tests.
+- **`gui/lcsc.py`** — `LcscTableModel` grew an **Accept** column at index 0
+  (columns are now `Accept · Ref · LCSC · DigiKey · MPN · Status`, so any code
+  indexing by column shifted +1). Rows carry write-back provenance
+  (`source_file`, `symbol_uuid`, `had_mpn`) and a `pending` `{canonical_key:
+  value}` dict. `apply_resolution` fills `pending` only for `Status.RESOLVED`:
+  the resolved `LCSC` always, and the DigiKey-discovered `MPN` only when the
+  symbol lacked one. Checkable == has pending & not yet accepted; mirrors the
+  Intent model's `_checked`/`_accepted`, `accept_checked`/`accept_all`,
+  `accepted_edits()` → `{file: {uuid: {key: value}}}`. New status `✔ accepted`.
+- **`gui/main_window.py`** — LCSC tab gets Accept Checked / Accept All buttons.
+  `_write` now merges **both** tabs via `_merged_edits()` into one
+  `{file: {uuid: {key: value}}}` plan (Intent:Type + LCSC/MPN; a symbol touched
+  by both gets both) and writes once with `writer.write_properties`, then
+  reloads so accepted rows re-read as ✅.
+- Tests: writer primitives + accept-flow model tests added. Suite **130
+  passing**. Also verified headless end-to-end on a temp copy of MotorDriver:
+  resolve→accept→Save writes `(property "LCSC" …)` into the symbol, the file
+  reparses, and the reloaded row reads ✅.
+
+Still deliberately NOT done: a CLI `kicadtools lcsc --write` (the writer plumbing
+— `write_properties` + assembling edits from `Resolution`s — is all there; just
+not wired to the CLI yet). Field-spelling on write targets the canonical `LCSC`
+key; a symbol carrying an *empty* variant spelling (e.g. `lcsc`) would get a new
+`LCSC` alongside it rather than filling the variant — run `kicadtools normalize`
+first if that matters.
+
 ## Part-number key normalization — `kicadtools normalize` (2026-07-10)
 
 Closed the long-standing "DigiKeyPN vs DigikeyPN" mismatch, both on read and on

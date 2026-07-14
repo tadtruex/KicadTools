@@ -8,16 +8,19 @@ worker thread and streams each result back into the model as it lands.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Set
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 
-from kicadtools.partnum import extract_part_numbers
+from kicadtools.partnum import CANONICAL_KEYS, extract_part_numbers
 from kicadtools.resolve import Cache, PartRecord, Resolution, Resolver, Status
 
-_LCSC_COLUMNS = ["Ref", "LCSC", "DigiKey", "MPN", "Status"]
+# An "Accept" checkbox leads the row (mirroring the Intents tab), then the
+# read-only part-number columns.
+_LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Status"]
 
 # Row status text. The pre-resolution states describe what the schematic already
 # has; the post-resolution states mirror the CLI's ✅ / ➕ / ⚑.
@@ -26,6 +29,7 @@ STATUS_NEEDS = "… needs lookup"
 STATUS_NONE = "⚑ no part #"
 STATUS_RESOLVED = "➕ resolved"
 STATUS_FLAGGED = "⚑ flagged"
+STATUS_ACCEPTED = "✔ accepted"
 
 _RESULT_STATUS = {
     Status.OK: STATUS_HAS,
@@ -42,6 +46,13 @@ class LcscRow:
     mpn: str
     status: str
     reason: str = ""
+    # Write-back provenance, carried from the source PartRecord.
+    source_file: Optional[Path] = None
+    symbol_uuid: Optional[str] = None
+    had_mpn: bool = False  # did the symbol already carry an MPN before resolving?
+    # Newly discovered values the symbol doesn't already have, as canonical
+    # {key: value} ready for write-back. Empty until resolution finds something.
+    pending: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_record(cls, record: PartRecord) -> "LcscRow":
@@ -58,21 +69,36 @@ class LcscRow:
             digikey_pn=pn.digikey_pn or "",
             mpn=pn.mpn or "",
             status=status,
+            source_file=record.source_file,
+            symbol_uuid=record.symbol_uuid,
+            had_mpn=bool(pn.mpn),
         )
 
 
 class LcscTableModel(QAbstractTableModel):
-    """Table of Ref · LCSC · DigiKey · MPN · Status, one row per BOM part."""
+    """Table of Accept · Ref · LCSC · DigiKey · MPN · Status, one row per BOM
+    part. Rows whose resolution discovered a value the schematic doesn't already
+    carry become checkable; accepting them queues that value for write-back."""
 
     def __init__(self, records: Optional[Sequence[PartRecord]] = None):
         super().__init__()
         self._rows: List[LcscRow] = [LcscRow.from_record(r) for r in records or []]
+        self._checked: Set[int] = set()
+        self._accepted: Set[int] = set()
 
     # ---- loading -----------------------------------------------------
     def load(self, records: Sequence[PartRecord]) -> None:
         self.beginResetModel()
         self._rows = [LcscRow.from_record(r) for r in records]
+        self._checked.clear()
+        self._accepted.clear()
         self.endResetModel()
+
+    # ---- checkability ------------------------------------------------
+    def _checkable(self, row: int) -> bool:
+        """A row is checkable once resolution has found a new value for it and it
+        hasn't been accepted yet."""
+        return row not in self._accepted and bool(self._rows[row].pending)
 
     # ---- Qt dimensions ----------------------------------------------
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -89,23 +115,51 @@ class LcscTableModel(QAbstractTableModel):
     def flags(self, index: QModelIndex):
         if not index.isValid():
             return Qt.NoItemFlags
-        return Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        f = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        if index.column() == 0 and self._checkable(index.row()):
+            f |= Qt.ItemIsUserCheckable
+        return f
+
+    def _status_text(self, row: int) -> str:
+        return STATUS_ACCEPTED if row in self._accepted else self._rows[row].status
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
         if not index.isValid():
             return None
-        row = self._rows[index.row()]
+        r, col = index.row(), index.column()
+        row = self._rows[r]
+
+        if role == Qt.CheckStateRole and col == 0:
+            if not self._checkable(r):
+                return None
+            return Qt.Checked if r in self._checked else Qt.Unchecked
+
         if role == Qt.ToolTipRole:
             return row.reason or None
+
         if role == Qt.DisplayRole:
             return (
+                "",  # Accept column carries a checkbox, no text
                 row.reference,
                 row.lcsc,
                 row.digikey_pn,
                 row.mpn,
-                row.status,
-            )[index.column()]
+                self._status_text(r),
+            )[col]
         return None
+
+    def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:
+        if role == Qt.CheckStateRole and index.column() == 0 and self._checkable(index.row()):
+            row = index.row()
+            # The view passes an int; tests may pass a Qt.CheckState. Normalise.
+            state = value if isinstance(value, Qt.CheckState) else Qt.CheckState(value)
+            if state == Qt.Checked:
+                self._checked.add(row)
+            else:
+                self._checked.discard(row)
+            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+            return True
+        return False
 
     # ---- results -----------------------------------------------------
     def apply_resolution(self, row: int, result: Resolution) -> None:
@@ -119,9 +173,50 @@ class LcscTableModel(QAbstractTableModel):
             r.mpn = result.resolved_mpn
         r.status = _RESULT_STATUS[result.status]
         r.reason = result.reason
+        # Queue whatever resolution newly discovered for write-back: a resolved
+        # LCSC (the symbol had none, else it'd be Status.OK) and, if DigiKey
+        # surfaced an MPN the symbol lacked, that MPN too.
+        pending: Dict[str, str] = {}
+        if result.status == Status.RESOLVED:
+            if result.lcsc:
+                pending[CANONICAL_KEYS["lcsc"]] = result.lcsc
+            if result.resolved_mpn and not r.had_mpn:
+                pending[CANONICAL_KEYS["mpn"]] = result.resolved_mpn
+        r.pending = pending
         self.dataChanged.emit(
             self.index(row, 0), self.index(row, self.columnCount() - 1)
         )
+
+    # ---- accept ------------------------------------------------------
+    def _checkable_rows(self) -> List[int]:
+        return [r for r in range(len(self._rows)) if self._checkable(r)]
+
+    def accept_checked(self) -> None:
+        self._accept({r for r in self._checked if self._checkable(r)})
+
+    def accept_all(self) -> None:
+        self._accept(set(self._checkable_rows()))
+
+    def _accept(self, rows: Set[int]) -> None:
+        if not rows:
+            return
+        self._accepted |= rows
+        self._checked -= rows
+        top = self.index(min(rows), 0)
+        bottom = self.index(max(rows), self.columnCount() - 1)
+        self.dataChanged.emit(top, bottom)
+
+    def accepted_edits(self) -> Dict[Path, Dict[str, Dict[str, str]]]:
+        """Group accepted rows into ``{source_file: {symbol_uuid: {key: value}}}``
+        for :func:`kicadtools.writer.write_properties`."""
+        edits: Dict[Path, Dict[str, Dict[str, str]]] = defaultdict(dict)
+        for row in self._accepted:
+            r = self._rows[row]
+            if r.source_file and r.symbol_uuid and r.pending:
+                edits[Path(r.source_file)].setdefault(r.symbol_uuid, {}).update(
+                    r.pending
+                )
+        return dict(edits)
 
     def rows(self) -> List[LcscRow]:
         return self._rows
