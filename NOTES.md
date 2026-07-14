@@ -3,6 +3,89 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## SMD-only option for the JLCPCB BOM — mounting from the PCB (2026-07-14)
+
+The JLCPCB export can now emit an **SMD-only** BOM. Mounting type is read from
+the **authoritative** source — the board's `.kicad_pcb`, which stamps every placed
+footprint with `(attr smd)` / `(attr through_hole)` — not guessed from the
+footprint name. (We explored a name-heuristic workflow first; abandoned it once
+we confirmed the PCB carries the real attr, incl. for custom-library parts that
+no name rule could resolve.)
+
+- **`pcb.py`** (new, pure) — `parse_footprint_mounting(text)` walks the
+  `.kicad_pcb` s-expr and maps each footprint's Reference → `smd`/`tht`/`unknown`
+  from its `(attr …)` tokens (compound flags like `smd exclude_from_bom dnp`
+  still read as smd; `board_only` / no-attr → unknown). `sibling_pcb(sch)` finds
+  `<name>.kicad_pcb` beside the schematic; `read_mounting_for_schematic(sch)`
+  returns `({refdes: mounting}, pcb_path)` or `({}, None)` when there's no PCB.
+  sexpdata parses the 2.3 MB MotorDriver PCB in ~0.4 s — fine for an interactive
+  export.
+- **`jlcpcb.py`** — `build_jlcpcb_bom(records, lcsc_override=None, mounting=None,
+  smd_only=False)`: with `smd_only`, keeps only parts whose `mounting` is `smd`
+  (a group shares one footprint → one mounting; `JlcBomLine` gained a `mounting`
+  field). `undetermined_references(records, mounting)` lists the excluded-but-
+  *unknown* refs (confirmed THT is correctly excluded and **not** listed) — used
+  for the "exclude + warn" behavior. Join is by refdes; a schematic part absent
+  from the PCB (or no PCB at all) → unknown → excluded.
+- **CLI** — `kicadtools jlcpcb <sch> [-o CSV] [--smd]`. `--smd` reads the sibling
+  PCB, filters to SMD, and warns on stderr about undetermined-mounting exclusions
+  (and specially when no `.kicad_pcb` is found → empty SMD BOM). Missing-LCSC
+  warning + exit-1 gating still apply, to the filtered lines.
+- **GUI** — File ▸ Export JLCPCB BOM… now asks **"Include surface-mount (SMD)
+  parts only?"** (Yes / No / Cancel) before the save dialog (getSaveFileName has
+  no custom-widget slot, so a pre-dialog question is the simplest headless-
+  testable option). Yes reads the sibling PCB for mounting; status bar reports the
+  undetermined-excluded count. Still read-only (dirty flag untouched).
+- Decisions (user): source = the board `.kicad_pcb`; undetermined parts under
+  `--smd` are **excluded + warned**. Mounting is computed (not a stored/overridable
+  property) — an explicit `Intent:Mounting` override could follow later.
+- Tests: `test_pcb.py` (attr classification incl. compound/board_only/no-attr,
+  sibling lookup, no-PCB) + `test_jlcpcb.py` SMD-filter/undetermined/mounting-field
+  cases and two CLI `--smd` tests (synthetic sibling PCB on the flat ECG board;
+  MotorDriver is hierarchical so can't be copied standalone). Suite **165 passing**.
+  Verified live on the real MotorDriver (sch + real PCB): full 82 parts → SMD 75
+  (the 7 through-hole dropped), **0 undetermined**; GUI Yes/No/Cancel all correct.
+
+## JLCPCB BOM export — `kicadtools jlcpcb` + Cockpit menu (2026-07-14)
+
+Export a BOM in the CSV format JLCPCB's SMT-assembly uploader auto-detects.
+Format was pinned by a research→adversarial-verify→design workflow: two
+independent web verifiers both landed high-confidence on the header row
+**`Comment, Designator, Footprint, LCSC Part #`** (only the first three are
+strictly required; LCSC recommended). Quantity is intentionally omitted (JLCPCB
+derives it from the Designator cell).
+
+- **`jlcpcb.py`** (new, GUI-free/pure) — `JlcBomLine` frozen dataclass
+  (`.designator` = comma-joined refs, `.quantity` = len), `JLC_FIELDS`,
+  `build_jlcpcb_bom(records, lcsc_override=None)` (pure), `write_jlcpcb_csv(lines,
+  fileobj)`, `missing_lcsc(lines)`, and the I/O wrapper
+  `jlcpcb_bom_from_schematic(path)`. Grouping key is **(Value, Footprint, LCSC)** —
+  LCSC is in the key on purpose (JLCPCB wants one LCSC per line, so differing/
+  one-blank LCSC values don't collapse). Refs within a line and the line order are
+  `natural_key`-sorted (deterministic regardless of traversal order).
+- **`naturalsort.py`** (new) — `natural_key` moved here out of `gui/model.py`
+  (which imports PySide6) so the pure module + CLI can share it; `gui/model.py`
+  now re-imports it (existing `from …gui.model import natural_key` still works).
+- **CLI** — `kicadtools jlcpcb <sch> [-o CSV]`: writes to `-o` or stdout (pure CSV
+  on stdout, all human text on stderr). Parts with no LCSC are exported with a
+  **blank cell** (never dropped), warned on stderr with their designators, and the
+  command **exits 1** when any line lacks an LCSC (mirrors `lcsc`'s gating stance).
+- **GUI** — File ▸ Export JLCPCB BOM… (save dialog, `.csv`). Read-only: never
+  touches the schematic or the dirty flag. Prefers session-resolved LCSC numbers
+  from the LCSC tab via a `{ref: lcsc}` override into `build_jlcpcb_bom`, so
+  just-resolved-but-unsaved numbers land in the export.
+- ⚠️ **Alias gap found while building:** the design's codemap claimed
+  `extract_part_numbers` tolerates a property literally keyed `"JLCPCB Part #"` — it
+  does **not** (that normalizes to `jlcpcbpart`, not in the `lcsc` alias list
+  `lcsc/lcscpn/lcscpartnumber/lcscpart/jlcpcb/jlc`). Real boards store canonical
+  `LCSC`, so export is correct; but if we ever want to read a `"JLCPCB Part #"`
+  property we'd need to add that alias in `partnum.py` (also affects `normalize`).
+- Tests: `test_jlcpcb.py` (grouping, natural sort, LCSC-splits-lines, blank-not-
+  dropped, override, deterministic order, CSV header/quoting, real board, 3 CLI
+  tests) + a GUI data-contract test in `test_gui_lcsc.py`. Suite **153 passing**.
+  Verified live: CLI on MotorDriver (36 lines, 13 blank-LCSC, exit 1) and headless
+  GUI export (file written, dirty flag untouched).
+
 ## Clickable LCSC / DigiKey links in the LCSC tab (2026-07-14)
 
 The LCSC and DigiKey cells are now clickable links to the supplier pages.

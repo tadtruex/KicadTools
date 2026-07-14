@@ -186,6 +186,23 @@ def test_link_cells_are_styled():
     assert m.data(m.index(0, 2), Qt.ForegroundRole) is not None
 
 
+# ---- JLCPCB export uses session-resolved LCSC -----------------------
+
+def test_gui_export_includes_session_lcsc():
+    """A LCSC resolved in the session (not yet saved) flows into the JLCPCB BOM
+    via the {ref: lcsc} override the export handler builds from the model."""
+    from kicadtools.jlcpcb import build_jlcpcb_bom
+
+    rec = _rec("U1", Value="STM32", Footprint="LQFP-48", **{"DigiKey PN": "P100-ND"})
+    m = LcscTableModel([rec])
+    assert m.rows()[0].lcsc == ""  # nothing on disk
+    m.apply_resolution(0, _resolution("U1", "uuid-U1", Status.RESOLVED, lcsc="C123"))
+
+    override = {row.reference: row.lcsc for row in m.rows() if row.lcsc}
+    (line,) = build_jlcpcb_bom([rec], override)
+    assert line.lcsc == "C123"
+
+
 def test_loads_real_board_and_sorts_by_ref():
     m = LcscTableModel()
     m.load(iter_bom_part_records(BOARD))

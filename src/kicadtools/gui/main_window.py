@@ -22,6 +22,13 @@ from PySide6.QtWidgets import (
 
 from kicadtools import writer
 from kicadtools.components import bom_components, get_components
+from kicadtools.jlcpcb import (
+    build_jlcpcb_bom,
+    missing_lcsc,
+    undetermined_references,
+    write_jlcpcb_csv,
+)
+from kicadtools.pcb import read_mounting_for_schematic
 from kicadtools.gui.lcsc import LINK_ROLE, LcscTableModel, ResolveWorker
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.resolve import iter_bom_part_records
@@ -137,6 +144,8 @@ class MainWindow(QMainWindow):
         self._save_as_act = file_menu.addAction("Save &As…")
         self._save_as_act.setShortcut(QKeySequence.SaveAs)
         self._save_as_act.triggered.connect(self._save_as)
+        self._export_jlc_act = file_menu.addAction("Export &JLCPCB BOM…")
+        self._export_jlc_act.triggered.connect(self._export_jlcpcb)
         file_menu.addSeparator()
         quit_act = file_menu.addAction("&Quit")
         quit_act.setShortcut(QKeySequence.Quit)
@@ -376,6 +385,62 @@ class MainWindow(QMainWindow):
             return
         self._open_path(dest)  # follow the new file; accepted rows re-read as ✅
         self.statusBar().showMessage(f"Saved {n} change{'s' * (n != 1)} to {dest.name}.")
+
+    # ---- export ------------------------------------------------------
+    def _export_jlcpcb(self) -> None:
+        """Export the BOM as a JLCPCB-format CSV. Read-only: never touches the
+        schematic or the dirty flag. LCSC numbers resolved in this session (even
+        if not yet saved) are preferred over what's on disk."""
+        if not self._records:
+            QMessageBox.information(self, "No board", "Open a schematic first.")
+            return
+        # Offer an SMD-only BOM (mounting read from the sibling .kicad_pcb).
+        resp = QMessageBox.question(
+            self,
+            "Export JLCPCB BOM",
+            "Include surface-mount (SMD) parts only?\n\n"
+            "Yes: SMD parts only (needs the board's .kicad_pcb; parts of "
+            "undetermined mounting are excluded).\nNo: all BOM parts.",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.No,
+        )
+        if resp == QMessageBox.Cancel:
+            return
+        smd_only = resp == QMessageBox.Yes
+
+        # Prefer session-resolved LCSC numbers from the LCSC tab.
+        override = {row.reference: row.lcsc for row in self.lcsc_model.rows() if row.lcsc}
+        mounting: dict = {}
+        if smd_only and self._board:
+            mounting, _pcb = read_mounting_for_schematic(self._board)
+        lines = build_jlcpcb_bom(
+            self._records, override, mounting=mounting, smd_only=smd_only
+        )
+
+        start = str(Path(self._board).with_suffix(".csv")) if self._board else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export JLCPCB BOM", start, "CSV (*.csv)"
+        )
+        if not path:
+            return
+        dest = Path(path)
+        if dest.suffix != ".csv":
+            dest = dest.with_suffix(".csv")
+        try:
+            with open(dest, "w", newline="", encoding="utf-8") as f:
+                write_jlcpcb_csv(lines, f)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        miss = missing_lcsc(lines)
+        msg = f"Exported {len(lines)} line(s) to {dest.name}."
+        if smd_only:
+            undet = undetermined_references(self._records, mounting)
+            if undet:
+                msg += f" {len(undet)} part(s) of undetermined mounting excluded."
+        if miss:
+            msg += f" {len(miss)} lack an LCSC Part #."
+        self.statusBar().showMessage(msg)
 
     # ---- quit --------------------------------------------------------
     def closeEvent(self, event: QCloseEvent) -> None:

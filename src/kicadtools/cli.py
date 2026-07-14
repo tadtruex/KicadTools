@@ -7,6 +7,13 @@ from pathlib import Path
 
 from kicadtools.components import bom_components, get_components
 from kicadtools.intent import ElectricalIntent
+from kicadtools.jlcpcb import (
+    build_jlcpcb_bom,
+    missing_lcsc,
+    undetermined_references,
+    write_jlcpcb_csv,
+)
+from kicadtools.pcb import read_mounting_for_schematic
 from kicadtools.normalize import (
     compute_file_changes,
     plan_normalization,
@@ -201,6 +208,53 @@ def _normalize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _export_jlcpcb(args: argparse.Namespace) -> int:
+    records = iter_bom_part_records(args.schematic)
+
+    mounting: dict = {}
+    if args.smd:
+        mounting, pcb = read_mounting_for_schematic(args.schematic)
+        if pcb is None:
+            print(
+                f"⚠️  --smd: no {Path(args.schematic).with_suffix('.kicad_pcb').name} "
+                "found next to the schematic — mounting can't be determined, so the "
+                "SMD BOM will be empty. Lay out / place the board first.",
+                file=sys.stderr,
+            )
+
+    lines = build_jlcpcb_bom(records, mounting=mounting, smd_only=args.smd)
+
+    if args.smd:
+        undetermined = undetermined_references(records, mounting)
+        if undetermined:
+            print(
+                f"⚠️  {len(undetermined)} part(s) excluded from the SMD BOM — "
+                f"undetermined mounting: {', '.join(undetermined)}",
+                file=sys.stderr,
+            )
+
+    if args.output:
+        with open(args.output, "w", newline="", encoding="utf-8") as f:
+            write_jlcpcb_csv(lines, f)
+        print(f"Wrote {len(lines)} line(s) to {args.output}", file=sys.stderr)
+    else:
+        # No -o: emit pure CSV on stdout so `… > bom.csv` works; keep all
+        # human-facing output on stderr.
+        write_jlcpcb_csv(lines, sys.stdout)
+
+    miss = missing_lcsc(lines)
+    if miss:
+        refs = ", ".join(ln.references[0] for ln in miss)
+        print(
+            f"⚠️  {len(miss)} of {len(lines)} line(s) have no LCSC Part # "
+            f"(blank cell — match them manually in JLCPCB's uploader): {refs}",
+            file=sys.stderr,
+        )
+    # Non-zero exit when anything lacks an LCSC, so scripts can gate — same
+    # stance as the `lcsc` command. The CSV is written in full regardless.
+    return 1 if miss else 0
+
+
 def _write_report(path, records, resolutions) -> None:
     fields = [
         "Reference", "Value", "Footprint", "Status", "Entry",
@@ -290,6 +344,26 @@ def main(argv=None) -> int:
         help="Show a live status line (current part + lookup in flight)",
     )
     lcsc.set_defaults(func=_lcsc)
+
+    jlc = sub.add_parser(
+        "jlcpcb",
+        help="Export a BOM CSV in the format JLCPCB's assembly service expects",
+    )
+    jlc.add_argument("schematic", type=Path, help="Path to a .kicad_sch file")
+    jlc.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        metavar="CSV",
+        help="Write the BOM here (default: stdout)",
+    )
+    jlc.add_argument(
+        "--smd",
+        action="store_true",
+        help="Only include surface-mount parts (mounting read from the sibling "
+        ".kicad_pcb; parts of undetermined mounting are excluded and reported)",
+    )
+    jlc.set_defaults(func=_export_jlcpcb)
 
     args = parser.parse_args(argv)
     return args.func(args)

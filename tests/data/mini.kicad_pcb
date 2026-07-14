@@ -1,0 +1,21 @@
+(kicad_pcb
+	(footprint "Resistor_SMD:R_0402_1005Metric"
+		(property "Reference" "R1")
+		(attr smd)
+	)
+	(footprint "Capacitor_SMD:C_0402_1005Metric"
+		(property "Reference" "C1")
+		(attr smd exclude_from_bom dnp)
+	)
+	(footprint "Connector_PinHeader_2.54mm:PinHeader_1x02"
+		(property "Reference" "J1")
+		(attr through_hole)
+	)
+	(footprint "MyLib:Fiducial"
+		(property "Reference" "FID1")
+		(attr board_only exclude_from_pos_files exclude_from_bom)
+	)
+	(footprint "MyLib:WeirdPart"
+		(property "Reference" "U1")
+	)
+)

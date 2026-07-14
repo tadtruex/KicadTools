@@ -6,7 +6,6 @@ records it for write-back and flips its status to a checkmark.
 """
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set
@@ -19,20 +18,7 @@ from PySide6.QtCore import (
 )
 
 from kicadtools.intent import ElectricalIntent
-
-
-def natural_key(value) -> tuple:
-    """A sort key that orders embedded numbers numerically, so ``C2`` sorts
-    before ``C10``. Digit runs compare as ints (and ahead of text), so mixed
-    chunks never raise."""
-    s = "" if value is None else str(value)
-    key = []
-    for chunk in re.split(r"(\d+)", s.lower()):
-        if chunk.isdigit():
-            key.append((0, int(chunk)))
-        elif chunk:
-            key.append((1, chunk))
-    return tuple(key)
+from kicadtools.naturalsort import natural_key  # re-exported for existing imports
 
 
 class NaturalSortProxyModel(QSortFilterProxyModel):
