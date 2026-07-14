@@ -57,21 +57,35 @@ def test_initial_status_classification():
         _rec("J1", Value="conn"),
     ]
     m = LcscTableModel(recs)
-    statuses = [m.data(m.index(r, 5), Qt.DisplayRole) for r in range(4)]
+    statuses = [m.data(m.index(r, 6), Qt.DisplayRole) for r in range(4)]
     assert statuses == [STATUS_HAS, STATUS_NEEDS, STATUS_NEEDS, STATUS_NONE]
 
 
 def test_columns_show_part_numbers():
-    m = LcscTableModel([_rec("R1", MPN="RMCF0603FT100K", **{"DigiKey PN": "P1-ND"})])
+    m = LcscTableModel([_rec("R1", Description="10k 0603 resistor",
+                             MPN="RMCF0603FT100K", **{"DigiKey PN": "P1-ND"})])
     assert m.headerData(0, Qt.Horizontal, Qt.DisplayRole) == "Accept"
     assert m.headerData(1, Qt.Horizontal, Qt.DisplayRole) == "Ref"
-    assert m.columnCount() == 6
-    row = [m.data(m.index(0, c), Qt.DisplayRole) for c in range(6)]
+    assert m.headerData(2, Qt.Horizontal, Qt.DisplayRole) == "Description"
+    assert m.columnCount() == 7
+    row = [m.data(m.index(0, c), Qt.DisplayRole) for c in range(7)]
     assert row[0] == ""            # Accept (checkbox, no text)
     assert row[1] == "R1"          # Ref
-    assert row[2] == ""            # LCSC (none yet)
-    assert row[3] == "P1-ND"       # DigiKey
-    assert row[4] == "RMCF0603FT100K"  # MPN
+    assert row[2] == "10k 0603 resistor"  # Description
+    assert row[3] == ""            # LCSC (none yet)
+    assert row[4] == "P1-ND"       # DigiKey
+    assert row[5] == "RMCF0603FT100K"  # MPN
+
+
+def test_description_populated_and_tooltip():
+    long_desc = "Generic connector, single row, 01x02, script generated"
+    m = LcscTableModel([_rec("J1", Description=long_desc)])
+    assert m.data(m.index(0, 2), Qt.DisplayRole) == long_desc
+    assert m.data(m.index(0, 2), Qt.ToolTipRole) == long_desc  # full text on hover
+    # A part without a Description shows (and hovers) nothing.
+    m2 = LcscTableModel([_rec("R9")])
+    assert m2.data(m2.index(0, 2), Qt.DisplayRole) == ""
+    assert m2.data(m2.index(0, 2), Qt.ToolTipRole) is None
 
 
 def test_apply_resolution_fills_lcsc_and_mpn():
@@ -81,18 +95,18 @@ def test_apply_resolution_fills_lcsc_and_mpn():
         lcsc="C123", resolved_mpn="ABC", reason="LCSC C123 ← MPN ABC", dk="P100-ND",
     )
     m.apply_resolution(0, res)
-    assert m.data(m.index(0, 2), Qt.DisplayRole) == "C123"   # LCSC
-    assert m.data(m.index(0, 4), Qt.DisplayRole) == "ABC"    # discovered MPN
-    assert m.data(m.index(0, 5), Qt.DisplayRole) == STATUS_RESOLVED
-    assert m.data(m.index(0, 5), Qt.ToolTipRole) == "LCSC C123 ← MPN ABC"
+    assert m.data(m.index(0, 3), Qt.DisplayRole) == "C123"   # LCSC
+    assert m.data(m.index(0, 5), Qt.DisplayRole) == "ABC"    # discovered MPN
+    assert m.data(m.index(0, 6), Qt.DisplayRole) == STATUS_RESOLVED
+    assert m.data(m.index(0, 6), Qt.ToolTipRole) == "LCSC C123 ← MPN ABC"
 
 
 def test_apply_resolution_flagged_keeps_blank_lcsc():
     m = LcscTableModel([_rec("U1", **{"DigiKey PN": "bad-ND"})])
     res = _resolution("U1", "uuid-U1", Status.FLAGGED, reason="no match", dk="bad-ND")
     m.apply_resolution(0, res)
-    assert m.data(m.index(0, 2), Qt.DisplayRole) == ""
-    assert m.data(m.index(0, 5), Qt.DisplayRole) == STATUS_FLAGGED
+    assert m.data(m.index(0, 3), Qt.DisplayRole) == ""
+    assert m.data(m.index(0, 6), Qt.DisplayRole) == STATUS_FLAGGED
 
 
 # ---- accept / write-back flow ---------------------------------------
@@ -128,7 +142,7 @@ def test_check_accept_and_edits():
     # Check R1 only, accept the checked row.
     assert m.setData(m.index(0, 0), Qt.Checked, Qt.CheckStateRole) is True
     m.accept_checked()
-    assert m.data(m.index(0, 5), Qt.DisplayRole) == STATUS_ACCEPTED
+    assert m.data(m.index(0, 6), Qt.DisplayRole) == STATUS_ACCEPTED
     # An accepted row is no longer checkable / has no check state.
     assert not (m.flags(m.index(0, 0)) & Qt.ItemIsUserCheckable)
     assert m.data(m.index(0, 0), Qt.CheckStateRole) is None
@@ -161,29 +175,29 @@ def test_discovered_mpn_not_written_when_symbol_already_had_one():
 
 def test_link_role_gives_supplier_urls():
     m = LcscTableModel([_rec("C1", LCSC="C541465", **{"DigiKey PN": "P100-ND"})])
-    lcsc_link = m.data(m.index(0, 2), LINK_ROLE)      # LCSC column
-    digikey_link = m.data(m.index(0, 3), LINK_ROLE)   # DigiKey column
+    lcsc_link = m.data(m.index(0, 3), LINK_ROLE)      # LCSC column
+    digikey_link = m.data(m.index(0, 4), LINK_ROLE)   # DigiKey column
     assert lcsc_link == "https://www.lcsc.com/search?q=C541465"
     assert digikey_link == "https://www.digikey.com/en/products/result?keywords=P100-ND"
     # Non-link columns (Ref, MPN, Status) carry no URL.
     assert m.data(m.index(0, 1), LINK_ROLE) is None
-    assert m.data(m.index(0, 5), LINK_ROLE) is None
+    assert m.data(m.index(0, 6), LINK_ROLE) is None
 
 
 def test_empty_cells_are_not_links():
     m = LcscTableModel([_rec("R1", MPN="RMCF0603FT100K")])  # no LCSC, no DigiKey
-    assert m.data(m.index(0, 2), LINK_ROLE) is None  # empty LCSC
-    assert m.data(m.index(0, 3), LINK_ROLE) is None  # empty DigiKey
+    assert m.data(m.index(0, 3), LINK_ROLE) is None  # empty LCSC
+    assert m.data(m.index(0, 4), LINK_ROLE) is None  # empty DigiKey
     # No link styling on an empty cell.
-    assert m.data(m.index(0, 2), Qt.FontRole) is None
-    assert m.data(m.index(0, 2), Qt.ForegroundRole) is None
+    assert m.data(m.index(0, 3), Qt.FontRole) is None
+    assert m.data(m.index(0, 3), Qt.ForegroundRole) is None
 
 
 def test_link_cells_are_styled():
     m = LcscTableModel([_rec("C1", LCSC="C541465")])
-    font = m.data(m.index(0, 2), Qt.FontRole)
+    font = m.data(m.index(0, 3), Qt.FontRole)
     assert font is not None and font.underline() is True
-    assert m.data(m.index(0, 2), Qt.ForegroundRole) is not None
+    assert m.data(m.index(0, 3), Qt.ForegroundRole) is not None
 
 
 # ---- JLCPCB export uses session-resolved LCSC -----------------------

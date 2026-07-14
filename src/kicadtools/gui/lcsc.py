@@ -22,8 +22,9 @@ from kicadtools.resolve import Cache, PartRecord, Resolution, Resolver, Status
 from kicadtools.suppliers import digikey_url, lcsc_url
 
 # An "Accept" checkbox leads the row (mirroring the Intents tab), then the
-# read-only part-number columns.
-_LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Status"]
+# symbol's description and the read-only part-number columns.
+_LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Description", "Status"]
+_COL_DESCRIPTION = _LCSC_COLUMNS.index("Description")
 _COL_LCSC = _LCSC_COLUMNS.index("LCSC")
 _COL_DIGIKEY = _LCSC_COLUMNS.index("DigiKey")
 
@@ -69,6 +70,7 @@ class LcscRow:
     digikey_pn: str
     mpn: str
     status: str
+    description: str = ""
     reason: str = ""
     # Write-back provenance, carried from the source PartRecord.
     source_file: Optional[Path] = None
@@ -87,12 +89,14 @@ class LcscRow:
             status = STATUS_NEEDS
         else:
             status = STATUS_NONE
+        desc = record.props.get("Description", "")
         return cls(
             reference=record.reference,
             lcsc=pn.lcsc or "",
             digikey_pn=pn.digikey_pn or "",
             mpn=pn.mpn or "",
             status=status,
+            description=desc if isinstance(desc, str) else "",
             source_file=record.source_file,
             symbol_uuid=record.symbol_uuid,
             had_mpn=bool(pn.mpn),
@@ -181,6 +185,10 @@ class LcscTableModel(QAbstractTableModel):
                 return url
 
         if role == Qt.ToolTipRole:
+            # The description is often long and gets elided in its column; show
+            # the full text on hover. Other columns fall back to the row reason.
+            if col == _COL_DESCRIPTION:
+                return row.description or None
             return row.reason or None
 
         if role == Qt.DisplayRole:
@@ -190,6 +198,7 @@ class LcscTableModel(QAbstractTableModel):
                 row.lcsc,
                 row.digikey_pn,
                 row.mpn,
+                row.description,
                 self._status_text(r),
             )[col]
         return None
