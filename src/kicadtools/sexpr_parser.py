@@ -128,3 +128,15 @@ def iter_sheet_files(sexpr, base_dir: Path) -> Iterable[Path]:
                     and item[1] == "Sheetfile"
                 ):
                     yield (base_dir / item[2]).resolve()
+
+
+def has_instantiated_sheets(root: Path) -> bool:
+    """True if the schematic at *root* instantiates any hierarchical subsheets.
+
+    A cheap, root-only check (it parses just *root*, not the whole tree) used to
+    decide whether "Save As" — which can't relink a moved hierarchy yet — is
+    available.
+    """
+    root = Path(root)
+    sexpr = loads(root.read_text(encoding="utf-8"))
+    return any(True for _ in iter_sheet_files(sexpr, root.parent))

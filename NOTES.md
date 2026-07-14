@@ -3,6 +3,35 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Save dialog rework + Save As (2026-07-14)
+
+Reworked the Cockpit's save flow in `gui/main_window.py`.
+
+- **Save** — normal confirmation now: title "Save", body "Save N changes?"
+  (`Save`/`Cancel`, Save default). Dropped the old "git is your backstop" line
+  and the files-and-counts blurb. Success is a status-bar message, not a modal
+  "Done" box. Still writes every edited file in place across the hierarchy.
+- **Save As…** (new, `QKeySequence.SaveAs`) — writes accepted edits to a
+  schematic under a new name via `QFileDialog.getSaveFileName`, using
+  `writer.write_properties(src, props, dest=lambda _p: dest)`. Forces a
+  `.kicad_sch` suffix, then `_open_path(dest)` so the window follows the new
+  file (accepted rows re-read as ✅).
+- **Hierarchy is blocked in Save As** — a hierarchical design's subsheet links
+  would still point at the originals and we don't relink yet, so Save As refuses
+  (warning steers to Save) when `has_instantiated_sheets(self._board)` is true.
+  New helper `sexpr_parser.has_instantiated_sheets(root)` — cheap root-only parse,
+  true if the root has any `(sheet …)` with a Sheetfile. Save As therefore only
+  ever touches one file (a flat schematic → exactly one edit key).
+- Shared helpers extracted: `_pending_edits()` (merged edits or a nudge) and
+  `_change_count()`.
+- Tests: `test_sexpr_parser.py` covers `has_instantiated_sheets` on MotorDriver
+  (hierarchical) vs resistor_test/ECG (flat). Suite **132 passing**. Also smoke-
+  tested headless (offscreen Qt): flat Save As writes + follows the new file;
+  hierarchical Save As is blocked before the file dialog opens; in-place Save
+  shows "Save 1 change?" and writes.
+
+Still deferred: full hierarchical Save As (copy/relink the whole tree).
+
 ## LCSC write-back — Cockpit LCSC tab now Accept + Save (2026-07-13)
 
 The planned next step from the LCSC-tab section below is done: the LCSC tab got

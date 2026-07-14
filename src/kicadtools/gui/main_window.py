@@ -25,6 +25,7 @@ from kicadtools.components import bom_components, get_components
 from kicadtools.gui.lcsc import LcscTableModel, ResolveWorker
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.resolve import iter_bom_part_records
+from kicadtools.sexpr_parser import has_instantiated_sheets
 from kicadtools.suppliers import DigiKeyClient
 
 _LCSC_CACHE = Path.home() / ".kicadtools" / "lcsc_cache.sqlite"
@@ -124,9 +125,10 @@ class MainWindow(QMainWindow):
         open_act.triggered.connect(self._open_dialog)
         self._save_act = file_menu.addAction("&Save")
         self._save_act.setShortcut(QKeySequence.Save)
-        self._save_act.triggered.connect(self._write)
-        # TODO(later): "Save As…" — write accepted intents to a chosen path
-        # (e.g. writer.sibling_dest via a save dialog) instead of in place.
+        self._save_act.triggered.connect(self._save)
+        self._save_as_act = file_menu.addAction("Save &As…")
+        self._save_as_act.setShortcut(QKeySequence.SaveAs)
+        self._save_as_act.triggered.connect(self._save_as)
         file_menu.addSeparator()
         quit_act = file_menu.addAction("&Quit")
         quit_act.setShortcut(QKeySequence.Quit)
@@ -249,41 +251,91 @@ class MainWindow(QMainWindow):
                 merged[src].setdefault(uuid, {}).update(props)
         return dict(merged)
 
-    def _write(self) -> None:
+    def _pending_edits(self) -> "Optional[dict[Path, dict[str, dict[str, str]]]]":
+        """The merged accepted edits, or ``None`` (with a nudge) if there's
+        nothing to save yet."""
         edits = self._merged_edits()
         if not edits:
             QMessageBox.information(
                 self,
-                "Nothing to write",
+                "Nothing to save",
                 "Accept one or more guesses (Intents) or resolved LCSC numbers first.",
             )
-            return
+            return None
+        return edits
+
+    @staticmethod
+    def _change_count(edits: "dict[Path, dict[str, dict[str, str]]]") -> int:
         # Count individual properties, not just symbols — a symbol may carry both
         # an Intent:Type and an LCSC.
-        n = sum(len(props) for m in edits.values() for props in m.values())
-        files = "\n".join(
-            f"  • {p.name}  ({len(m)} part{'s' * (len(m) != 1)})"
-            for p, m in edits.items()
-        )
-        noun = "property" if n == 1 else "properties"
+        return sum(len(props) for m in edits.values() for props in m.values())
+
+    def _save(self) -> None:
+        """Write accepted edits back into the open schematic, in place."""
+        edits = self._pending_edits()
+        if edits is None:
+            return
+        n = self._change_count(edits)
+        noun = "change" if n == 1 else "changes"
         resp = QMessageBox.question(
             self,
-            "Write properties",
-            f"Write {n} accepted {noun} into these files, in place?\n\n"
-            f"{files}\n\nThe change is a minimal insertion; git is your backstop.",
-            QMessageBox.Yes | QMessageBox.No,
+            "Save",
+            f"Save {n} {noun}?",
+            QMessageBox.Save | QMessageBox.Cancel,
+            QMessageBox.Save,
         )
-        if resp != QMessageBox.Yes:
+        if resp != QMessageBox.Save:
             return
         try:
             for src, uuid_to_props in edits.items():
                 writer.write_properties(src, uuid_to_props)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Write failed", str(exc))
+            QMessageBox.critical(self, "Save failed", str(exc))
             return
         if self._board:
             self._open_path(self._board)  # reload → accepted rows now read as ✅
-        QMessageBox.information(self, "Done", f"Wrote {n} {noun}. Reloaded the board.")
+        self.statusBar().showMessage(f"Saved {n} {noun}.")
+
+    def _save_as(self) -> None:
+        """Write accepted edits to a schematic under a new name.
+
+        Only single-file schematics are supported for now: a hierarchical design
+        would leave its subsheet links pointing at the old files, and we don't
+        relink them yet — so we refuse and steer the user to Save (in place)."""
+        edits = self._pending_edits()
+        if edits is None:
+            return
+        if self._board and has_instantiated_sheets(self._board):
+            QMessageBox.warning(
+                self,
+                "Save As unavailable",
+                "This schematic instantiates hierarchical sheets, which Save As "
+                "can't relink yet — the saved copy's sheets would still point at "
+                "the original files.\n\nUse File ▸ Save to write the changes in "
+                "place instead.",
+            )
+            return
+
+        start = str(self._board) if self._board else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save schematic as", start, "KiCad schematic (*.kicad_sch)"
+        )
+        if not path:
+            return
+        dest = Path(path)
+        if dest.suffix != ".kicad_sch":
+            dest = dest.with_suffix(".kicad_sch")
+
+        # A single-file schematic contributes exactly one source file.
+        (src, uuid_to_props), = edits.items()
+        n = self._change_count(edits)
+        try:
+            writer.write_properties(src, uuid_to_props, dest=lambda _p: dest)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save As failed", str(exc))
+            return
+        self._open_path(dest)  # follow the new file; accepted rows re-read as ✅
+        self.statusBar().showMessage(f"Saved {n} change{'s' * (n != 1)} to {dest.name}.")
 
     # ---- status bar --------------------------------------------------
     def _refresh_status(self) -> None:
