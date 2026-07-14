@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QThread
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -34,7 +34,10 @@ _LCSC_CACHE = Path.home() / ".kicadtools" / "lcsc_cache.sqlite"
 class MainWindow(QMainWindow):
     def __init__(self, schematic: Optional[str] = None):
         super().__init__()
-        self.setWindowTitle("BOM Cockpit")
+        # The ``[*]`` is Qt's window-modified placeholder: it renders a "*"
+        # (or the platform's document-dirty marker) only while there are
+        # unsaved edits — see ``setWindowModified`` in the accept/save paths.
+        self.setWindowTitle("BOM Cockpit[*]")
         self.resize(960, 640)
 
         self._board: Optional[Path] = None
@@ -157,7 +160,8 @@ class MainWindow(QMainWindow):
         self.table.resizeColumnsToContents()  # sensible initial widths; still draggable
         self.lcsc_model.load(self._records)
         self.lcsc_table.resizeColumnsToContents()
-        self.setWindowTitle(f"BOM Cockpit — {path.name}")
+        self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
+        self.setWindowModified(False)  # a fresh load matches disk → clean
         self._refresh_status()
 
     # ---- LCSC resolution --------------------------------------------
@@ -222,19 +226,27 @@ class MainWindow(QMainWindow):
         self._resolve_worker = None
 
     # ---- accept ------------------------------------------------------
+    def _mark_dirty(self) -> None:
+        """Flag unsaved edits — drives the title's ``*`` and the quit prompt."""
+        self.setWindowModified(True)
+
     def _accept_checked(self) -> None:
         self.model.accept_checked()
+        self._mark_dirty()
         self._refresh_status()
 
     def _accept_all(self) -> None:
         self.model.accept_all()
+        self._mark_dirty()
         self._refresh_status()
 
     def _lcsc_accept_checked(self) -> None:
         self.lcsc_model.accept_checked()
+        self._mark_dirty()
 
     def _lcsc_accept_all(self) -> None:
         self.lcsc_model.accept_all()
+        self._mark_dirty()
 
     # ---- write -------------------------------------------------------
     def _merged_edits(self) -> "dict[Path, dict[str, dict[str, str]]]":
@@ -270,11 +282,29 @@ class MainWindow(QMainWindow):
         # an Intent:Type and an LCSC.
         return sum(len(props) for m in edits.values() for props in m.values())
 
-    def _save(self) -> None:
-        """Write accepted edits back into the open schematic, in place."""
+    def _write_in_place(self, edits: "dict[Path, dict[str, dict[str, str]]]") -> bool:
+        """Write *edits* into their source files in place, reload, and clear the
+        dirty flag (the reload does). Returns ``True`` on success, ``False`` if a
+        write failed (already reported to the user). No confirmation — callers own
+        that."""
+        n = self._change_count(edits)
+        try:
+            for src, uuid_to_props in edits.items():
+                writer.write_properties(src, uuid_to_props)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return False
+        if self._board:
+            self._open_path(self._board)  # reload → accepted rows now read as ✅
+        self.statusBar().showMessage(f"Saved {n} change{'s' * (n != 1)}.")
+        return True
+
+    def _save(self) -> bool:
+        """Confirm, then write accepted edits back into the open schematic in
+        place. Returns whether the save actually happened (Cancel → ``False``)."""
         edits = self._pending_edits()
         if edits is None:
-            return
+            return False
         n = self._change_count(edits)
         noun = "change" if n == 1 else "changes"
         resp = QMessageBox.question(
@@ -285,16 +315,8 @@ class MainWindow(QMainWindow):
             QMessageBox.Save,
         )
         if resp != QMessageBox.Save:
-            return
-        try:
-            for src, uuid_to_props in edits.items():
-                writer.write_properties(src, uuid_to_props)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Save failed", str(exc))
-            return
-        if self._board:
-            self._open_path(self._board)  # reload → accepted rows now read as ✅
-        self.statusBar().showMessage(f"Saved {n} {noun}.")
+            return False
+        return self._write_in_place(edits)
 
     def _save_as(self) -> None:
         """Write accepted edits to a schematic under a new name.
@@ -336,6 +358,35 @@ class MainWindow(QMainWindow):
             return
         self._open_path(dest)  # follow the new file; accepted rows re-read as ✅
         self.statusBar().showMessage(f"Saved {n} change{'s' * (n != 1)} to {dest.name}.")
+
+    # ---- quit --------------------------------------------------------
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Guard the quit path: if there are unsaved edits, offer to Save,
+        Discard, or Cancel. Fires for both File ▸ Quit (which calls ``close``)
+        and the window's close button."""
+        if not self.isWindowModified():
+            event.accept()
+            return
+        resp = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            "You have unsaved changes. Save before quitting?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if resp == QMessageBox.Cancel:
+            event.ignore()
+            return
+        if resp == QMessageBox.Discard:
+            event.accept()
+            return
+        # Save: write in place (no second confirmation) and only quit if it
+        # succeeds — a failed write keeps the window open so nothing is lost.
+        edits = self._merged_edits()
+        if edits and not self._write_in_place(edits):
+            event.ignore()
+            return
+        event.accept()
 
     # ---- status bar --------------------------------------------------
     def _refresh_status(self) -> None:

@@ -3,6 +3,30 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Dirty tracking + quit guard (2026-07-14)
+
+The Cockpit now tracks unsaved edits and guards the quit path
+(`gui/main_window.py`).
+
+- **Dirty state** rides on Qt's `setWindowModified` / `isWindowModified` (title
+  carries the `[*]` placeholder, so a `*`/platform dirty-marker shows only while
+  modified). `_mark_dirty()` sets it in all four accept handlers
+  (`_accept_checked/all`, `_lcsc_accept_checked/all`); `_open_path` clears it on
+  every fresh load (including the reload after a save), so accept → dirty, save
+  or open → clean.
+- **Quit guard** — new `closeEvent` fires for both File ▸ Quit (calls `close`)
+  and the window close button. Clean → quits. Dirty → Save / Discard / Cancel:
+  Cancel & Discard behave as expected; Save writes in place and only quits if the
+  write succeeds (a failed write keeps the window open). Dirty = accepted-but-
+  unsaved edits (`_merged_edits`); merely *checking* a row isn't dirty.
+- **Refactor** — `_save` split into `_write_in_place(edits) -> bool` (write +
+  reload + status, no dialog) and `_save() -> bool` (confirm then delegate). The
+  quit-Save path calls `_write_in_place` directly to avoid a double confirmation.
+- Verified headless (offscreen Qt), all six branches: fresh load clean; accept →
+  modified; clean quit passes through with no prompt; dirty quit → Cancel keeps
+  the window, Discard quits without writing, Save writes + quits (single confirm).
+  Full suite still 132 passing.
+
 ## Save dialog rework + Save As (2026-07-14)
 
 Reworked the Cockpit's save flow in `gui/main_window.py`.
