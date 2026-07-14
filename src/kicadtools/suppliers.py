@@ -16,6 +16,7 @@ import os
 import re
 import time
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 
@@ -36,6 +37,25 @@ _TIMEOUT = 12
 def _norm_mpn(mpn: str) -> str:
     """Normalize an MPN for comparison: upper-case, alphanumerics only."""
     return re.sub(r"[^A-Z0-9]", "", mpn.upper())
+
+
+def lcsc_url(lcsc: str) -> Optional[str]:
+    """The LCSC store search URL for an LCSC code (e.g. ``C12345``), or ``None``
+    when *lcsc* is empty. Search (not a product-detail slug) resolves reliably
+    from just the code."""
+    lcsc = (lcsc or "").strip()
+    return f"https://www.lcsc.com/search?q={quote(lcsc, safe='')}" if lcsc else None
+
+
+def digikey_url(digikey_pn: str) -> Optional[str]:
+    """The DigiKey keyword-search URL for a DigiKey part number, or ``None`` when
+    *digikey_pn* is empty."""
+    pn = (digikey_pn or "").strip()
+    return (
+        f"https://www.digikey.com/en/products/result?keywords={quote(pn, safe='')}"
+        if pn
+        else None
+    )
 
 
 class DigiKeyClient:

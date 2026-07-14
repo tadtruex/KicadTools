@@ -14,13 +14,22 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import QApplication
 
 from kicadtools.partnum import CANONICAL_KEYS, extract_part_numbers
 from kicadtools.resolve import Cache, PartRecord, Resolution, Resolver, Status
+from kicadtools.suppliers import digikey_url, lcsc_url
 
 # An "Accept" checkbox leads the row (mirroring the Intents tab), then the
 # read-only part-number columns.
 _LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Status"]
+_COL_LCSC = _LCSC_COLUMNS.index("LCSC")
+_COL_DIGIKEY = _LCSC_COLUMNS.index("DigiKey")
+
+# Custom data role: the URL a link cell (LCSC / DigiKey) points at, or ``None``.
+# The view reads it on click to open the supplier page.
+LINK_ROLE = Qt.UserRole + 1
 
 # Row status text. The pre-resolution states describe what the schematic already
 # has; the post-resolution states mirror the CLI's ✅ / ➕ / ⚑.
@@ -36,6 +45,21 @@ _RESULT_STATUS = {
     Status.RESOLVED: STATUS_RESOLVED,
     Status.FLAGGED: STATUS_FLAGGED,
 }
+
+
+def _link_color() -> QColor:
+    """The palette's link colour (theme-aware) when an app is running, else a
+    reasonable blue for headless/test use."""
+    app = QApplication.instance()
+    if app is not None:
+        return app.palette().link().color()
+    return QColor("#1a6fdb")
+
+
+def _link_font() -> QFont:
+    f = QFont()
+    f.setUnderline(True)
+    return f
 
 
 @dataclass
@@ -123,6 +147,15 @@ class LcscTableModel(QAbstractTableModel):
     def _status_text(self, row: int) -> str:
         return STATUS_ACCEPTED if row in self._accepted else self._rows[row].status
 
+    def _link_url(self, row: "LcscRow", col: int) -> Optional[str]:
+        """The supplier URL a cell links to (LCSC/DigiKey with a value), else
+        ``None``."""
+        if col == _COL_LCSC:
+            return lcsc_url(row.lcsc)
+        if col == _COL_DIGIKEY:
+            return digikey_url(row.digikey_pn)
+        return None
+
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
         if not index.isValid():
             return None
@@ -133,6 +166,19 @@ class LcscTableModel(QAbstractTableModel):
             if not self._checkable(r):
                 return None
             return Qt.Checked if r in self._checked else Qt.Unchecked
+
+        # LCSC / DigiKey cells with a value are clickable links: expose the URL
+        # (LINK_ROLE) and render them blue + underlined.
+        url = self._link_url(row, col)
+        if role == LINK_ROLE:
+            return url
+        if url is not None:
+            if role == Qt.ForegroundRole:
+                return _link_color()
+            if role == Qt.FontRole:
+                return _link_font()
+            if role == Qt.ToolTipRole:
+                return url
 
         if role == Qt.ToolTipRole:
             return row.reason or None

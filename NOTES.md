@@ -3,6 +3,28 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Clickable LCSC / DigiKey links in the LCSC tab (2026-07-14)
+
+The LCSC and DigiKey cells are now clickable links to the supplier pages.
+
+- **`suppliers.py`** — pure URL builders `lcsc_url(code)` →
+  `lcsc.com/search?q=…` and `digikey_url(pn)` →
+  `digikey.com/en/products/result?keywords=…` (both `quote(…, safe="")`-encoded,
+  `None` when the value is empty). Search URLs, not product-detail slugs, so just
+  the code/PN resolves.
+- **`gui/lcsc.py`** — new `LINK_ROLE = Qt.UserRole + 1` returns the cell's URL
+  (LCSC col 2 / DigiKey col 3 with a value, else `None`). Link cells also render
+  blue (palette link colour, theme-aware; fixed fallback headless) + underlined
+  via `ForegroundRole`/`FontRole`, and their `ToolTipRole` shows the URL.
+- **`gui/main_window.py`** — `_build_lcsc_tab` turns on mouse tracking and wires
+  `clicked → _open_link` (opens `LINK_ROLE`'s URL via `QDesktopServices.openUrl`,
+  no-op for non-link cells) and `entered → _hover_link` (pointing-hand cursor
+  over link cells). `LINK_ROLE` forwards through the `NaturalSortProxyModel`
+  (it only overrides `lessThan`), so no source-index mapping is needed.
+- Tests: URL builders in `test_suppliers.py`; link roles + styling in
+  `test_gui_lcsc.py`. Suite **138 passing**. Smoke-tested headless on MotorDriver:
+  clicking an LCSC/DigiKey cell opens the right URL, a Ref cell opens nothing.
+
 ## Dirty tracking + quit guard (2026-07-14)
 
 The Cockpit now tracks unsaved edits and guards the quit path

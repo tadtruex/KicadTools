@@ -5,8 +5,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtCore import Qt, QThread, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from kicadtools import writer
 from kicadtools.components import bom_components, get_components
-from kicadtools.gui.lcsc import LcscTableModel, ResolveWorker
+from kicadtools.gui.lcsc import LINK_ROLE, LcscTableModel, ResolveWorker
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.resolve import iter_bom_part_records
 from kicadtools.sexpr_parser import has_instantiated_sheets
@@ -100,6 +100,11 @@ class MainWindow(QMainWindow):
     def _build_lcsc_tab(self) -> QWidget:
         self.lcsc_model = LcscTableModel()
         self.lcsc_table = self._make_table(self.lcsc_model)
+        # LCSC / DigiKey cells are links: open the supplier page on click, and
+        # show a pointing-hand cursor while hovering one (needs mouse tracking).
+        self.lcsc_table.setMouseTracking(True)
+        self.lcsc_table.clicked.connect(self._open_link)
+        self.lcsc_table.entered.connect(self._hover_link)
 
         self.resolve_btn = QPushButton("Resolve LCSC")
         self.resolve_btn.clicked.connect(self._resolve_lcsc)
@@ -163,6 +168,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
         self.setWindowModified(False)  # a fresh load matches disk → clean
         self._refresh_status()
+
+    # ---- LCSC / DigiKey links ---------------------------------------
+    def _open_link(self, index) -> None:
+        """Open the supplier page for a clicked LCSC/DigiKey cell (no-op for a
+        cell that isn't a link)."""
+        url = index.data(LINK_ROLE)
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _hover_link(self, index) -> None:
+        """Show a pointing-hand cursor over link cells, an arrow elsewhere."""
+        cursor = Qt.PointingHandCursor if index.data(LINK_ROLE) else Qt.ArrowCursor
+        self.lcsc_table.viewport().setCursor(cursor)
 
     # ---- LCSC resolution --------------------------------------------
     def _resolve_lcsc(self) -> None:

@@ -6,7 +6,31 @@ JLCPCB MPN-verification guarantee: a hit is accepted only when its
 old endpoint's "first result wins" false positives.
 """
 import kicadtools.suppliers as suppliers
-from kicadtools.suppliers import DigiKeyClient, jlcpcb_lcsc_for
+from kicadtools.suppliers import (
+    DigiKeyClient,
+    digikey_url,
+    jlcpcb_lcsc_for,
+    lcsc_url,
+)
+
+
+def test_lcsc_url_from_code():
+    assert lcsc_url("C12345") == "https://www.lcsc.com/search?q=C12345"
+
+
+def test_digikey_url_encodes_pn():
+    # DigiKey PNs contain characters that must be percent-encoded in a query.
+    assert (
+        digikey_url("311-1.0KHRCT-ND")
+        == "https://www.digikey.com/en/products/result?keywords=311-1.0KHRCT-ND"
+    )
+    assert "%2F" in digikey_url("A/B")  # a slash is encoded, not left bare
+
+
+def test_url_builders_return_none_when_empty():
+    assert lcsc_url("") is None
+    assert lcsc_url("  ") is None
+    assert digikey_url(None) is None
 
 
 class FakeResp:

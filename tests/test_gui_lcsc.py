@@ -7,6 +7,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt  # noqa: E402
 
 from kicadtools.gui.lcsc import (  # noqa: E402
+    LINK_ROLE,
     STATUS_ACCEPTED,
     STATUS_FLAGGED,
     STATUS_HAS,
@@ -154,6 +155,35 @@ def test_discovered_mpn_not_written_when_symbol_already_had_one():
     )
     m.accept_all()
     assert m.accepted_edits() == {BOARD: {"uuid-U1": {"LCSC": "C222"}}}
+
+
+# ---- clickable LCSC / DigiKey links ---------------------------------
+
+def test_link_role_gives_supplier_urls():
+    m = LcscTableModel([_rec("C1", LCSC="C541465", **{"DigiKey PN": "P100-ND"})])
+    lcsc_link = m.data(m.index(0, 2), LINK_ROLE)      # LCSC column
+    digikey_link = m.data(m.index(0, 3), LINK_ROLE)   # DigiKey column
+    assert lcsc_link == "https://www.lcsc.com/search?q=C541465"
+    assert digikey_link == "https://www.digikey.com/en/products/result?keywords=P100-ND"
+    # Non-link columns (Ref, MPN, Status) carry no URL.
+    assert m.data(m.index(0, 1), LINK_ROLE) is None
+    assert m.data(m.index(0, 5), LINK_ROLE) is None
+
+
+def test_empty_cells_are_not_links():
+    m = LcscTableModel([_rec("R1", MPN="RMCF0603FT100K")])  # no LCSC, no DigiKey
+    assert m.data(m.index(0, 2), LINK_ROLE) is None  # empty LCSC
+    assert m.data(m.index(0, 3), LINK_ROLE) is None  # empty DigiKey
+    # No link styling on an empty cell.
+    assert m.data(m.index(0, 2), Qt.FontRole) is None
+    assert m.data(m.index(0, 2), Qt.ForegroundRole) is None
+
+
+def test_link_cells_are_styled():
+    m = LcscTableModel([_rec("C1", LCSC="C541465")])
+    font = m.data(m.index(0, 2), Qt.FontRole)
+    assert font is not None and font.underline() is True
+    assert m.data(m.index(0, 2), Qt.ForegroundRole) is not None
 
 
 def test_loads_real_board_and_sorts_by_ref():
