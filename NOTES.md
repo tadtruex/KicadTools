@@ -464,6 +464,10 @@ kicadtools bom -v ../../ECG/ECG/ECG.kicad_sch
 - **Check JLCPCB inventory for matched parts and suggest in-stock alternatives
   for any shortfalls.** (i.e. once a part is matched to an LCSC number, verify it
   has enough stock; where it falls short, surface orderable in-stock substitutes.)
+- **CPL rotation: many parts land rotated 180°.** Revisit the intent system and
+  add an optional parameter to the base intent spec that lets us specify an extra
+  rotation offset per part type (folded into the CPL `Rotation` on export, on top
+  of the existing family offsets in `rotations.py`).
 - Add intent subclasses for types that are guessable but have no class yet:
   `battery`, `ic`, `switch`. Until a subclass exists they're guessed but stay
   `❌` (the `-v` reason names what they look like).
