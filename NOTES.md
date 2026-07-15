@@ -3,6 +3,78 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## JLCPCB fixes: LCSC ranking, BOM invariants, CPL generation (2026-07-14)
+
+Three-part effort, spec-driven. An ultracode research→adversarial-verify workflow
+first pinned the exact JLCPCB BOM/CPL formats + KiCad→JLCPCB rotation rules; the
+full synthesized spec lives in **`JLCPCB_SPEC.md`** (read it before touching this
+code). Suite **194 passing** (was 171). Nothing committed yet.
+
+1. **LCSC lookup correctness** (`suppliers.py`). Root cause of the "J8 resolves to
+   a part that doesn't exist" bug: for MPN `PH2-10-UA` JLCPCB returns the genuine
+   ADAM TECH `C5708577` **and** a synthetic `JLCPCB Assembly` SKU `C9900016815`,
+   both stock 0; the old `next(in-stock, else matches[0])` picked the placeholder.
+   Replaced with `min(matches, key=_rank_match)`: **in-stock → genuine catalog
+   part (a `C9900…` code lacking `lcscGoodsUrl` is deprioritized, NOT dropped — it
+   can be orderable when in stock) → Basic lib → preferred → more stock → cheaper.**
+   New helpers `_stock_count/_in_stock/_min_price/_is_placeholder/_rank_match`.
+   Live-verified: J8 → `C5708577`. NB the research REFUTED my first instinct to
+   hard-drop `C9900`; stock is the real orderability signal.
+   **Cache poisoning (found when J8 still resolved wrong after the ranking fix):**
+   the SQLite cache had already memoized the old bogus pick (`PH2-10-UA →
+   C9900016815`, + 2 more `C9900*`), and `_lcsc_for` reads the cache before
+   re-ranking, so the fix never ran for cached MPNs. Fixed at the source:
+   `resolve.Cache` now stamps `mpn_to_lcsc` with `LCSC_SELECTION_VERSION` (now
+   `"2"`) and wipes that table on a version mismatch — bump the constant whenever
+   the pick logic changes and stale picks self-invalidate. `dk_to_mpn` (stable) is
+   kept. The user's real `~/.kicadtools/lcsc_cache.sqlite` was already invalidated
+   during verification; a fresh `lcsc` run re-resolves the wiped MPNs.
+2. **BOM invariants** (`jlcpcb.py`). Header/format were already accepted (wokwi-
+   proven `Comment,Designator,Footprint,LCSC Part #`, no UTF-8 BOM). Added the two
+   missing guards: split any group with >200 designators across lines
+   (`MAX_DESIGNATORS_PER_LINE = 200`), and `_valid_lcsc()` blanks any part-number
+   cell that isn't `^C\d+$` (an MPN in that column is a documented reject cause),
+   upper-casing valid codes. The user's BOM was likely rejected because of the bad
+   `C9900` numbers from bug #1, not the format.
+3. **CPL generation from the `.kicad_pcb`** (NEW — user chose "generate our own",
+   CSV). Pure-sexpr, no `pcbnew` (not importable in the venv; matches the project's
+   read-files-directly philosophy).
+   - `pcb.py` grew `Placement`/`Pad` dataclasses + `parse_footprint_placements()`
+     (per-ref origin `(at x y angle)`, side from the direct `(layer F.Cu|B.Cu)`,
+     pads with local `(at)`+`(size)`) and `read_aux_origin()`.
+   - `rotations.py` (NEW): regex-over-footprint-name family offset DB. Ships ONLY
+     the offsets BOTH community tables agree on (SOIC/SSOP/TSSOP/DFN/LQFP/TQFP=270,
+     CP_*=180, JST_*=180, TO-277=90, WS2812B-2020=90); the disputed SOT-23/QFN
+     (−90 vs 180 / 270 vs 90) are deliberately OMITTED → 0°, nudge in the previewer.
+   - `cpl.py` (NEW): `build_cpl()` = pad-bbox centroid, `- aux_origin`, **Y-invert**
+     (KiCad Y-down → JLCPCB Y-up); rotation = footprint angle, `180−angle` for
+     bottom (BEFORE offsets), `+ family + manual` offset, `% 360`. `CplLine`,
+     `CPL_FIELDS=[Designator,Mid X,Mid Y,Layer,Rotation]`, `write_cpl_csv` (bare mm,
+     4 decimals, `Top`/`Bottom`), `cpl_from_schematic`. `include=` restricts to the
+     BOM's ref set so BOM/CPL designators match (JLCPCB requirement).
+   - CLI `kicadtools cpl <sch> [-o CSV] [--smd]` + Cockpit **File ▸ Export JLCPCB
+     CPL…** (read-only, dirty flag untouched, `<board>_cpl.csv` default, SMD-only
+     Yes/No/Cancel). Warns on BOM parts with no placed footprint.
+   - Verified live on real ECG (sch+pcb): 55 placements, 7 BOM parts w/o footprint
+     reported, `G***` graphic excluded; symmetric parts' centroid == anchor; R8 =
+     (130.34, −102.79) Top 270°; 4 bottom-side parts flipped. Headless GUI export OK.
+   - ⚠️ Could NOT validate against KiCad's own `.pos` (no KiCad/kicad-cli on this
+     box) or a real JLCPCB upload. The bottom-flip `(180−angle)` and family offsets
+     are the highest-risk bits — do a real upload + previewer check before trusting.
+
+Also fixed a **pre-existing red baseline**: commit `1b1b8be "add descript to lcsc
+page"` was inconsistent — the model put `Description` at column 5 but the tests
+expect it at 2 (`Accept·Ref·Description·LCSC·DigiKey·MPN·Status`). Reordered
+`_LCSC_COLUMNS` + the `data()` DisplayRole tuple to match; that took the suite from
+6-failing to green before this work.
+
+### Still open
+- `kicadtools lcsc --write` CLI still not wired (unchanged from before).
+- CPL rotation offsets are best-effort/unvalidated; expose a GUI per-part manual
+  rotation override (mechanism is already in `build_cpl(manual_rotation=…)`).
+- Consider stripping the `Library:` prefix from the BOM Footprint column (JLCPCB's
+  sample shows bare package names); not a known reject cause, left as-is for now.
+
 ## SMD-only option for the JLCPCB BOM — mounting from the PCB (2026-07-14)
 
 The JLCPCB export can now emit an **SMD-only** BOM. Mounting type is read from

@@ -92,6 +92,65 @@ def test_prefers_in_stock_among_exact_matches(monkeypatch):
     assert jlcpcb_lcsc_for("PART1") == "C-stock"
 
 
+def test_placeholder_deprioritized_when_both_out_of_stock(monkeypatch):
+    # The J8/ECG bug: MPN PH2-10-UA returns a genuine ADAM TECH catalog part and
+    # a synthetic "JLCPCB Assembly" C9900 SKU, both out of stock. The old code
+    # returned matches[0] (the C9900 placeholder). We must return the real part.
+    payload = _list_payload([
+        {"componentCode": "C9900016815", "componentModelEn": "PH2-10-UA",
+         "stockCount": 0, "componentBrandEn": "JLCPCB Assembly", "lcscGoodsUrl": None},
+        {"componentCode": "C5708577", "componentModelEn": "PH2-10-UA",
+         "stockCount": 0, "componentBrandEn": "ADAM TECH",
+         "lcscGoodsUrl": "https://www.lcsc.com/product-detail/_C5708577.html"},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("PH2-10-UA") == "C5708577"
+
+
+def test_in_stock_placeholder_beats_out_of_stock_genuine(monkeypatch):
+    # Assemblability wins: a C9900 SKU that alone has stock is the orderable one.
+    payload = _list_payload([
+        {"componentCode": "C5708577", "componentModelEn": "PART1",
+         "stockCount": 0, "lcscGoodsUrl": "https://lcsc/x"},
+        {"componentCode": "C9900016815", "componentModelEn": "PART1",
+         "stockCount": 500, "lcscGoodsUrl": None},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("PART1") == "C9900016815"
+
+
+def test_basic_library_preferred_over_extended(monkeypatch):
+    payload = _list_payload([
+        {"componentCode": "C-ext", "componentModelEn": "PART1", "stockCount": 100,
+         "componentLibraryType": "expand"},
+        {"componentCode": "C-basic", "componentModelEn": "PART1", "stockCount": 100,
+         "componentLibraryType": "base"},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("PART1") == "C-basic"
+
+
+def test_cheaper_part_wins_final_tiebreak(monkeypatch):
+    payload = _list_payload([
+        {"componentCode": "C-dear", "componentModelEn": "PART1", "stockCount": 100,
+         "componentPrices": [{"startNumber": 1, "productPrice": 0.5}]},
+        {"componentCode": "C-cheap", "componentModelEn": "PART1", "stockCount": 100,
+         "componentPrices": [{"startNumber": 1, "productPrice": 0.1}]},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("PART1") == "C-cheap"
+
+
+def test_c9900_with_catalog_page_not_treated_as_placeholder(monkeypatch):
+    # A C9900 code that DOES have an LCSC catalog page is orderable, not synthetic.
+    payload = _list_payload([
+        {"componentCode": "C9900274507", "componentModelEn": "PART1",
+         "stockCount": 0, "lcscGoodsUrl": "https://lcsc/real"},
+    ])
+    _patch_post(monkeypatch, FakeResp(payload))
+    assert jlcpcb_lcsc_for("PART1") == "C9900274507"
+
+
 def test_empty_list_returns_none(monkeypatch):
     _patch_post(monkeypatch, FakeResp(_list_payload([])))
     assert jlcpcb_lcsc_for("WHATEVER") is None

@@ -90,11 +90,22 @@ class Resolution:
     resolved_mpn: Optional[str] = None  # MPN discovered via DigiKey (step 3)
 
 
+# Bump whenever the MPN -> LCSC *selection* logic changes (e.g. the ranking in
+# suppliers.jlcpcb_lcsc_for). On a version mismatch the cached mpn_to_lcsc picks
+# are wiped so the new logic re-resolves them — otherwise a pick cached by the
+# old logic (e.g. a bogus C9900 placeholder) would survive the code fix. The
+# DigiKey PN -> MPN mapping is stable, so it is NOT versioned/invalidated.
+LCSC_SELECTION_VERSION = "2"
+
+
 class Cache:
     """SQLite memo of the two network hops: DigiKey PN -> MPN, MPN -> LCSC.
 
     Only positive results are stored, so a transient network failure never
-    poisons a later run. Pass ``":memory:"`` for an ephemeral cache.
+    poisons a later run. The MPN -> LCSC table is stamped with
+    :data:`LCSC_SELECTION_VERSION` and cleared automatically when that changes,
+    so improving the part-picking logic invalidates its stale picks. Pass
+    ``":memory:"`` for an ephemeral cache.
     """
 
     def __init__(self, path: Path | str = ":memory:") -> None:
@@ -107,7 +118,26 @@ class Cache:
             "CREATE TABLE IF NOT EXISTS mpn_to_lcsc "
             "(mpn TEXT PRIMARY KEY, lcsc TEXT NOT NULL)"
         )
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
         self.conn.commit()
+        self._invalidate_stale_lcsc()
+
+    def _invalidate_stale_lcsc(self) -> None:
+        """Wipe the MPN -> LCSC cache when it was written by an older selection
+        logic, then record the current version."""
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = 'lcsc_selection_version'"
+        ).fetchone()
+        if row is None or row[0] != LCSC_SELECTION_VERSION:
+            self.conn.execute("DELETE FROM mpn_to_lcsc")
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) "
+                "VALUES ('lcsc_selection_version', ?)",
+                (LCSC_SELECTION_VERSION,),
+            )
+            self.conn.commit()
 
     def get_mpn(self, dk_pn: str) -> Optional[str]:
         row = self.conn.execute(

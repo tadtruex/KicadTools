@@ -108,6 +108,31 @@ def test_cache_avoids_repeat_network_calls():
     assert jlc_calls == ["MPN-1"]
 
 
+def test_cache_invalidates_lcsc_on_selection_version_change(tmp_path):
+    # A pick cached by older selection logic must not survive a logic change.
+    path = tmp_path / "c.sqlite"
+    c = Cache(path)
+    c.put_lcsc("PH2-10-UA", "C9900016815")  # a bogus pick from the old ranking
+    c.put_mpn("dk-1", "PH2-10-UA")          # DigiKey mapping is stable
+    # Simulate the entries having been written by an earlier version.
+    c.conn.execute("UPDATE meta SET value='1' WHERE key='lcsc_selection_version'")
+    c.conn.commit()
+    c.close()
+
+    reopened = Cache(path)  # sees version bump -> wipes mpn_to_lcsc
+    assert reopened.get_lcsc("PH2-10-UA") is None   # stale pick gone
+    assert reopened.get_mpn("dk-1") == "PH2-10-UA"  # DigiKey cache preserved
+
+
+def test_cache_keeps_lcsc_when_version_matches(tmp_path):
+    path = tmp_path / "c.sqlite"
+    c = Cache(path)
+    c.put_lcsc("MPN-X", "C123")
+    c.close()
+    # Reopening at the same version keeps valid picks (no needless re-fetch).
+    assert Cache(path).get_lcsc("MPN-X") == "C123"
+
+
 def test_iter_bom_part_records_reads_real_board():
     records = iter_bom_part_records(BOARD)
     assert records, "expected placed BOM parts on the MotorDriver board"

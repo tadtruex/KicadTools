@@ -28,7 +28,8 @@ from kicadtools.jlcpcb import (
     undetermined_references,
     write_jlcpcb_csv,
 )
-from kicadtools.pcb import read_mounting_for_schematic
+from kicadtools.cpl import cpl_from_schematic, write_cpl_csv
+from kicadtools.pcb import read_mounting_for_schematic, sibling_pcb
 from kicadtools.gui.lcsc import LINK_ROLE, LcscTableModel, ResolveWorker
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.resolve import iter_bom_part_records
@@ -146,6 +147,9 @@ class MainWindow(QMainWindow):
         self._save_as_act.triggered.connect(self._save_as)
         self._export_jlc_act = file_menu.addAction("Export &JLCPCB BOM…")
         self._export_jlc_act.triggered.connect(self._export_jlcpcb)
+
+        self._export_cpl_act = file_menu.addAction("Export JLCPCB &CPL…")
+        self._export_cpl_act.triggered.connect(self._export_cpl)
         file_menu.addSeparator()
         quit_act = file_menu.addAction("&Quit")
         quit_act.setShortcut(QKeySequence.Quit)
@@ -440,6 +444,64 @@ class MainWindow(QMainWindow):
                 msg += f" {len(undet)} part(s) of undetermined mounting excluded."
         if miss:
             msg += f" {len(miss)} lack an LCSC Part #."
+        self.statusBar().showMessage(msg)
+
+    def _export_cpl(self) -> None:
+        """Export the pick-and-place file as a JLCPCB-format CPL CSV, built from
+        the board's footprint geometry. Read-only: never touches the schematic or
+        the dirty flag. Designators are restricted to the BOM's so the CPL and
+        BOM match (a JLCPCB requirement)."""
+        if not self._records or not self._board:
+            QMessageBox.information(self, "No board", "Open a schematic first.")
+            return
+        pcb = sibling_pcb(self._board)
+        if pcb is None:
+            QMessageBox.warning(
+                self,
+                "No board file",
+                f"No {Path(self._board).with_suffix('.kicad_pcb').name} beside the "
+                "schematic. The CPL is built from the board, so place the parts first.",
+            )
+            return
+        # Match a --smd BOM: offer to keep only surface-mount parts.
+        resp = QMessageBox.question(
+            self,
+            "Export JLCPCB CPL",
+            "Include surface-mount (SMD) parts only?\n\n"
+            "Yes: SMD parts only (mounting read from the board).\n"
+            "No: all placed BOM parts.",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.No,
+        )
+        if resp == QMessageBox.Cancel:
+            return
+        if resp == QMessageBox.Yes:
+            mounting, _pcb = read_mounting_for_schematic(self._board)
+            include = {r.reference for r in self._records if mounting.get(r.reference) == "smd"}
+        else:
+            include = {r.reference for r in self._records}
+
+        lines = cpl_from_schematic(pcb, include=include)
+
+        start = str(Path(self._board).with_name(Path(self._board).stem + "_cpl.csv"))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export JLCPCB CPL", start, "CSV (*.csv)"
+        )
+        if not path:
+            return
+        dest = Path(path)
+        if dest.suffix != ".csv":
+            dest = dest.with_suffix(".csv")
+        try:
+            with open(dest, "w", newline="", encoding="utf-8") as f:
+                write_cpl_csv(lines, f)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        msg = f"Exported {len(lines)} placement(s) to {dest.name}."
+        missing = include - {ln.designator for ln in lines}
+        if missing:
+            msg += f" {len(missing)} BOM part(s) have no footprint on the board."
         self.statusBar().showMessage(msg)
 
     # ---- quit --------------------------------------------------------

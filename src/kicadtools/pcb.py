@@ -9,8 +9,9 @@ rather than guessing from the footprint name.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from sexpdata import Symbol, loads
 
@@ -58,6 +59,126 @@ def parse_footprint_mounting(text: str) -> Dict[str, str]:
             if ref:
                 mounting[ref] = _footprint_mounting(node)
     return mounting
+
+
+# --- footprint placement (for the JLCPCB CPL / pick-and-place export) -----
+#
+# Coordinates in a ``.kicad_pcb`` are already in millimetres (KiCad 6+), with the
+# Y axis pointing DOWN. A footprint carries its origin + orientation in
+# ``(at x y angle)`` and its side in the direct ``(layer "F.Cu"|"B.Cu")`` child;
+# each ``(pad …)`` gives a ``(at …)`` local to that origin and a ``(size w h)``.
+# The CPL builder (``kicadtools.cpl``) turns these into JLCPCB centroids.
+
+
+@dataclass(frozen=True)
+class Pad:
+    """One pad, in the footprint's local frame (mm), before the footprint's own
+    rotation/placement is applied."""
+
+    x: float
+    y: float
+    w: float
+    h: float
+    angle: float  # pad's own rotation, degrees
+
+
+@dataclass(frozen=True)
+class Placement:
+    """A placed footprint's raw geometry, straight from the ``.kicad_pcb`` (mm,
+    Y-down, angle CCW-positive) — no JLCPCB transforms applied yet."""
+
+    reference: str
+    footprint: str  # library id, e.g. "Resistor_SMD:R_0603_1608Metric"
+    x: float
+    y: float
+    angle: float
+    side: str  # "top" | "bottom"
+    pads: Tuple[Pad, ...]
+
+
+def _direct_child(node, head: str):
+    """The first direct child list of *node* headed by ``Symbol(head)``, or None.
+    Direct-only, so a nested ``(layer …)`` inside a property/pad is not matched."""
+    for item in node:
+        if isinstance(item, list) and item and item[0] == Symbol(head):
+            return item
+    return None
+
+
+def _numbers(node) -> List[float]:
+    """The numeric tail of an s-expr like ``(at 1.0 2.0 90)`` -> ``[1.0, 2.0, 90.0]``."""
+    if not node:
+        return []
+    return [float(v) for v in node[1:] if isinstance(v, (int, float))]
+
+
+def _footprint_side(node) -> str:
+    layer = _direct_child(node, "layer")
+    name = str(layer[1]) if layer and len(layer) >= 2 else ""
+    return "bottom" if name.startswith("B.") else "top"
+
+
+def _parse_pads(node) -> Tuple[Pad, ...]:
+    pads: List[Pad] = []
+    for item in node:
+        if not (isinstance(item, list) and item and item[0] == Symbol("pad")):
+            continue
+        at = _numbers(_direct_child(item, "at"))
+        size = _numbers(_direct_child(item, "size"))
+        if len(at) < 2 or len(size) < 2:
+            continue
+        pads.append(
+            Pad(
+                x=at[0],
+                y=at[1],
+                w=size[0],
+                h=size[1],
+                angle=at[2] if len(at) > 2 else 0.0,
+            )
+        )
+    return tuple(pads)
+
+
+def parse_footprint_placements(text: str) -> Dict[str, Placement]:
+    """Map each placed footprint's reference to its :class:`Placement` from
+    ``.kicad_pcb`` *text*. Pure — no I/O. Footprints without a resolvable
+    reference or ``(at …)`` are skipped."""
+    tree = loads(text)
+    out: Dict[str, Placement] = {}
+    if not isinstance(tree, list):
+        return out
+    for node in tree:
+        if not (isinstance(node, list) and node and node[0] == Symbol("footprint")):
+            continue
+        ref = _footprint_reference(node)
+        at = _numbers(_direct_child(node, "at"))
+        if not ref or len(at) < 2:
+            continue
+        lib = node[1] if len(node) > 1 and isinstance(node[1], str) else ""
+        out[ref] = Placement(
+            reference=ref,
+            footprint=lib,
+            x=at[0],
+            y=at[1],
+            angle=at[2] if len(at) > 2 else 0.0,
+            side=_footprint_side(node),
+            pads=_parse_pads(node),
+        )
+    return out
+
+
+def read_aux_origin(text: str) -> Tuple[float, float]:
+    """The board's drill/place (auxiliary) origin in mm, or ``(0.0, 0.0)`` when
+    the board doesn't set one. JLCPCB only requires the CPL and the Gerbers to
+    share this origin; KiCad exports both relative to it."""
+    tree = loads(text)
+    if not isinstance(tree, list):
+        return (0.0, 0.0)
+    setup = _direct_child(tree, "setup")
+    if setup is None:
+        return (0.0, 0.0)
+    origin = _numbers(_direct_child(setup, "aux_axis_origin"))
+    return (origin[0], origin[1]) if len(origin) >= 2 else (0.0, 0.0)
 
 
 def sibling_pcb(schematic: Path) -> Optional[Path]:

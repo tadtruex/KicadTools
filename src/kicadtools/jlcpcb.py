@@ -20,6 +20,7 @@ CLI and the GUI.
 from __future__ import annotations
 
 import csv
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,21 @@ from kicadtools.resolve import PartRecord, iter_bom_part_records
 # spelling (what KiCad's Fabrication Toolkit emits ready-to-upload); JLCPCB also
 # accepts "JLCPCB Part #" / "Value" etc., but this set needs no manual mapping.
 JLC_FIELDS = ["Comment", "Designator", "Footprint", "LCSC Part #"]
+
+# JLCPCB rejects a BOM line carrying more than 200 reference designators; groups
+# larger than this are split across multiple lines (same part, same LCSC).
+MAX_DESIGNATORS_PER_LINE = 200
+
+
+def _valid_lcsc(value: object) -> str:
+    """Return *value* as a clean LCSC code (``C`` + digits, upper-cased), or ``""``.
+
+    JLCPCB's part-number cell must hold **only** an LCSC ``C\\d+`` code — a stray
+    MPN there is a documented cause of rejection. Anything that isn't a C-code is
+    blanked, so the part still exports (JLCPCB then asks you to pick it) rather
+    than poisoning the upload."""
+    v = str(value or "").strip().upper()
+    return v if re.fullmatch(r"C\d+", v) else ""
 
 
 @dataclass(frozen=True)
@@ -89,20 +105,25 @@ def build_jlcpcb_bom(
             continue
         value = str(rec.props.get("Value", "") or "")
         footprint = str(rec.props.get("Footprint", "") or "")
-        lcsc = override.get(rec.reference) or extract_part_numbers(rec.props).lcsc or ""
+        lcsc = _valid_lcsc(override.get(rec.reference) or extract_part_numbers(rec.props).lcsc)
         groups.setdefault((value, footprint, lcsc), []).append(rec.reference)
 
-    lines = [
-        JlcBomLine(
-            comment=value,
-            footprint=footprint,
-            lcsc=lcsc,
-            references=tuple(sorted(refs, key=natural_key)),
-            # A group shares one footprint, so its parts share one mounting.
-            mounting=mount.get(refs[0], UNKNOWN),
-        )
-        for (value, footprint, lcsc), refs in groups.items()
-    ]
+    lines: List[JlcBomLine] = []
+    for (value, footprint, lcsc), refs in groups.items():
+        ordered = sorted(refs, key=natural_key)
+        # Split oversized groups into <=200-designator lines (JLCPCB's cap).
+        for start in range(0, len(ordered), MAX_DESIGNATORS_PER_LINE):
+            chunk = ordered[start : start + MAX_DESIGNATORS_PER_LINE]
+            lines.append(
+                JlcBomLine(
+                    comment=value,
+                    footprint=footprint,
+                    lcsc=lcsc,
+                    references=tuple(chunk),
+                    # A group shares one footprint, so its parts share one mounting.
+                    mounting=mount.get(chunk[0], UNKNOWN),
+                )
+            )
     lines.sort(key=lambda ln: natural_key(ln.references[0]))
     return lines
 

@@ -39,6 +39,61 @@ def _norm_mpn(mpn: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", mpn.upper())
 
 
+def _stock_count(part: dict) -> float:
+    """Best-effort JLCPCB stock for a search hit (0.0 if unknown/unparseable)."""
+    for key in ("stockCount", "stock", "leastNumber"):
+        try:
+            return max(0.0, float(part.get(key) or 0))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _in_stock(part: dict) -> bool:
+    return _stock_count(part) > 0
+
+
+def _min_price(part: dict) -> float:
+    """Lowest tier unit price for a hit (``inf`` when no price tiers present),
+    so a cheaper part sorts ahead of a pricier one as a final tiebreak."""
+    prices = part.get("componentPrices") or []
+    tiers = []
+    for tier in prices:
+        try:
+            tiers.append(float(tier.get("productPrice")))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return min(tiers) if tiers else float("inf")
+
+
+def _is_placeholder(part: dict) -> bool:
+    """True for a JLCPCB-internal ``C9900…`` SKU that carries no LCSC catalog
+    page — a synthetic entry (brand ``JLCPCB Assembly``, no ``lcscGoodsUrl``) we
+    deprioritize behind the genuine catalog part for the same MPN. A ``C9900…``
+    code that *does* have a catalog page is left alone (it can be orderable)."""
+    code = str(part.get("componentCode") or "")
+    return bool(re.match(r"^C9900\d+$", code)) and not part.get("lcscGoodsUrl")
+
+
+def _rank_match(part: dict) -> tuple:
+    """Sort key (lower is better) to pick the best of several exact-MPN hits.
+
+    Priority: in-stock (assemblable) first; then a genuine catalog part over a
+    ``C9900…`` placeholder; then a Basic-library part (no setup fee) over an
+    Extended one; then a "preferred" Extended part; then more stock; then a
+    lower unit price. Rooted in the JLCPCB parts-API semantics confirmed by the
+    spec research — the real orderability signal is stock, not the C-number."""
+    lib = str(part.get("componentLibraryType") or "").lower()
+    return (
+        0 if _in_stock(part) else 1,
+        1 if _is_placeholder(part) else 0,
+        0 if lib == "base" else 1,
+        0 if part.get("preferredComponentFlag") else 1,
+        -_stock_count(part),
+        _min_price(part),
+    )
+
+
 def lcsc_url(lcsc: str) -> Optional[str]:
     """The LCSC store search URL for an LCSC code (e.g. ``C12345``), or ``None``
     when *lcsc* is empty. Search (not a product-detail slug) resolves reliably
@@ -196,15 +251,8 @@ def jlcpcb_lcsc_for(mpn: str) -> Optional[str]:
     if not matches:
         return None
 
-    def _in_stock(part: dict) -> bool:
-        for key in ("stockCount", "stock", "leastNumber"):
-            try:
-                if float(part.get(key) or 0) > 0:
-                    return True
-            except (TypeError, ValueError):
-                continue
-        return False
-
-    best = next((p for p in matches if _in_stock(p)), matches[0])
+    # Among exact-MPN hits, pick the best orderable part (see _rank_match) so a
+    # synthetic C9900 placeholder never wins over the genuine catalog part.
+    best = min(matches, key=_rank_match)
     code = best.get("componentCode")
     return code or None

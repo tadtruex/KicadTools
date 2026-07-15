@@ -13,7 +13,8 @@ from kicadtools.jlcpcb import (
     undetermined_references,
     write_jlcpcb_csv,
 )
-from kicadtools.pcb import read_mounting_for_schematic
+from kicadtools.cpl import cpl_from_schematic, write_cpl_csv
+from kicadtools.pcb import read_mounting_for_schematic, sibling_pcb
 from kicadtools.normalize import (
     compute_file_changes,
     plan_normalization,
@@ -255,6 +256,47 @@ def _export_jlcpcb(args: argparse.Namespace) -> int:
     return 1 if miss else 0
 
 
+def _export_cpl(args: argparse.Namespace) -> int:
+    pcb = sibling_pcb(args.schematic)
+    if pcb is None:
+        print(
+            f"⚠️  no {Path(args.schematic).with_suffix('.kicad_pcb').name} found next "
+            "to the schematic — the CPL is built from the board, so place the parts "
+            "first. Nothing written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Restrict the CPL to the BOM's reference designators so BOM and CPL match
+    # exactly (a JLCPCB requirement). With --smd, that BOM ref set is SMD-only.
+    records = iter_bom_part_records(args.schematic)
+    mounting: dict = {}
+    if args.smd:
+        mounting, _ = read_mounting_for_schematic(args.schematic)
+        include = {r.reference for r in records if mounting.get(r.reference) == "smd"}
+    else:
+        include = {r.reference for r in records}
+
+    lines = cpl_from_schematic(pcb, include=include)
+
+    placed = {ln.designator for ln in lines}
+    missing = sorted(include - placed, key=lambda r: r)
+    if missing:
+        print(
+            f"⚠️  {len(missing)} BOM part(s) have no footprint on the board (not in "
+            f"the CPL): {', '.join(missing)}",
+            file=sys.stderr,
+        )
+
+    if args.output:
+        with open(args.output, "w", newline="", encoding="utf-8") as f:
+            write_cpl_csv(lines, f)
+        print(f"Wrote {len(lines)} placement(s) to {args.output}", file=sys.stderr)
+    else:
+        write_cpl_csv(lines, sys.stdout)
+    return 0
+
+
 def _write_report(path, records, resolutions) -> None:
     fields = [
         "Reference", "Value", "Footprint", "Status", "Entry",
@@ -364,6 +406,26 @@ def main(argv=None) -> int:
         ".kicad_pcb; parts of undetermined mounting are excluded and reported)",
     )
     jlc.set_defaults(func=_export_jlcpcb)
+
+    cpl = sub.add_parser(
+        "cpl",
+        help="Export a CPL (pick-and-place) CSV in the format JLCPCB expects",
+    )
+    cpl.add_argument("schematic", type=Path, help="Path to a .kicad_sch file")
+    cpl.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        metavar="CSV",
+        help="Write the CPL here (default: stdout)",
+    )
+    cpl.add_argument(
+        "--smd",
+        action="store_true",
+        help="Only include surface-mount parts (mounting read from the .kicad_pcb), "
+        "matching a --smd BOM",
+    )
+    cpl.set_defaults(func=_export_cpl)
 
     args = parser.parse_args(argv)
     return args.func(args)

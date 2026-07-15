@@ -63,6 +63,30 @@ def test_blank_and_valued_lcsc_split():
     assert any(ln.lcsc == "" for ln in lines)
 
 
+def test_oversized_group_splits_at_200_designators():
+    # JLCPCB rejects >200 designators in one cell; a 450-part group -> 200+200+50.
+    recs = [_rec(f"R{i}", Value="10k", Footprint="R_0603", LCSC="C1") for i in range(450)]
+    lines = build_jlcpcb_bom(recs)
+    assert len(lines) == 3
+    assert [ln.quantity for ln in sorted(lines, key=lambda l: -l.quantity)] == [200, 200, 50]
+    # Every original ref appears exactly once across all lines, no duplicates.
+    all_refs = [r for ln in lines for r in ln.references]
+    assert len(all_refs) == 450
+    assert len(set(all_refs)) == 450
+    assert all(ln.lcsc == "C1" for ln in lines)
+
+
+def test_non_lcsc_partnumber_is_blanked():
+    # An MPN mistakenly sitting in the LCSC field must never reach the export.
+    lines = build_jlcpcb_bom([_rec("U1", Value="MCU", Footprint="QFN", LCSC="STM32F103")])
+    assert lines[0].lcsc == ""
+
+
+def test_lcsc_code_is_uppercased():
+    lines = build_jlcpcb_bom([_rec("R1", Value="10k", Footprint="R_0603", LCSC="c123")])
+    assert lines[0].lcsc == "C123"
+
+
 def test_missing_lcsc_blank_not_dropped():
     lines = build_jlcpcb_bom([_rec("R1", Value="10k", Footprint="R_0603")])
     assert len(lines) == 1
