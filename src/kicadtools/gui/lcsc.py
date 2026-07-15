@@ -22,8 +22,8 @@ from kicadtools.resolve import Cache, PartRecord, Resolution, Resolver, Status
 from kicadtools.suppliers import digikey_url, lcsc_url
 
 # An "Accept" checkbox leads the row (mirroring the Intents tab), then the
-# symbol's description and the read-only part-number columns.
-_LCSC_COLUMNS = ["Accept", "Ref", "Description", "LCSC", "DigiKey", "MPN", "Status"]
+# read-only part-number columns, with the (often long) description trailing last.
+_LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Status", "Description"]
 _COL_DESCRIPTION = _LCSC_COLUMNS.index("Description")
 _COL_LCSC = _LCSC_COLUMNS.index("LCSC")
 _COL_DIGIKEY = _LCSC_COLUMNS.index("DigiKey")
@@ -195,11 +195,11 @@ class LcscTableModel(QAbstractTableModel):
             return (
                 "",  # Accept column carries a checkbox, no text
                 row.reference,
-                row.description,
                 row.lcsc,
                 row.digikey_pn,
                 row.mpn,
                 self._status_text(r),
+                row.description,
             )[col]
         return None
 
