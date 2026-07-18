@@ -3,6 +3,62 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Parametric intent-resolution — started (2026-07-18)
+
+New feature: make the electrical-intent model actively resolve parts. User
+specifies a minimal param set per component (a resistor: likely just resistance
++ footprint); KicadTools confirms/fills the rest. **DigiKey is the parametric
+source of truth** (JLCPCB has no structured attributes — see the API probe
+below); JLCPCB is an existence-check-by-MPN only for now. 8-task backbone.
+
+**DONE:**
+- `ResistorIntent.power_min` (`Power:Min` property → `power_min: str|None`, optional
+  `.get()`, mirrors `Voltage:Min`; rendered in `description()`; unit tests in
+  `test_intent.py`).
+- `DigiKeyClient.product_for(pn_or_mpn) -> DigiKeyProduct | None` via the exact
+  `productdetails` endpoint (kills the fuzzy rank-1 bug); `DigiKeyProduct` carries
+  `mpn`, `digikey_pns`, `datasheet_url`, `quantity_available`, `product_status`,
+  `description`, and `parameters` (raw `{ParameterText: ValueText}`). `mpn_for`
+  now delegates to it. Live-verified (DK PN + MPN resolve correctly, bogus → None);
+  mocked in `test_suppliers.py`. Suite 203 passing.
+
+**DigiKey V4 probe (2026-07-18) — the feasibility gate, CONFIRMED rich + usable:**
+- **Exact lookup endpoint = `GET products/v4/search/{productNumber}/productdetails`.**
+  Accepts BOTH a DigiKey PN and an MPN; returns `{"Product": {...}}` (singular).
+  Verified: DK PN `311-10.0KLRCT-ND` and MPN `RC0402FR-0710KL` both resolve to the
+  correct 10k part. **USE THIS for confirm/fill.**
+- **GOTCHA — keyword search is FUZZY, do not trust `Products[0]`.** The existing
+  `DigiKeyClient.mpn_for` uses `products/v4/search/keyword` with `Limit:1` and takes
+  `Products[0]`. Probing DK PN `311-10.0KLRCT-ND` (a 10k part) that way returned
+  MPN `RC0402FR-071KL` = **1 kOhms** — the WRONG part. So `mpn_for` has a latent
+  correctness bug; task #3 (extend DigiKeyClient) should switch exact lookups to
+  `productdetails` (or verify the returned PN/MPN matches the query) instead of
+  trusting rank-1 of a relevance search.
+- **`Product.Parameters[]`** is a list of `{ParameterText, ValueText}`. The names to
+  map to intent fields (verified on a resistor):
+  - `Resistance` = `"10 kOhms"`  (intent `value` is `"10k"`)
+  - `Tolerance` = `"±1%"`  (intent `tolerance_preferred` is `"1%"`)
+  - `Power (Watts)` = `"0.063W, 1/16W"`  (COMPOUND — decimal + fraction; intent
+    `power_min` is `"0.25W"`)
+  - `Supplier Device Package` = `"0402"` (clean — best for footprint match);
+    `Package / Case` = `"0402 (1005 Metric)"` (verbose)
+  - also: Composition, Temperature Coefficient, Operating Temperature,
+    Size / Dimension, Height - Seated (Max), Number of Terminations.
+  - Other useful top-level keys: `ManufacturerProductNumber`, `DatasheetUrl`,
+    `QuantityAvailable`, `ProductStatus`, `UnitPrice`, and DK PNs under
+    `ProductVariations[].DigiKeyProductNumber`.
+- **NORMALIZATION is required for the CONFIRM step** (design note for task #5): the
+  intent stores opaque strings (`"10k"`, `"1%"`, `"0.25W"`) but DigiKey renders
+  `"10 kOhms"` / `"±1%"` / `"0.063W, 1/16W"`. Comparison must normalize BOTH sides
+  to magnitude+unit (Ω, %, W) — parse `k/M/m/µ` multipliers, strip `±`, and handle
+  the compound power string (take the decimal watts). The intent model itself stays
+  opaque-string; the normalizer lives in the resolve/confirm layer.
+- **JLCPCB existence check works:** `jlcpcb_lcsc_for("RC0402FR-0710KL")` → `C60490`.
+
+Next: task #3 (extend `DigiKeyClient` → `product_for(pn_or_mpn) -> DigiKeyProduct`
+via `productdetails`, returning MPN + normalized parametric dict + DK PN +
+datasheet). Then #4 (bridge intents into resolve), #5 (confirm+fill mode).
+
 ## JLCPCB fixes: LCSC ranking, BOM invariants, CPL generation (2026-07-14)
 
 Three-part effort, spec-driven. An ultracode research→adversarial-verify workflow

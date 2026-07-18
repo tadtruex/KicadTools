@@ -156,9 +156,17 @@ def intent_subclass(intent_type: str):
 @intent_subclass("resistor")
 @dataclass(kw_only=True)
 class ResistorIntent(ElectricalIntent):
-    """Resistor – expects ``Value`` and optional ``Tolerance:Preferred``."""
+    """Resistor – expects ``Value``; optional ``Tolerance:Preferred`` & ``Power:Min``.
+
+    ``power_min`` is the minimum acceptable power rating (an opaque string like
+    ``"0.25W"``), mirroring the ``Voltage:Min`` floor semantics — a resistor may
+    be substituted by any part rated at least this. It is optional: a symbol that
+    only specifies ``Value`` still classifies, and the rating is filled later by
+    parametric resolution.
+    """
     value: str
     tolerance_preferred: List[str] = field(default_factory=list)
+    power_min: str | None = None
 
     @classmethod
     def _from_dict_impl(cls, data: Dict[str, Any]) -> "ResistorIntent":
@@ -173,15 +181,19 @@ class ResistorIntent(ElectricalIntent):
         if "Tolerance:Preferred" in data:
             tolerance_preferred = _parse_preferred(data["Tolerance:Preferred"])
 
+        power_min = data.get("Power:Min")
+
         return cls(
             **cls._base_kwargs(data),
             value=value,
             tolerance_preferred=tolerance_preferred,
+            power_min=power_min,
         )
 
     def description(self) -> str:
         tol = f" ±{self.tolerance_preferred[0]}" if self.tolerance_preferred else ""
-        return f"{self.reference}: {self.value}{tol} resistor"
+        pwr = f" {self.power_min}" if self.power_min else ""
+        return f"{self.reference}: {self.value}{tol}{pwr} resistor"
 
 
 @intent_subclass("capacitor")

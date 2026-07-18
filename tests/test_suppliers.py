@@ -185,15 +185,74 @@ def test_digikey_unconfigured_returns_none(monkeypatch):
     assert client.mpn_for("anything-ND") is None
 
 
-def test_digikey_happy_path(monkeypatch):
-    calls = {"n": 0}
+# A realistic (trimmed) v4 productdetails Product object for a 10k resistor.
+_DETAILS_PRODUCT = {
+    "ManufacturerProductNumber": "RC0402FR-0710KL",
+    "DatasheetUrl": "https://example.com/ds.pdf",
+    "ProductUrl": "https://www.digikey.com/en/products/detail/x",
+    "QuantityAvailable": 1234,
+    "ProductStatus": {"Id": 0, "Status": "Active"},
+    "Description": {"ProductDescription": "RES 10K OHM 1% 1/16W 0402"},
+    "ProductVariations": [
+        {"DigiKeyProductNumber": "311-10.0KLRTR-ND"},
+        {"DigiKeyProductNumber": "311-10.0KLRCT-ND"},
+    ],
+    "Parameters": [
+        {"ParameterText": "Resistance", "ValueText": "10 kOhms"},
+        {"ParameterText": "Tolerance", "ValueText": "±1%"},
+        {"ParameterText": "Power (Watts)", "ValueText": "0.063W, 1/16W"},
+        {"ParameterText": "Supplier Device Package", "ValueText": "0402"},
+    ],
+}
 
+
+def _fake_dk(monkeypatch, *, details=_DETAILS_PRODUCT, status=200):
+    """Wire a DigiKeyClient whose token POST works and whose productdetails GET
+    returns *details* wrapped as ``{"Product": ...}`` (or an error status)."""
     def fake_post(url, **kwargs):
-        calls["n"] += 1
-        if url == suppliers.TOKEN_URL:
-            return FakeResp({"access_token": "tok", "expires_in": 3600})
-        return FakeResp({"Products": [{"ManufacturerProductNumber": "RMCF0603FT100K"}]})
+        assert url == suppliers.TOKEN_URL
+        return FakeResp({"access_token": "tok", "expires_in": 3600})
+
+    def fake_get(url, **kwargs):
+        body = {"Product": details} if details is not None else {}
+        return FakeResp(body, status=status)
 
     monkeypatch.setattr(suppliers.requests, "post", fake_post)
+    monkeypatch.setattr(suppliers.requests, "get", fake_get)
+    return DigiKeyClient(client_id="id", client_secret="secret")
+
+
+def test_digikey_mpn_for_delegates_to_product_for(monkeypatch):
+    client = _fake_dk(monkeypatch)
+    assert client.mpn_for("311-10.0KLRCT-ND") == "RC0402FR-0710KL"
+
+
+def test_digikey_product_for_parses_parameters(monkeypatch):
+    client = _fake_dk(monkeypatch)
+    p = client.product_for("311-10.0KLRCT-ND")
+    assert p is not None
+    assert p.mpn == "RC0402FR-0710KL"
+    assert p.param("Resistance") == "10 kOhms"
+    assert p.param("Power (Watts)") == "0.063W, 1/16W"
+    assert p.param("Supplier Device Package") == "0402"
+    assert p.quantity_available == 1234
+    assert p.product_status == "Active"
+    assert p.datasheet_url == "https://example.com/ds.pdf"
+    assert "311-10.0KLRCT-ND" in p.digikey_pns
+
+
+def test_digikey_product_for_404_returns_none(monkeypatch):
+    client = _fake_dk(monkeypatch, status=404)
+    assert client.product_for("no-such-part") is None
+    assert client.mpn_for("no-such-part") is None
+
+
+def test_digikey_product_for_empty_pn_short_circuits(monkeypatch):
+    def boom_get(*a, **k):
+        raise AssertionError("should not hit the network for an empty PN")
+
+    monkeypatch.setattr(suppliers.requests, "get", boom_get)
     client = DigiKeyClient(client_id="id", client_secret="secret")
-    assert client.mpn_for("P100KLCT-ND") == "RMCF0603FT100K"
+    client._token = "tok"  # pretend already authed
+    client._token_expires_at = float("inf")
+    assert client.product_for("") is None

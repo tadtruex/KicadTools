@@ -4,6 +4,7 @@ from kicadtools.intent import (
     ConnectorIntent,
     ElectricalIntent,
     LedIntent,
+    ResistorIntent,
     SpecificPartIntent,
     TransistorIntent,
 )
@@ -42,6 +43,41 @@ def test_led_rgb_value():
     d = ElectricalIntent.from_dict(_led(Reference="U5", Value="1515 rgb led"))
     assert d.color == "rgb"
     assert d.description() == "U5: rgb LED"
+
+
+def _r(**extra):
+    return {"Reference": "R1", "dnp": False, "in_bom": True,
+            "Intent:Type": "resistor", **extra}
+
+
+def test_resistor_registered_under_intent_type():
+    r = ElectricalIntent.from_dict(_r(Value="10k"))
+    assert isinstance(r, ResistorIntent)
+    assert r.classification_note is None
+    assert r.power_min is None
+    assert r.description() == "R1: 10k resistor"
+
+
+def test_resistor_reads_power_min():
+    r = ElectricalIntent.from_dict(_r(Value="10k", **{"Power:Min": "0.25W"}))
+    assert r.power_min == "0.25W"
+    assert r.description() == "R1: 10k 0.25W resistor"
+
+
+def test_resistor_power_min_and_tolerance_together():
+    r = ElectricalIntent.from_dict(
+        _r(Value="10k", **{"Tolerance:Preferred": "1%", "Power:Min": "0.1W"})
+    )
+    assert r.tolerance_preferred == ["1%"]
+    assert r.power_min == "0.1W"
+    assert r.description() == "R1: 10k ±1% 0.1W resistor"
+
+
+def test_resistor_without_power_min_still_classifies():
+    # Power:Min is optional — a resistor specifying only Value must stay typed.
+    r = ElectricalIntent.from_dict(_r(Value="4k7"))
+    assert isinstance(r, ResistorIntent)
+    assert r.power_min is None
 
 
 def _q(**extra):

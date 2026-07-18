@@ -15,13 +15,19 @@ import json
 import os
 import re
 import time
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 from urllib.parse import quote
 
 import requests
 
 TOKEN_URL = "https://api.digikey.com/v1/oauth2/token"
 V4_SEARCH_URL = "https://api.digikey.com/products/v4/search/keyword"
+# Exact-lookup endpoint: accepts a DigiKey PN *or* an MPN and returns the single
+# matching product as ``{"Product": {...}}``. Unlike the keyword search (a fuzzy
+# relevance search whose rank-1 hit can be an unrelated part), this resolves the
+# exact part — so it is what we use for parametric confirm/fill.
+V4_DETAILS_URL = "https://api.digikey.com/products/v4/search/{pn}/productdetails"
 # JLCPCB's SMT parts search. The old GET ``/parts/componentSearch`` endpoint now
 # serves an HTML SPA shell (no JSON), so scraping it yields garbage; this JSON
 # API returns each hit's ``componentModelEn`` (its MPN), which we verify against
@@ -113,8 +119,32 @@ def digikey_url(digikey_pn: str) -> Optional[str]:
     )
 
 
+@dataclass
+class DigiKeyProduct:
+    """A resolved DigiKey product with its full parametric attribute set.
+
+    ``parameters`` maps DigiKey's own ``ParameterText`` (e.g. ``"Resistance"``,
+    ``"Power (Watts)"``, ``"Supplier Device Package"``) to the raw ``ValueText``
+    (e.g. ``"10 kOhms"``, ``"0.063W, 1/16W"``, ``"0402"``). Values are kept raw
+    — normalizing DigiKey's rendering against an intent's opaque strings is the
+    confirm layer's job, not this client's.
+    """
+    mpn: Optional[str] = None
+    digikey_pns: List[str] = field(default_factory=list)
+    datasheet_url: Optional[str] = None
+    product_url: Optional[str] = None
+    quantity_available: Optional[int] = None
+    product_status: Optional[str] = None
+    description: Optional[str] = None
+    parameters: Dict[str, str] = field(default_factory=dict)
+
+    def param(self, name: str) -> Optional[str]:
+        """The raw ValueText for a DigiKey parameter name, or ``None``."""
+        return self.parameters.get(name)
+
+
 class DigiKeyClient:
-    """Resolve a DigiKey part number to its manufacturer part number (MPN).
+    """Look a DigiKey part up and return its MPN + parametric attributes.
 
     Holds its own OAuth2 client-credentials token and refreshes it as needed.
     Construct once and reuse across many lookups so the token is shared.
@@ -163,47 +193,87 @@ class DigiKeyClient:
             return self._obtain_token()
         return True
 
-    def mpn_for(self, digikey_pn: str) -> Optional[str]:
-        """Return the manufacturer part number for *digikey_pn*, or ``None``.
-
-        Uses DigiKey Product Search v4 (keyword), asking for a single record.
-        """
-        if not self.configured or not digikey_pn or not self._ensure_token():
-            return None
-
-        payload = {"Keywords": digikey_pn, "Limit": 1, "Offset": 0}
-        headers = {
+    def _auth_headers(self) -> dict:
+        return {
             "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
             "Accept": "application/json",
             "X-DIGIKEY-Client-Id": self.client_id,
         }
 
-        try:
-            resp = requests.post(
-                V4_SEARCH_URL, headers=headers, json=payload, timeout=_TIMEOUT
-            )
-            if resp.status_code == 401 and self._obtain_token():
-                headers["Authorization"] = f"Bearer {self._token}"
-                resp = requests.post(
-                    V4_SEARCH_URL, headers=headers, json=payload, timeout=_TIMEOUT
-                )
-        except requests.RequestException as exc:
-            print(f"⚠️  Network error searching DigiKey for {digikey_pn}: {exc}")
+    def product_for(self, part_number: str) -> Optional[DigiKeyProduct]:
+        """Return the exact :class:`DigiKeyProduct` for *part_number*, or ``None``.
+
+        *part_number* may be a DigiKey PN or an MPN. Uses the v4
+        ``productdetails`` endpoint (exact lookup) — never the fuzzy keyword
+        search, whose rank-1 hit can be an unrelated part. Every failure
+        degrades to ``None`` so the resolver can flag the part and move on.
+        """
+        if not self.configured or not part_number or not self._ensure_token():
             return None
 
+        url = V4_DETAILS_URL.format(pn=quote(part_number, safe=""))
+        try:
+            resp = requests.get(url, headers=self._auth_headers(), timeout=_TIMEOUT)
+            if resp.status_code == 401 and self._obtain_token():
+                resp = requests.get(url, headers=self._auth_headers(), timeout=_TIMEOUT)
+        except requests.RequestException as exc:
+            print(f"⚠️  Network error looking up DigiKey part {part_number}: {exc}")
+            return None
+
+        if resp.status_code == 404:
+            return None  # no such part — a normal "not found", not an error
         if resp.status_code != 200:
             try:
                 msg = resp.json().get("message") or resp.text
             except ValueError:
                 msg = resp.text
-            print(f"⚠️  DigiKey search failed ({resp.status_code}) for {digikey_pn}: {msg}")
+            print(f"⚠️  DigiKey lookup failed ({resp.status_code}) for {part_number}: {msg}")
             return None
 
-        products = resp.json().get("Products", [])
-        if not products:
+        try:
+            product = resp.json().get("Product")
+        except ValueError:
+            print(f"⚠️  DigiKey lookup returned non-JSON for {part_number}")
             return None
-        return products[0].get("ManufacturerProductNumber")
+        if not product:
+            return None
+        return _parse_product(product)
+
+    def mpn_for(self, digikey_pn: str) -> Optional[str]:
+        """Return the manufacturer part number for *digikey_pn*, or ``None``.
+
+        Thin wrapper over :meth:`product_for` kept for the resolver's
+        ``mpn_for(dk_pn) -> Optional[str]`` contract.
+        """
+        product = self.product_for(digikey_pn)
+        return product.mpn if product else None
+
+
+def _parse_product(product: dict) -> DigiKeyProduct:
+    """Build a :class:`DigiKeyProduct` from a v4 ``Product`` object."""
+    parameters = {
+        str(p.get("ParameterText")): str(p.get("ValueText"))
+        for p in (product.get("Parameters") or [])
+        if p.get("ParameterText") is not None
+    }
+    dk_pns = [
+        v.get("DigiKeyProductNumber")
+        for v in (product.get("ProductVariations") or [])
+        if v.get("DigiKeyProductNumber")
+    ]
+    desc = product.get("Description") or {}
+    status = product.get("ProductStatus") or {}
+    return DigiKeyProduct(
+        mpn=product.get("ManufacturerProductNumber"),
+        digikey_pns=dk_pns,
+        datasheet_url=product.get("DatasheetUrl"),
+        product_url=product.get("ProductUrl"),
+        quantity_available=product.get("QuantityAvailable"),
+        # ProductStatus is an object like {"Id": 0, "Status": "Active"}.
+        product_status=status.get("Status") if isinstance(status, dict) else status,
+        description=desc.get("ProductDescription") if isinstance(desc, dict) else None,
+        parameters=parameters,
+    )
 
 
 def jlcpcb_lcsc_for(mpn: str) -> Optional[str]:
