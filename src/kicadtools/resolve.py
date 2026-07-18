@@ -25,6 +25,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from kicadtools.components import build_intent
+from kicadtools.intent import ElectricalIntent
 from kicadtools.partnum import PartNumbers, extract_part_numbers
 from kicadtools.sexpr_parser import (
     extract_properties,
@@ -44,11 +46,18 @@ class Status(str, Enum):
 
 @dataclass
 class PartRecord:
-    """A placed BOM part with its raw properties and write-back provenance."""
+    """A placed BOM part with its raw properties and write-back provenance.
+
+    ``intent`` is the typed :class:`~kicadtools.intent.ElectricalIntent` built
+    from the same properties (with type-guessing) — it carries the parametric
+    spec the confirm/fill resolution mode checks against. It is ``None`` only
+    when construction failed or when a record is built by hand (e.g. in tests).
+    """
     reference: str
     props: Dict[str, object]
     source_file: Path
     symbol_uuid: Optional[str]
+    intent: Optional[ElectricalIntent] = None
 
 
 def iter_bom_part_records(root_path: Path) -> List[PartRecord]:
@@ -72,7 +81,8 @@ def iter_bom_part_records(root_path: Path) -> List[PartRecord]:
                     continue
                 props = dict(base_props)
                 props["Reference"] = ref
-                records.append(PartRecord(ref, props, sch_path, uuid))
+                intent = build_intent(props, sch_path, uuid)
+                records.append(PartRecord(ref, props, sch_path, uuid, intent))
     return records
 
 

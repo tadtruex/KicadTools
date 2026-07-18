@@ -1,6 +1,6 @@
 """Build a list of components from a KiCad schematic tree."""
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from kicadtools.classify import guess_intent_type
 from kicadtools.intent import ElectricalIntent
@@ -11,6 +11,54 @@ from kicadtools.sexpr_parser import (
     load_schematic_tree,
     symbol_uuid,
 )
+
+
+def build_intent(
+    props: dict,
+    source_file: Optional[Path] = None,
+    symbol_uuid: Optional[str] = None,
+) -> Optional[ElectricalIntent]:
+    """Build one typed :class:`ElectricalIntent` from a raw property dict.
+
+    ``props`` must already carry ``Reference``. When it has no explicit
+    ``Intent:Type`` the type is *guessed* (see :mod:`kicadtools.classify`) and
+    the result is flagged with ``intent_guessed=True`` + a ``guess_basis``.
+    Provenance (*source_file*, *symbol_uuid*) is stamped on for later write-back.
+    Returns ``None`` if the intent can't be constructed at all.
+
+    The caller's dict is not mutated. This is the single classification path
+    shared by :func:`get_components` (the BOM/GUI view) and the resolver's
+    :func:`kicadtools.resolve.iter_bom_part_records`, so both agree on the type.
+    """
+    props = dict(props)  # never mutate the caller's dict
+
+    guess = None
+    if not props.get("Intent:Type"):
+        guess = guess_intent_type(props)
+        if guess is not None:
+            props["Intent:Type"] = guess.intent_type
+
+    try:
+        intent = ElectricalIntent.from_dict(props)
+    except Exception as exc:
+        print(f"❌  Construction failed for {props.get('Reference')}: {exc}")
+        return None
+
+    intent.source_file = source_file
+    intent.symbol_uuid = symbol_uuid
+
+    if guess is not None:
+        intent.intent_guessed = True
+        intent.guess_basis = guess.basis
+        # If the guessed type has no registered subclass yet, make the note say
+        # so plainly instead of "unrecognized Intent:Type".
+        if type(intent) is ElectricalIntent:
+            intent.classification_note = (
+                f"looks like '{guess.intent_type}' ({guess.basis}), "
+                f"but there's no classifier for it yet"
+            )
+
+    return intent
 
 
 def bom_components(components: List[ElectricalIntent]) -> List[ElectricalIntent]:
@@ -46,34 +94,8 @@ def get_components(root_path: Path) -> List[ElectricalIntent]:
 
             for ref, _sheet_path in iter_symbol_instances(symbol):
                 props["Reference"] = ref
-
-                # Explicit Intent:Type wins; only guess to fill the gap.
-                guess = None
-                if not props.get("Intent:Type"):
-                    guess = guess_intent_type(props)
-                    if guess is not None:
-                        props["Intent:Type"] = guess.intent_type
-
-                try:
-                    intent = ElectricalIntent.from_dict(props)
-                except Exception as exc:
-                    print(f"❌  Construction failed for {ref}: {exc}")
-                    continue
-
-                intent.source_file = sch_path
-                intent.symbol_uuid = uuid
-
-                if guess is not None:
-                    intent.intent_guessed = True
-                    intent.guess_basis = guess.basis
-                    # If the guessed type has no registered subclass yet, make the
-                    # note say so plainly instead of "unrecognized Intent:Type".
-                    if type(intent) is ElectricalIntent:
-                        intent.classification_note = (
-                            f"looks like '{guess.intent_type}' ({guess.basis}), "
-                            f"but there's no classifier for it yet"
-                        )
-
-                components.append(intent)
+                intent = build_intent(props, sch_path, uuid)
+                if intent is not None:
+                    components.append(intent)
 
     return components

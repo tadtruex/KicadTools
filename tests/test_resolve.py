@@ -143,3 +143,19 @@ def test_iter_bom_part_records_reads_real_board():
     assert any(extract_part_numbers(r.props).lcsc for r in records)
     # Provenance is populated for write-back later.
     assert all(r.source_file and r.symbol_uuid for r in records)
+
+
+def test_iter_bom_part_records_populates_typed_intent():
+    # The bridge: each record carries the typed ElectricalIntent built from the
+    # same properties, so the confirm/fill mode has a parametric spec to check.
+    from kicadtools.intent import ElectricalIntent, ResistorIntent
+
+    records = iter_bom_part_records(BOARD)
+    assert all(isinstance(r.intent, ElectricalIntent) for r in records)
+    # The board has resistors; they classify as ResistorIntent via the bridge.
+    resistors = [r for r in records if isinstance(r.intent, ResistorIntent)]
+    assert resistors
+    # The intent's reference matches the record's, and provenance is stamped.
+    for r in resistors:
+        assert r.intent.reference == r.reference
+        assert r.intent.symbol_uuid == r.symbol_uuid

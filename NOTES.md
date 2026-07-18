@@ -21,6 +21,13 @@ below); JLCPCB is an existence-check-by-MPN only for now. 8-task backbone.
   `description`, and `parameters` (raw `{ParameterText: ValueText}`). `mpn_for`
   now delegates to it. Live-verified (DK PN + MPN resolve correctly, bogus → None);
   mocked in `test_suppliers.py`. Suite 203 passing.
+- Bridged typed intents into the resolve pipeline: extracted the shared
+  `components.build_intent(props, source_file, symbol_uuid)` (guess type +
+  `from_dict` + stamp provenance/guess flags — the ONE classification path now
+  used by both `get_components` and `resolve.iter_bom_part_records`, so the BOM
+  view and resolver can't diverge). `PartRecord` gains `intent:
+  Optional[ElectricalIntent]` (None only on construction failure / hand-built
+  test records — the confirm/fill mode must tolerate None). Suite 204 passing.
 
 **DigiKey V4 probe (2026-07-18) — the feasibility gate, CONFIRMED rich + usable:**
 - **Exact lookup endpoint = `GET products/v4/search/{productNumber}/productdetails`.**
