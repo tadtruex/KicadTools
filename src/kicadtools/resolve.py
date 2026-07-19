@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from kicadtools.components import build_intent
-from kicadtools.intent import ElectricalIntent
+from kicadtools.confirm import ConfirmResult, confirm_resistor
+from kicadtools.intent import ElectricalIntent, ResistorIntent
 from kicadtools.partnum import PartNumbers, extract_part_numbers
 from kicadtools.sexpr_parser import (
     extract_properties,
@@ -292,3 +293,32 @@ class Resolver:
 
     def resolve_all(self, records: List[PartRecord]) -> List[Resolution]:
         return [self.resolve(r) for r in records]
+
+    def confirm(self, record: PartRecord) -> Optional[ConfirmResult]:
+        """Confirm a resistor's intent fields against its exact DigiKey product.
+
+        This is the parametric-confirmation path, orthogonal to the LCSC
+        resolution in :meth:`resolve`: whenever the symbol names *any* supplier
+        part number (MPN or DigiKey PN), fetch that exact part from DigiKey and
+        check the author's minimum spec against it — confirming what matches and
+        proposing fills for blank fields (see :mod:`kicadtools.confirm`).
+
+        Returns ``None`` when there's nothing to confirm: a non-resistor (only
+        resistors are supported for now), no part number to look up, or a DigiKey
+        lookup that came back empty.
+        """
+        intent = record.intent
+        if not isinstance(intent, ResistorIntent):
+            return None
+        pn = extract_part_numbers(record.props)
+        key = pn.digikey_pn or pn.mpn
+        if not key:
+            return None
+        self._ref = record.reference
+        self._emit(f"DigiKey confirm lookup for {key}…")
+        product = self.digikey.product_for(key)
+        if self.delay:
+            time.sleep(self.delay)
+        if product is None:
+            return None
+        return confirm_resistor(intent, product)
