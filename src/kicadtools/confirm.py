@@ -169,6 +169,7 @@ def _canon_power(dk_raw: str) -> str:
 @dataclass(frozen=True)
 class _FieldSpec:
     attr: str                              # ResistorIntent attribute name
+    prop_key: str                          # schematic property a fill writes to
     label: str                             # human-readable label
     dk_params: Tuple[str, ...]             # DigiKey ParameterText, in preference order
     match: Callable[[object, object], Optional[bool]]
@@ -179,14 +180,17 @@ class _FieldSpec:
 
 _RESISTOR_FIELDS: Tuple[_FieldSpec, ...] = (
     # ``value`` is required on a ResistorIntent, so it is confirm-only (never filled).
-    _FieldSpec("value", "resistance", ("Resistance",), _match_resistance, fillable=False),
-    _FieldSpec("tolerance_preferred", "tolerance", ("Tolerance",), _match_tolerance,
+    _FieldSpec("value", "Value", "resistance", ("Resistance",),
+               _match_resistance, fillable=False),
+    _FieldSpec("tolerance_preferred", "Tolerance:Preferred", "tolerance",
+               ("Tolerance",), _match_tolerance,
                canonical=_canon_tolerance, is_list=True),
-    _FieldSpec("power_min", "power rating", ("Power (Watts)",), _match_power,
-               canonical=_canon_power),
+    _FieldSpec("power_min", "Power:Min", "power rating", ("Power (Watts)",),
+               _match_power, canonical=_canon_power),
     # The KiCad footprint is a full ``lib:name`` we won't overwrite with DigiKey's
     # bare package code, so package is confirm-only.
-    _FieldSpec("footprint", "package", ("Supplier Device Package", "Package / Case"),
+    _FieldSpec("footprint", "Footprint", "package",
+               ("Supplier Device Package", "Package / Case"),
                _match_package, fillable=False),
 )
 
@@ -202,6 +206,7 @@ class Outcome(str, Enum):
 class FieldCheck:
     """The verdict for one intent field against its DigiKey parameter."""
     attr: str
+    prop_key: str                 # schematic property key a FILL writes to
     label: str
     intent_value: Optional[str]   # raw, as on the symbol (a list is joined)
     digikey_value: Optional[str]  # raw ValueText from DigiKey
@@ -280,7 +285,10 @@ def confirm_resistor(intent: ResistorIntent, product: DigiKeyProduct) -> Confirm
 
         intent_str = ", ".join(raw) if spec.is_list else (raw if raw else None)
         checks.append(
-            FieldCheck(spec.attr, spec.label, intent_str, dk_raw, outcome, proposed)
+            FieldCheck(
+                spec.attr, spec.prop_key, spec.label,
+                intent_str, dk_raw, outcome, proposed,
+            )
         )
 
     return ConfirmResult(intent.reference, product, checks)
