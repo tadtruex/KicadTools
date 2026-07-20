@@ -29,6 +29,63 @@ below); JLCPCB is an existence-check-by-MPN only for now. 8-task backbone.
   Optional[ElectricalIntent]` (None only on construction failure / hand-built
   test records — the confirm/fill mode must tolerate None). Suite 204 passing.
 
+### Confirm → fill → write chain COMPLETE (#5–#7, 2026-07-19), resistors only
+
+The whole part-number-given path is built, committed on `develop` (unpushed),
+and live-verified end-to-end. Suite **255 passing**. Only **#8 (parametric
+_search_ for the no-part-number case)** remains. Commits: `6315cf8` (#5),
+`f911d1e` (#6), `b1dcb20` (#7).
+
+- **#5 — `confirm.py` (`6315cf8`):** offline, GUI-agnostic. Value normalizers
+  `parse_resistance` / `parse_percent` / `parse_watts` bridge DigiKey's rendering
+  (`"10 kOhms"`, `"±1%"`, compound `"0.063W, 1/16W"`) ↔ the terse opaque intent
+  strings (`"10k"`, `"1%"`). `parse_resistance` handles R-notation (`4k7`, `4R7`)
+  and is case-sensitive on `M`(mega) vs `m`(milli). A declarative `_RESISTOR_FIELDS`
+  table maps each intent attr → DigiKey param + a match strategy returning
+  `Optional[bool]` (True/False/None-can't-tell → CONFIRMED/CONFLICT/UNKNOWN, so an
+  unparseable value is never a false conflict): resistance = equality within 1%,
+  tolerance = part ≤ loosest preferred %, **power = a FLOOR** (`have >= need`),
+  package = DigiKey code appears as a standalone digit-run in the footprint name.
+  `confirm_resistor(intent, product) -> ConfirmResult` (`.checks`, `.conflicts`,
+  `.fills`, `.confirmed`, `.ok`, `.summary()`). Kept on a **separate
+  `Resolver.confirm(record)` path**, NOT folded into `resolve()` — resolve's tests
+  lock in "an MPN part never touches DigiKey" (a stock/LCSC concern) whereas confirm
+  must consult DigiKey even for MPN parts. `Status`/`Resolution` intentionally left
+  unchanged (the old plan to extend them proved unnecessary).
+- **#6 — `changes.py` (`f911d1e`):** no filesystem I/O. `ProposedChange`
+  (reference, provenance, `property_key`, value, kind, rationale; `.applicable` =
+  has provenance), `Conflict` (recorded, NEVER auto-applied — a conflict means the
+  human picked the wrong part), `ChangeSet` (`.is_empty` / `.extend()` /
+  `.write_plan()`). `write_plan()` lowers applicable changes to
+  `{file:{uuid:{key:value}}}` — the exact shape `writer.write_properties` consumes.
+  `changes_from_confirm(record, ConfirmResult)`: each FILL → an `intent-fill` change
+  (canonical value → its `prop_key`); each CONFLICT → a `Conflict`; a symbol that
+  named only a DigiKey PN → a `part-number` change adding the resolved MPN. Needed
+  `prop_key` added to `confirm._FieldSpec`/`FieldCheck` (`Value`, `Tolerance:Preferred`,
+  `Power:Min`, `Footprint`). NB: those intent-field keys are NOT in
+  `partnum.CANONICAL_KEYS` (that table is part-numbers only) — the `prop_key` IS the
+  canonical spelling, written literally by `set_or_insert_property`.
+- **#7 — `kicadtools confirm <sch> [--write] [--delay] [-v]` (`b1dcb20`):**
+  orchestration in a network-free `cli.run_confirm(records, resolver, *, write=False,
+  out=print) -> (ChangeSet, tallies)` (testable offline with a fake resolver);
+  `_confirm(args)` is the thin driver (DigiKey-config guard, `_StatusLine` progress,
+  tallies + conflict list). **DEFAULT = report-only** (the dry-run — safest for a
+  network+mutation cmd); `--write` applies `write_plan()` per file. Exit 1 on any
+  conflict. Live on MotorDriver: 82 parts → 18 resistors confirmed, 21 props written
+  (16 tolerance fills + 3 MPN adds), and **2 real package conflicts surfaced —
+  R8/R11 have a 0603 footprint but their linked DigiKey part is 0402** (a genuine
+  schematic bug to eyeball on the real board). `--write` round-trips: file re-parses,
+  filled `Tolerance:Preferred` reads back through the intent model.
+  - Smoke-test GOTCHA: MotorDriver is hierarchical — copy the WHOLE `tests/data`
+    tree (subsheets) to a scratch dir, not just the top sheet, or
+    `load_schematic_tree` FileNotFoundErrors on read (crashes before any write —
+    fixtures stay safe).
+
+**Still open:** `lcsc --write` (separate long-standing gap — plumbing exists, never
+CLI-wired; #7 only did the confirm/intent-field write path). And **#8**: turn an
+intent's fields into a DigiKey parametric *search* to FIND a part when none is named
+(the inverse of confirm) — a larger effort, scope with Tad first.
+
 **DigiKey V4 probe (2026-07-18) — the feasibility gate, CONFIRMED rich + usable:**
 - **Exact lookup endpoint = `GET products/v4/search/{productNumber}/productdetails`.**
   Accepts BOTH a DigiKey PN and an MPN; returns `{"Product": {...}}` (singular).
@@ -62,9 +119,9 @@ below); JLCPCB is an existence-check-by-MPN only for now. 8-task backbone.
   opaque-string; the normalizer lives in the resolve/confirm layer.
 - **JLCPCB existence check works:** `jlcpcb_lcsc_for("RC0402FR-0710KL")` → `C60490`.
 
-Next: task #3 (extend `DigiKeyClient` → `product_for(pn_or_mpn) -> DigiKeyProduct`
-via `productdetails`, returning MPN + normalized parametric dict + DK PN +
-datasheet). Then #4 (bridge intents into resolve), #5 (confirm+fill mode).
+(Historical — this probe drove #3–#5, all now DONE; see the "Confirm → fill →
+write chain COMPLETE" section above for current status. Kept for the param-name
+map and the fuzzy-keyword-search warning.)
 
 ## JLCPCB fixes: LCSC ranking, BOM invariants, CPL generation (2026-07-14)
 
