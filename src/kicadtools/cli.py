@@ -5,8 +5,9 @@ import shutil
 import sys
 from pathlib import Path
 
+from kicadtools.changes import ChangeSet, changes_from_confirm
 from kicadtools.components import bom_components, get_components
-from kicadtools.intent import ElectricalIntent
+from kicadtools.intent import ElectricalIntent, ResistorIntent
 from kicadtools.jlcpcb import (
     build_jlcpcb_bom,
     missing_lcsc,
@@ -28,6 +29,7 @@ from kicadtools.resolve import (
     iter_bom_part_records,
 )
 from kicadtools.suppliers import DigiKeyClient
+from kicadtools.writer import write_properties
 
 
 def _bom(args: argparse.Namespace) -> int:
@@ -209,6 +211,118 @@ def _normalize(args: argparse.Namespace) -> int:
     return 0
 
 
+_CONFIRM_GLYPH = {"conflict": "⚠️", "fill": "➕", "clean": "✅", "skip": "⚑"}
+
+
+def run_confirm(records, resolver, *, write=False, out=print):
+    """Confirm each resistor against DigiKey and collect its proposed changes.
+
+    Network-free by construction: *resolver* supplies ``confirm(record)`` (the
+    live :class:`~kicadtools.resolve.Resolver`, or a fake in tests). Prints one
+    line per part via *out*, applies the accumulated plan when *write* is set,
+    and returns ``(ChangeSet, tallies)`` for the caller to summarize.
+    """
+    changeset = ChangeSet()
+    tallies = dict(confirmed=0, conflicted=0, filled=0, skipped=0, unsupported=0)
+
+    for rec in records:
+        if not isinstance(rec.intent, ResistorIntent):
+            tallies["unsupported"] += 1
+            continue
+
+        result = resolver.confirm(rec)
+        if result is None:
+            pn = extract_part_numbers(rec.props)
+            why = "no part number" if not (pn.digikey_pn or pn.mpn) else "not found on DigiKey"
+            out(f"{_CONFIRM_GLYPH['skip']}  {rec.reference:>4}  |  skipped ({why})")
+            tallies["skipped"] += 1
+            continue
+
+        tallies["confirmed"] += 1
+        cs = changes_from_confirm(rec, result)
+        changeset.extend(cs)
+        if result.conflicts:
+            tallies["conflicted"] += 1
+            kind = "conflict"
+        elif cs.changes:
+            tallies["filled"] += 1
+            kind = "fill"
+        else:
+            kind = "clean"
+        out(f"{_CONFIRM_GLYPH[kind]}  {rec.reference:>4}  |  {result.summary()}")
+
+    if write:
+        plan = changeset.write_plan()
+        for path, uuid_to_props in plan.items():
+            write_properties(path, uuid_to_props)
+
+    return changeset, tallies
+
+
+def _confirm(args: argparse.Namespace) -> int:
+    digikey = DigiKeyClient()
+    if not digikey.configured:
+        print(
+            "⚠️  Confirmation reads the parametric truth from DigiKey, but "
+            "DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET are not set. Nothing to do."
+        )
+        return 1
+
+    records = iter_bom_part_records(args.schematic)
+    total = len(records)
+    status = _StatusLine() if args.verbose else None
+
+    resolver = Resolver(digikey=digikey, delay=args.delay)
+    if status:
+        resolver.progress = lambda ref, msg: status.show(
+            f"[{status.index}/{total}] {ref}: {msg}"
+        )
+
+    def out(line: str) -> None:
+        if status:
+            status.clear()
+        print(line, flush=True)
+
+    # Advance the status index as we go (the resolver reads it live).
+    def _iter():
+        for i, rec in enumerate(records, 1):
+            if status:
+                status.index = i
+                status.show(f"[{i}/{total}] {rec.reference}: confirming…")
+            yield rec
+
+    changeset, t = run_confirm(_iter(), resolver, write=args.write, out=out)
+    if status:
+        status.clear()
+
+    n_changes = len(changeset.changes)
+    print(
+        f"\n{total} BOM part(s): {t['confirmed']} confirmed "
+        f"({t['filled']} with fills, {t['conflicted']} with conflicts), "
+        f"{t['skipped']} skipped, {t['unsupported']} not a resistor (unsupported)."
+    )
+    if changeset.conflicts:
+        print(f"\n{len(changeset.conflicts)} conflict(s) — reported, never written:")
+        for c in changeset.conflicts:
+            print(f"  {c.describe()}")
+
+    if not n_changes:
+        print("\nNo intent fields to fill. Nothing to write.")
+        return 1 if changeset.conflicts else 0
+
+    if args.write:
+        plan = changeset.write_plan()
+        print(f"\nWrote {n_changes} propert{'y' if n_changes == 1 else 'ies'} "
+              f"across {len(plan)} file(s).")
+    else:
+        print(f"\n{n_changes} proposed change(s):")
+        for ch in changeset.changes:
+            print(f"  {ch.describe()}")
+        print("\nReport only — re-run with --write to apply these changes.")
+
+    return 1 if changeset.conflicts else 0
+
+
 def _export_jlcpcb(args: argparse.Namespace) -> int:
     records = iter_bom_part_records(args.schematic)
 
@@ -386,6 +500,30 @@ def main(argv=None) -> int:
         help="Show a live status line (current part + lookup in flight)",
     )
     lcsc.set_defaults(func=_lcsc)
+
+    confirm = sub.add_parser(
+        "confirm",
+        help="Confirm each resistor against DigiKey and fill missing intent fields",
+    )
+    confirm.add_argument("schematic", type=Path, help="Path to a .kicad_sch file")
+    confirm.add_argument(
+        "--write",
+        action="store_true",
+        help="Apply the proposed fills to the schematic (default: report only)",
+    )
+    confirm.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Seconds to wait after each live DigiKey call (default: 0.5)",
+    )
+    confirm.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show a live status line (current part + lookup in flight)",
+    )
+    confirm.set_defaults(func=_confirm)
 
     jlc = sub.add_parser(
         "jlcpcb",
