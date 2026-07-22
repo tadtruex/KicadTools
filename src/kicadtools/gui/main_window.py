@@ -8,10 +8,12 @@ from typing import Optional
 from PySide6.QtCore import Qt, QThread, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableView,
@@ -38,6 +40,7 @@ from kicadtools.gui.lcsc import (
     _COL_ROTATION,
 )
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
+from kicadtools.gui.param_editor import ElectricalParamsDialog
 from kicadtools.partrotation import PartRotationStore
 from kicadtools.resolve import iter_bom_part_records
 from kicadtools.sexpr_parser import has_instantiated_sheets
@@ -95,6 +98,9 @@ class MainWindow(QMainWindow):
         # source row and stay valid).
         self.table = self._make_table(self.model)
         self.proxy = self.table.model()
+        # Right-click a row to edit its electrical-intent parameters.
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._intent_context_menu)
 
         accept_checked = QPushButton("Accept Checked")
         accept_all = QPushButton("Accept All")
@@ -192,6 +198,39 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
         self.setWindowModified(False)  # a fresh load matches disk → clean
         self._refresh_status()
+
+    # ---- intent parameter editing -----------------------------------
+    def _intent_context_menu(self, pos) -> None:
+        """Show the Intents-tab row context menu at *pos* (viewport coords)."""
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        src = self.proxy.mapToSource(index)
+        intent = self.model.component_at(src.row())
+        menu = QMenu(self)
+        edit_act = menu.addAction("Edit Electrical Parameters")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is edit_act:
+            self._edit_params(intent)
+
+    def _edit_params(self, intent) -> None:
+        """Pop the parameter editor for *intent*; write accepted edits straight
+        into the schematic (which reloads the board so the row reflects them)."""
+        dialog = ElectricalParamsDialog(intent, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        edits = dialog.edits()
+        if not edits:
+            return
+        if not (intent.source_file and intent.symbol_uuid):
+            QMessageBox.warning(
+                self,
+                "Can't write",
+                f"{intent.reference} has no source location on file to write to.",
+            )
+            return
+        plan = {Path(intent.source_file): {intent.symbol_uuid: edits}}
+        self._write_in_place(plan)
 
     # ---- LCSC / DigiKey links ---------------------------------------
     def _open_link(self, index) -> None:

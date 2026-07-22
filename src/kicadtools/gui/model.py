@@ -55,6 +55,10 @@ class IntentTableModel(QAbstractTableModel):
         self._accepted.clear()
         self.endResetModel()
 
+    def component_at(self, row: int) -> ElectricalIntent:
+        """The intent object backing *row* (a source-model row index)."""
+        return self._c[row]
+
     # ---- status ------------------------------------------------------
     def status(self, row: int) -> str:
         if row in self._accepted:

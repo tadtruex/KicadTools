@@ -45,7 +45,12 @@ class ElectricalIntent:
     dnp: bool
     in_bom: bool
     intent_type: str = field(default="Unknown")
+    # ``footprint`` mirrors KiCad's own ``Footprint`` field (a full ``lib:name``
+    # land pattern) and is read-only to us — we never write it. The intent's
+    # package *constraint* for a parametric search (e.g. ``0603``) is a separate,
+    # intent-owned field so it can't collide with KiCad's footprint syntax.
     footprint: str | None = None
+    package_preferred: List[str] = field(default_factory=list)
     mfr_preferred: List[str] = field(default_factory=list)
     # Why a symbol ended up as a plain ``ElectricalIntent`` instead of a typed
     # subclass. ``None`` on a successfully classified (typed) component.
@@ -85,7 +90,12 @@ class ElectricalIntent:
 
         # optional
         intent_type = str(data.get("Intent:Type", "Unknown"))
-        footprint = data.get("Footprint")
+        footprint = data.get("Footprint")  # KiCad's own field — read-only to us
+        package_preferred = (
+            _parse_preferred(data["Package:Preferred"])
+            if "Package:Preferred" in data
+            else []
+        )
         mfr_preferred = (
             _parse_preferred(data["Mfr:Preferred"])
             if "Mfr:Preferred" in data
@@ -98,6 +108,7 @@ class ElectricalIntent:
             "in_bom": in_bom,
             "intent_type": intent_type,
             "footprint": footprint,
+            "package_preferred": package_preferred,
             "mfr_preferred": mfr_preferred,
         }
 
