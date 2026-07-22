@@ -14,6 +14,14 @@ from kicadtools.jlcpcb import (
     undetermined_references,
     write_jlcpcb_csv,
 )
+from kicadtools.digikey_bom import (
+    BOTH,
+    MOUNTING_FILTERS,
+    SMD_ONLY,
+    build_digikey_bom,
+    unorderable_lines,
+    write_digikey_csv,
+)
 from kicadtools.cpl import cpl_from_schematic, write_cpl_csv
 from kicadtools.partrotation import PartRotationStore, manual_rotation_for_refs
 from kicadtools.pcb import read_mounting_for_schematic, sibling_pcb
@@ -371,6 +379,58 @@ def _export_jlcpcb(args: argparse.Namespace) -> int:
     return 1 if miss else 0
 
 
+def _export_digikey(args: argparse.Namespace) -> int:
+    records = iter_bom_part_records(args.schematic)
+    mode = args.mounting
+
+    # Mounting is only needed when the export is filtered; "both" keeps
+    # everything and never touches the board.
+    mounting: dict = {}
+    if mode != BOTH:
+        mounting, pcb = read_mounting_for_schematic(args.schematic)
+        if pcb is None and mode == SMD_ONLY:
+            print(
+                f"⚠️  --mounting smd: no {Path(args.schematic).with_suffix('.kicad_pcb').name} "
+                "found next to the schematic — mounting can't be determined, so the "
+                "SMD BOM will be empty. Lay out / place the board first.",
+                file=sys.stderr,
+            )
+        # non-smd with no PCB needs no warning: every part reads "unknown", which
+        # is not SMD, so the whole board is kept — the documented behaviour.
+
+    lines = build_digikey_bom(records, mounting=mounting, mounting_filter=mode)
+
+    if mode == SMD_ONLY:
+        undetermined = undetermined_references(records, mounting)
+        if undetermined:
+            print(
+                f"⚠️  {len(undetermined)} part(s) excluded from the SMD BOM — "
+                f"undetermined mounting: {', '.join(undetermined)}",
+                file=sys.stderr,
+            )
+
+    if args.output:
+        with open(args.output, "w", newline="", encoding="utf-8") as f:
+            write_digikey_csv(lines, f)
+        print(f"Wrote {len(lines)} line(s) to {args.output}", file=sys.stderr)
+    else:
+        # No -o: emit pure CSV on stdout so `… > bom.csv` works; keep all
+        # human-facing output on stderr.
+        write_digikey_csv(lines, sys.stdout)
+
+    unorderable = unorderable_lines(lines)
+    if unorderable:
+        refs = ", ".join(ln.references[0] for ln in unorderable)
+        print(
+            f"⚠️  {len(unorderable)} of {len(lines)} line(s) have no DigiKey or "
+            f"manufacturer part number (blank cells — DigiKey can't match them): {refs}",
+            file=sys.stderr,
+        )
+    # Non-zero exit when anything is unorderable, so scripts can gate — same
+    # stance as the `jlcpcb` and `lcsc` commands. The CSV is written in full.
+    return 1 if unorderable else 0
+
+
 def _export_cpl(args: argparse.Namespace) -> int:
     pcb = sibling_pcb(args.schematic)
     if pcb is None:
@@ -564,6 +624,29 @@ def main(argv=None) -> int:
         ".kicad_pcb; parts of undetermined mounting are excluded and reported)",
     )
     jlc.set_defaults(func=_export_jlcpcb)
+
+    dk = sub.add_parser(
+        "digikey",
+        help="Export a BOM CSV in the format DigiKey's cart / BOM uploader ingests",
+    )
+    dk.add_argument("schematic", type=Path, help="Path to a .kicad_sch file")
+    dk.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        metavar="CSV",
+        help="Write the BOM here (default: stdout)",
+    )
+    dk.add_argument(
+        "--mounting",
+        choices=MOUNTING_FILTERS,
+        default=BOTH,
+        help="Which parts to include by mounting, read from the sibling .kicad_pcb: "
+        "'smd' = surface-mount only (undetermined parts excluded and reported); "
+        "'non-smd' = everything else (through-hole and undetermined); "
+        "'both' = every part, no PCB needed (default: both)",
+    )
+    dk.set_defaults(func=_export_digikey)
 
     cpl = sub.add_parser(
         "cpl",

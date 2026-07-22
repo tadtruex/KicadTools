@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -29,6 +30,14 @@ from kicadtools.jlcpcb import (
     missing_lcsc,
     undetermined_references,
     write_jlcpcb_csv,
+)
+from kicadtools.digikey_bom import (
+    BOTH,
+    NON_SMD,
+    SMD_ONLY,
+    build_digikey_bom,
+    unorderable_lines,
+    write_digikey_csv,
 )
 from kicadtools.cpl import cpl_from_schematic, write_cpl_csv
 from kicadtools.pcb import read_mounting_for_schematic, sibling_pcb
@@ -164,6 +173,9 @@ class MainWindow(QMainWindow):
         self._save_as_act.triggered.connect(self._save_as)
         self._export_jlc_act = file_menu.addAction("Export &JLCPCB BOM…")
         self._export_jlc_act.triggered.connect(self._export_jlcpcb)
+
+        self._export_dk_act = file_menu.addAction("Export &DigiKey BOM…")
+        self._export_dk_act.triggered.connect(self._export_digikey)
 
         self._export_cpl_act = file_menu.addAction("Export JLCPCB &CPL…")
         self._export_cpl_act.triggered.connect(self._export_cpl)
@@ -494,6 +506,64 @@ class MainWindow(QMainWindow):
                 msg += f" {len(undet)} part(s) of undetermined mounting excluded."
         if miss:
             msg += f" {len(miss)} lack an LCSC Part #."
+        self.statusBar().showMessage(msg)
+
+    def _export_digikey(self) -> None:
+        """Export the BOM as a DigiKey cart/BOM-format CSV. Read-only: never
+        touches the schematic or the dirty flag. DigiKey and manufacturer part
+        numbers come straight from the schematic (no lookups)."""
+        if not self._records:
+            QMessageBox.information(self, "No board", "Open a schematic first.")
+            return
+
+        # Three-way mounting filter (mounting read from the sibling .kicad_pcb).
+        # Ordered labels; the picked index maps to a filter mode.
+        modes = [
+            ("All parts", BOTH),
+            ("Surface-mount (SMD) only", SMD_ONLY),
+            ("Non-surface-mount only (through-hole + undetermined)", NON_SMD),
+        ]
+        label, ok = QInputDialog.getItem(
+            self,
+            "Export DigiKey BOM",
+            "Which parts to include?",
+            [m[0] for m in modes],
+            0,
+            editable=False,
+        )
+        if not ok:
+            return
+        mode = dict(modes)[label]
+
+        mounting: dict = {}
+        if mode != BOTH and self._board:
+            mounting, _pcb = read_mounting_for_schematic(self._board)
+        lines = build_digikey_bom(self._records, mounting=mounting, mounting_filter=mode)
+
+        start = str(Path(self._board).with_name(Path(self._board).stem + "_digikey.csv")) \
+            if self._board else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export DigiKey BOM", start, "CSV (*.csv)"
+        )
+        if not path:
+            return
+        dest = Path(path)
+        if dest.suffix != ".csv":
+            dest = dest.with_suffix(".csv")
+        try:
+            with open(dest, "w", newline="", encoding="utf-8") as f:
+                write_digikey_csv(lines, f)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        msg = f"Exported {len(lines)} line(s) to {dest.name}."
+        if mode == SMD_ONLY:
+            undet = undetermined_references(self._records, mounting)
+            if undet:
+                msg += f" {len(undet)} part(s) of undetermined mounting excluded."
+        unorderable = unorderable_lines(lines)
+        if unorderable:
+            msg += f" {len(unorderable)} lack a DigiKey/manufacturer part number."
         self.statusBar().showMessage(msg)
 
     def _export_cpl(self) -> None:
