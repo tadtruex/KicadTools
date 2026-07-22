@@ -3,6 +3,41 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Per-LCSC CPL rotation overrides (2026-07-21)
+
+Fixes the KiCad↔JLCPCB orientation mismatch (e.g. ECG's SOT-23 transistors land
++180° off — SOT-23 is a "disputed family" `rotations.py` deliberately leaves at
+0°). Corrections are now stored **per LCSC part number** and reused on every board.
+
+- `partrotation.py` (new): `PartRotationStore` — SQLite table `part_rotation
+  (lcsc, degrees)` in the SAME `~/.kicadtools/lcsc_cache.sqlite` file as
+  `resolve.Cache`, but its own table (LCSC-version wipes don't touch it). `get/
+  set/clear/all`; `set` normalizes mod 360 and a 0 offset *deletes* the row (0 is
+  the default). `manual_rotation_for_refs(ref_to_lcsc, store) -> {ref: deg}` is the
+  bridge onto `build_cpl`'s existing `manual_rotation` arg. Creates its parent dir.
+- Semantics: the override is **additive** on top of the family offset (same as
+  `manual_rotation` always was). SOT-23 family offset is 0, so a +180 override is
+  the whole correction.
+- CLI: `kicadtools cpl` gained `--cache` (defaults to the shared sqlite); it maps
+  each BOM ref → its LCSC → override and feeds `manual_rotation`, printing `↻
+  applied cached rotation to N part(s): …` (counted over *placed* refs).
+- GUI: LCSC tab gained a **Rotation** column (index 6, before Description) with a
+  0/90/180/270 dropdown (`RotationDelegate`). Editable only once a row has an LCSC
+  (the key). A row without one shows `—` + tooltip "Run Resolve LCSC first…"; after
+  `apply_resolution` lands a C-number the cell becomes editable (the row-wide
+  `dataChanged` re-arms its flags). Editing persists to the store immediately (no
+  schematic dirty flag — it's a DB-side assembly pref) and propagates to every row
+  sharing that LCSC. `LcscTableModel(store=…)` is injectable (`:memory:` default for
+  tests); `rotation_overrides() -> {ref: deg}` feeds the Cockpit's CPL export.
+- **GOTCHA / decision (2026-07-21):** key is strict LCSC. Real boards (ECG) often
+  carry only a DigiKey PN pre-resolve, so the whole column is locked until *Resolve
+  LCSC* runs — this is intended (user chose LCSC-only over an LCSC→MPN→DK-PN
+  fallback), hence the explicit hint. ECG's SOT-23 transistors: DigiKey PN only, no
+  LCSC/MPN, so resolve first.
+- Suite 276 passing (was 255). Live headless smoke-test on ECG: locked+hint →
+  apply_resolution lands C-number → editable → set 180° → override recorded;
+  MotorDriver: set → propagate → persist-to-disk → reopen.
+
 ## Parametric intent-resolution — started (2026-07-18)
 
 New feature: make the electrical-intent model actively resolve parts. User

@@ -30,8 +30,15 @@ from kicadtools.jlcpcb import (
 )
 from kicadtools.cpl import cpl_from_schematic, write_cpl_csv
 from kicadtools.pcb import read_mounting_for_schematic, sibling_pcb
-from kicadtools.gui.lcsc import LINK_ROLE, LcscTableModel, ResolveWorker
+from kicadtools.gui.lcsc import (
+    LINK_ROLE,
+    LcscTableModel,
+    ResolveWorker,
+    RotationDelegate,
+    _COL_ROTATION,
+)
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
+from kicadtools.partrotation import PartRotationStore
 from kicadtools.resolve import iter_bom_part_records
 from kicadtools.sexpr_parser import has_instantiated_sheets
 from kicadtools.suppliers import DigiKeyClient
@@ -106,8 +113,12 @@ class MainWindow(QMainWindow):
         return tab
 
     def _build_lcsc_tab(self) -> QWidget:
-        self.lcsc_model = LcscTableModel()
+        # A disk-backed rotation store shared with the CPL export, so a dropdown
+        # choice here persists (keyed by LCSC part) and reappears next session.
+        self._rotation_store = PartRotationStore(_LCSC_CACHE)
+        self.lcsc_model = LcscTableModel(store=self._rotation_store)
         self.lcsc_table = self._make_table(self.lcsc_model)
+        self.lcsc_table.setItemDelegateForColumn(_COL_ROTATION, RotationDelegate(self))
         # LCSC / DigiKey cells are links: open the supplier page on click, and
         # show a pointing-hand cursor while hovering one (needs mouse tracking).
         self.lcsc_table.setMouseTracking(True)
@@ -481,7 +492,10 @@ class MainWindow(QMainWindow):
         else:
             include = {r.reference for r in self._records}
 
-        lines = cpl_from_schematic(pcb, include=include)
+        # Honour the LCSC tab's per-part rotation overrides.
+        lines = cpl_from_schematic(
+            pcb, include=include, manual_rotation=self.lcsc_model.rotation_overrides()
+        )
 
         start = str(Path(self._board).with_name(Path(self._board).stem + "_cpl.csv"))
         path, _ = QFileDialog.getSaveFileName(

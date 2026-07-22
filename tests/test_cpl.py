@@ -224,3 +224,59 @@ def test_cli_no_pcb_warns(tmp_path, capsys):
     rc = cli.main(["cpl", str(sch)])
     assert rc == 1
     assert "no board.kicad_pcb" in capsys.readouterr().err
+
+
+def _motordriver_with_sibling_pcb(tmp_path):
+    """Copy the (hierarchical) MotorDriver board — top sheet *and* its
+    HalfBridges subsheet, or the tree fails to load — plus a synthetic sibling
+    PCB placing R2 (LCSC C60489, footprint at 0°) so its CPL rotation is
+    predictable."""
+    for name in ("MotorDriver.kicad_sch", "HalfBridges.kicad_sch"):
+        (tmp_path / name).write_text(
+            (DATA / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    (tmp_path / "MotorDriver.kicad_pcb").write_text(
+        '(kicad_pcb'
+        ' (footprint "Resistor_SMD:R_0402_1005Metric" (layer "F.Cu")'
+        '   (property "Reference" "R2") (at 130 100 0) (attr smd)'
+        '   (pad "1" smd rect (at -0.5 0) (size 0.6 0.7) (layers "F.Cu"))'
+        '   (pad "2" smd rect (at 0.5 0) (size 0.6 0.7) (layers "F.Cu"))))',
+        encoding="utf-8",
+    )
+    return tmp_path / "MotorDriver.kicad_sch"
+
+
+def _r2_rotation(csv_text):
+    for row in csv_text.splitlines():
+        if row.startswith("R2,"):
+            return row.split(",")[-1]
+    return None
+
+
+def test_cli_applies_cached_rotation_override(tmp_path, capsys):
+    """A per-LCSC override set in the store rotates the matching reference in the
+    CPL; R_0402 has no family offset, so +90 lands exactly at 90°."""
+    from kicadtools.partrotation import PartRotationStore
+
+    sch = _motordriver_with_sibling_pcb(tmp_path)
+    db = tmp_path / "cache.sqlite"
+    store = PartRotationStore(db)
+    store.set("C60489", 90.0)  # R2's LCSC part
+    store.close()
+
+    rc = cli.main(["cpl", str(sch), "-o", str(tmp_path / "cpl.csv"), "--cache", str(db)])
+    assert rc == 0
+    text = (tmp_path / "cpl.csv").read_text(encoding="utf-8")
+    assert _r2_rotation(text) == "90"
+    assert "applied cached rotation to 1 part(s): R2" in capsys.readouterr().err
+
+
+def test_cli_without_override_leaves_rotation_at_zero(tmp_path, capsys):
+    """No override cached -> R2 keeps its board angle (0°)."""
+    sch = _motordriver_with_sibling_pcb(tmp_path)
+    db = tmp_path / "cache.sqlite"  # never written, so no overrides
+    rc = cli.main(["cpl", str(sch), "-o", str(tmp_path / "cpl.csv"), "--cache", str(db)])
+    assert rc == 0
+    text = (tmp_path / "cpl.csv").read_text(encoding="utf-8")
+    assert _r2_rotation(text) == "0"
+    assert "applied cached rotation" not in capsys.readouterr().err

@@ -16,7 +16,9 @@ from kicadtools.gui.lcsc import (  # noqa: E402
     STATUS_RESOLVED,
     LcscRow,
     LcscTableModel,
+    _COL_ROTATION,
 )
+from kicadtools.partrotation import PartRotationStore  # noqa: E402
 from kicadtools.gui.model import NaturalSortProxyModel  # noqa: E402
 from kicadtools.partnum import PartNumbers  # noqa: E402
 from kicadtools.resolve import (  # noqa: E402
@@ -66,26 +68,27 @@ def test_columns_show_part_numbers():
                              MPN="RMCF0603FT100K", **{"DigiKey PN": "P1-ND"})])
     assert m.headerData(0, Qt.Horizontal, Qt.DisplayRole) == "Accept"
     assert m.headerData(1, Qt.Horizontal, Qt.DisplayRole) == "Ref"
-    assert m.headerData(6, Qt.Horizontal, Qt.DisplayRole) == "Description"  # rightmost
-    assert m.columnCount() == 7
-    row = [m.data(m.index(0, c), Qt.DisplayRole) for c in range(7)]
+    assert m.headerData(6, Qt.Horizontal, Qt.DisplayRole) == "Rotation"
+    assert m.headerData(7, Qt.Horizontal, Qt.DisplayRole) == "Description"  # rightmost
+    assert m.columnCount() == 8
+    row = [m.data(m.index(0, c), Qt.DisplayRole) for c in range(8)]
     assert row[0] == ""            # Accept (checkbox, no text)
     assert row[1] == "R1"          # Ref
     assert row[2] == ""            # LCSC (none yet)
     assert row[3] == "P1-ND"       # DigiKey
     assert row[4] == "RMCF0603FT100K"  # MPN
-    assert row[6] == "10k 0603 resistor"  # Description (trailing column)
+    assert row[7] == "10k 0603 resistor"  # Description (trailing column)
 
 
 def test_description_populated_and_tooltip():
     long_desc = "Generic connector, single row, 01x02, script generated"
     m = LcscTableModel([_rec("J1", Description=long_desc)])
-    assert m.data(m.index(0, 6), Qt.DisplayRole) == long_desc
-    assert m.data(m.index(0, 6), Qt.ToolTipRole) == long_desc  # full text on hover
+    assert m.data(m.index(0, 7), Qt.DisplayRole) == long_desc
+    assert m.data(m.index(0, 7), Qt.ToolTipRole) == long_desc  # full text on hover
     # A part without a Description shows (and hovers) nothing.
     m2 = LcscTableModel([_rec("R9")])
-    assert m2.data(m2.index(0, 6), Qt.DisplayRole) == ""
-    assert m2.data(m2.index(0, 6), Qt.ToolTipRole) is None
+    assert m2.data(m2.index(0, 7), Qt.DisplayRole) == ""
+    assert m2.data(m2.index(0, 7), Qt.ToolTipRole) is None
 
 
 def test_apply_resolution_fills_lcsc_and_mpn():
@@ -99,6 +102,72 @@ def test_apply_resolution_fills_lcsc_and_mpn():
     assert m.data(m.index(0, 4), Qt.DisplayRole) == "ABC"    # discovered MPN
     assert m.data(m.index(0, 5), Qt.DisplayRole) == STATUS_RESOLVED
     assert m.data(m.index(0, 5), Qt.ToolTipRole) == "LCSC C123 ← MPN ABC"
+
+
+def test_rotation_not_editable_without_lcsc():
+    m = LcscTableModel([_rec("R9")])  # no LCSC part
+    idx = m.index(0, _COL_ROTATION)
+    flags = m.flags(idx)
+    assert not (flags & Qt.ItemIsEditable)
+    assert m.data(idx, Qt.DisplayRole) == "—"  # locked, with a hint
+    assert m.data(idx, Qt.ToolTipRole) == "Run Resolve LCSC first to set a rotation for this part."
+    assert m.data(idx, Qt.EditRole) is None
+
+
+def test_rotation_becomes_editable_after_resolution_lands_lcsc():
+    m = LcscTableModel([_rec("Q1", **{"DigiKey PN": "T2N7002AKLMCT-ND"})])
+    idx = m.index(0, _COL_ROTATION)
+    assert not (m.flags(idx) & Qt.ItemIsEditable)  # DigiKey PN only -> locked
+    m.apply_resolution(0, _resolution("Q1", "uuid-Q1", Status.RESOLVED, lcsc="C8545"))
+    assert m.flags(idx) & Qt.ItemIsEditable  # C-number landed -> now editable
+    assert m.data(idx, Qt.DisplayRole) == "0°"
+
+
+def test_rotation_editable_and_persists_to_store():
+    store = PartRotationStore(":memory:")
+    m = LcscTableModel([_rec("Q1", LCSC="C1")], store=store)
+    idx = m.index(0, _COL_ROTATION)
+    assert m.flags(idx) & Qt.ItemIsEditable
+    assert m.data(idx, Qt.DisplayRole) == "0°"  # default, no override yet
+    assert m.setData(idx, 180.0, Qt.EditRole) is True
+    assert store.get("C1") == 180.0
+    assert m.data(idx, Qt.DisplayRole) == "180°"
+    assert m.data(idx, Qt.EditRole) == 180.0
+
+
+def test_rotation_reflects_existing_store_value():
+    store = PartRotationStore(":memory:")
+    store.set("C1", 90.0)
+    m = LcscTableModel([_rec("Q1", LCSC="C1")], store=store)
+    assert m.data(m.index(0, _COL_ROTATION), Qt.DisplayRole) == "90°"
+
+
+def test_rotation_propagates_to_rows_sharing_the_lcsc():
+    store = PartRotationStore(":memory:")
+    m = LcscTableModel([_rec("Q1", LCSC="C1"), _rec("Q2", LCSC="C1"),
+                        _rec("R1", LCSC="C2")], store=store)
+    m.setData(m.index(0, _COL_ROTATION), 270.0, Qt.EditRole)
+    # Both C1 parts follow; the C2 part is untouched.
+    assert m.data(m.index(0, _COL_ROTATION), Qt.DisplayRole) == "270°"
+    assert m.data(m.index(1, _COL_ROTATION), Qt.DisplayRole) == "270°"
+    assert m.data(m.index(2, _COL_ROTATION), Qt.DisplayRole) == "0°"
+
+
+def test_rotation_zero_clears_override():
+    store = PartRotationStore(":memory:")
+    m = LcscTableModel([_rec("Q1", LCSC="C1")], store=store)
+    m.setData(m.index(0, _COL_ROTATION), 180.0, Qt.EditRole)
+    m.setData(m.index(0, _COL_ROTATION), 0.0, Qt.EditRole)
+    assert store.get("C1") is None
+    assert m.data(m.index(0, _COL_ROTATION), Qt.DisplayRole) == "0°"
+
+
+def test_rotation_overrides_map_for_export():
+    store = PartRotationStore(":memory:")
+    m = LcscTableModel([_rec("Q1", LCSC="C1"), _rec("Q2", LCSC="C1"),
+                        _rec("R1", LCSC="C2")], store=store)
+    m.setData(m.index(0, _COL_ROTATION), 180.0, Qt.EditRole)
+    assert m.rotation_overrides() == {"Q1": 180.0, "Q2": 180.0}
 
 
 def test_apply_resolution_flagged_keeps_blank_lcsc():

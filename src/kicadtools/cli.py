@@ -15,6 +15,7 @@ from kicadtools.jlcpcb import (
     write_jlcpcb_csv,
 )
 from kicadtools.cpl import cpl_from_schematic, write_cpl_csv
+from kicadtools.partrotation import PartRotationStore, manual_rotation_for_refs
 from kicadtools.pcb import read_mounting_for_schematic, sibling_pcb
 from kicadtools.normalize import (
     compute_file_changes,
@@ -391,9 +392,28 @@ def _export_cpl(args: argparse.Namespace) -> int:
     else:
         include = {r.reference for r in records}
 
-    lines = cpl_from_schematic(pcb, include=include)
+    # Apply any per-LCSC rotation overrides the user has cached (e.g. SOT-23
+    # transistors the family table leaves at 0°). Map each reference to its LCSC
+    # part, look the override up, and hand build_cpl a {ref: degrees} dict.
+    store = PartRotationStore(args.cache)
+    ref_to_lcsc = {
+        r.reference: extract_part_numbers(r.props).lcsc or "" for r in records
+    }
+    manual_rotation = manual_rotation_for_refs(ref_to_lcsc, store)
+    store.close()
+
+    lines = cpl_from_schematic(pcb, include=include, manual_rotation=manual_rotation)
 
     placed = {ln.designator for ln in lines}
+    if manual_rotation:
+        applied = sorted(r for r in manual_rotation if r in placed)
+        if applied:
+            print(
+                f"↻  applied cached rotation to {len(applied)} part(s): "
+                f"{', '.join(applied)}",
+                file=sys.stderr,
+            )
+
     missing = sorted(include - placed, key=lambda r: r)
     if missing:
         print(
@@ -562,6 +582,13 @@ def main(argv=None) -> int:
         action="store_true",
         help="Only include surface-mount parts (mounting read from the .kicad_pcb), "
         "matching a --smd BOM",
+    )
+    cpl.add_argument(
+        "--cache",
+        type=Path,
+        default=_DEFAULT_CACHE,
+        metavar="SQLITE",
+        help=f"SQLite store of per-LCSC rotation overrides (default: {_DEFAULT_CACHE})",
     )
     cpl.set_defaults(func=_export_cpl)
 

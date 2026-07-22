@@ -15,18 +15,26 @@ from typing import Dict, List, Optional, Sequence, Set
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QComboBox, QStyledItemDelegate
 
 from kicadtools.partnum import CANONICAL_KEYS, extract_part_numbers
+from kicadtools.partrotation import PartRotationStore
 from kicadtools.resolve import Cache, PartRecord, Resolution, Resolver, Status
 from kicadtools.suppliers import digikey_url, lcsc_url
 
 # An "Accept" checkbox leads the row (mirroring the Intents tab), then the
-# read-only part-number columns, with the (often long) description trailing last.
-_LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Status", "Description"]
+# read-only part-number columns, an (editable) JLCPCB rotation override, with the
+# (often long) description trailing last.
+_LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Status", "Rotation",
+                 "Description"]
 _COL_DESCRIPTION = _LCSC_COLUMNS.index("Description")
 _COL_LCSC = _LCSC_COLUMNS.index("LCSC")
 _COL_DIGIKEY = _LCSC_COLUMNS.index("DigiKey")
+_COL_ROTATION = _LCSC_COLUMNS.index("Rotation")
+
+# The rotation-override choices offered in the dropdown (degrees CCW, additive on
+# top of the family offset). JLCPCB parts only ever need quarter-turn fixes.
+ROTATION_CHOICES = (0, 90, 180, 270)
 
 # Custom data role: the URL a link cell (LCSC / DigiKey) points at, or ``None``.
 # The view reads it on click to open the supplier page.
@@ -108,11 +116,18 @@ class LcscTableModel(QAbstractTableModel):
     part. Rows whose resolution discovered a value the schematic doesn't already
     carry become checkable; accepting them queues that value for write-back."""
 
-    def __init__(self, records: Optional[Sequence[PartRecord]] = None):
+    def __init__(
+        self,
+        records: Optional[Sequence[PartRecord]] = None,
+        store: Optional[PartRotationStore] = None,
+    ):
         super().__init__()
         self._rows: List[LcscRow] = [LcscRow.from_record(r) for r in records or []]
         self._checked: Set[int] = set()
         self._accepted: Set[int] = set()
+        # Per-LCSC rotation overrides for the CPL export. Ephemeral by default so
+        # headless/test models need no file; the app injects a disk-backed store.
+        self._store = store if store is not None else PartRotationStore(":memory:")
 
     # ---- loading -----------------------------------------------------
     def load(self, records: Sequence[PartRecord]) -> None:
@@ -146,7 +161,18 @@ class LcscTableModel(QAbstractTableModel):
         f = Qt.ItemIsEnabled | Qt.ItemIsSelectable
         if index.column() == 0 and self._checkable(index.row()):
             f |= Qt.ItemIsUserCheckable
+        if index.column() == _COL_ROTATION and self._rotatable(index.row()):
+            f |= Qt.ItemIsEditable
         return f
+
+    def _rotatable(self, row: int) -> bool:
+        """A row carries an editable rotation override once it has an LCSC part
+        number (the override is keyed on that part)."""
+        return bool(self._rows[row].lcsc)
+
+    def _rotation(self, row: int) -> float:
+        """The stored extra rotation for *row*'s LCSC part, or 0.0."""
+        return self._store.get(self._rows[row].lcsc) or 0.0
 
     def _status_text(self, row: int) -> str:
         return STATUS_ACCEPTED if row in self._accepted else self._rows[row].status
@@ -170,6 +196,28 @@ class LcscTableModel(QAbstractTableModel):
             if not self._checkable(r):
                 return None
             return Qt.Checked if r in self._checked else Qt.Unchecked
+
+        if col == _COL_ROTATION:
+            if not self._rotatable(r):
+                # The override is keyed on the LCSC part, so a row with no LCSC
+                # number yet can't carry one — say so instead of looking broken.
+                if role == Qt.DisplayRole:
+                    return "—"
+                if role == Qt.ToolTipRole:
+                    return "Run Resolve LCSC first to set a rotation for this part."
+                return None  # not editable, no EditRole value
+            deg = self._rotation(r)
+            if role == Qt.EditRole:
+                return deg  # the delegate wants the raw degrees
+            if role == Qt.DisplayRole:
+                return f"{int(deg)}°"
+            if role == Qt.ToolTipRole:
+                return (
+                    "Extra JLCPCB rotation for this LCSC part, added on top of the "
+                    "footprint-family offset. Double-click to change; cached and "
+                    "reused on every board."
+                )
+            return None
 
         # LCSC / DigiKey cells with a value are clickable links: expose the URL
         # (LINK_ROLE) and render them blue + underlined.
@@ -199,11 +247,30 @@ class LcscTableModel(QAbstractTableModel):
                 row.digikey_pn,
                 row.mpn,
                 self._status_text(r),
+                "",  # Rotation handled above (needs the store)
                 row.description,
             )[col]
         return None
 
     def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:
+        if (
+            role == Qt.EditRole
+            and index.column() == _COL_ROTATION
+            and self._rotatable(index.row())
+        ):
+            try:
+                degrees = float(value)
+            except (TypeError, ValueError):
+                return False
+            lcsc = self._rows[index.row()].lcsc
+            self._store.set(lcsc, degrees)
+            # The override is keyed on the LCSC part, so every row sharing that
+            # part now reads the new value — refresh them all.
+            for r in range(len(self._rows)):
+                if self._rows[r].lcsc == lcsc:
+                    idx = self.index(r, _COL_ROTATION)
+                    self.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.EditRole])
+            return True
         if role == Qt.CheckStateRole and index.column() == 0 and self._checkable(index.row()):
             row = index.row()
             # The view passes an int; tests may pass a Qt.CheckState. Normalise.
@@ -275,6 +342,39 @@ class LcscTableModel(QAbstractTableModel):
 
     def rows(self) -> List[LcscRow]:
         return self._rows
+
+    def rotation_overrides(self) -> Dict[str, float]:
+        """``{reference: degrees}`` for every row whose LCSC part has a non-zero
+        rotation override — ready to feed ``cpl_from_schematic``'s
+        ``manual_rotation`` so the CPL export honours the dropdown choices."""
+        out: Dict[str, float] = {}
+        for row in self._rows:
+            deg = self._store.get(row.lcsc) if row.lcsc else None
+            if deg:
+                out[row.reference] = deg
+        return out
+
+
+class RotationDelegate(QStyledItemDelegate):
+    """A dropdown editor for the LCSC tab's Rotation column, offering the
+    quarter-turn overrides in :data:`ROTATION_CHOICES`."""
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        for deg in ROTATION_CHOICES:
+            combo.addItem(f"{deg}°", deg)
+        return combo
+
+    def setEditorData(self, editor, index):
+        current = index.data(Qt.EditRole)
+        try:
+            pos = ROTATION_CHOICES.index(int(current or 0))
+        except (TypeError, ValueError):
+            pos = 0
+        editor.setCurrentIndex(pos)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, float(editor.currentData()), Qt.EditRole)
 
 
 class ResolveWorker(QObject):
