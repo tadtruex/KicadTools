@@ -623,6 +623,15 @@ kicadtools bom -v ../../ECG/ECG/ECG.kicad_sch
   add an optional parameter to the base intent spec that lets us specify an extra
   rotation offset per part type (folded into the CPL `Rotation` on export, on top
   of the existing family offsets in `rotations.py`).
+- **Rotation override DB is not transportable (2026-07-22).** The per-LCSC
+  `part_rotation` table lives in the machine-local `~/.kicadtools/lcsc_cache.sqlite`
+  — the corrections don't follow you to another machine, so hard-won orientation
+  fixes have to be re-entered per box. Want to make this info sticky/machine-
+  agnostic: a shared SQL database at a known location, or the modern equivalent
+  (e.g. SQLite in a synced dir, a hosted DB, or a versioned data file committed to
+  the repo). Decide the backing store before implementing. Same "known shared
+  location" problem as the local-inventory idea for JLCPCB stock matching above —
+  worth solving both together.
 - Add intent subclasses for types that are guessable but have no class yet:
   `battery`, `ic`, `switch`. Until a subclass exists they're guessed but stay
   `❌` (the `-v` reason names what they look like).
