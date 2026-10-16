@@ -159,3 +159,25 @@ def test_iter_bom_part_records_populates_typed_intent():
     for r in resistors:
         assert r.intent.reference == r.reference
         assert r.intent.symbol_uuid == r.symbol_uuid
+
+
+def test_cache_part_round_trip_and_expiry(monkeypatch):
+    import kicadtools.resolve as resolve
+    from kicadtools.resolve import cached_jlcpcb_part
+    from kicadtools.suppliers import JlcPart
+
+    cache = Cache()
+    part = JlcPart("C1", mpn="M", stock=5, attributes={"Capacitance": "1uF"})  # no price
+    cache.put_part(part)
+    assert cache.get_part("C1") == part  # inf price survives the JSON round trip
+
+    now = resolve.time.time()
+    monkeypatch.setattr(resolve.time, "time", lambda: now + resolve.PART_MAX_AGE + 1)
+    assert cache.get_part("C1") is None  # stale stock is not served
+
+    calls = []
+    lookup = lambda code: calls.append(code) or JlcPart(code, stock=9)
+    assert cached_jlcpcb_part("C2", cache, lookup).stock == 9
+    assert cached_jlcpcb_part("C2", cache, lookup).stock == 9
+    assert calls == ["C2"]  # the second read came from the cache
+    assert cached_jlcpcb_part("C3", None, lambda c: None) is None

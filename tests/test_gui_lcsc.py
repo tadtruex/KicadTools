@@ -16,6 +16,7 @@ from kicadtools.gui.lcsc import (  # noqa: E402
     STATUS_RESOLVED,
     LcscRow,
     LcscTableModel,
+    _COL_DESCRIPTION,
     _COL_ROTATION,
 )
 from kicadtools.partrotation import PartRotationStore  # noqa: E402
@@ -68,27 +69,29 @@ def test_columns_show_part_numbers():
                              MPN="RMCF0603FT100K", **{"DigiKey PN": "P1-ND"})])
     assert m.headerData(0, Qt.Horizontal, Qt.DisplayRole) == "Accept"
     assert m.headerData(1, Qt.Horizontal, Qt.DisplayRole) == "Ref"
-    assert m.headerData(6, Qt.Horizontal, Qt.DisplayRole) == "Rotation"
-    assert m.headerData(7, Qt.Horizontal, Qt.DisplayRole) == "Description"  # rightmost
-    assert m.columnCount() == 8
-    row = [m.data(m.index(0, c), Qt.DisplayRole) for c in range(8)]
+    assert m.headerData(6, Qt.Horizontal, Qt.DisplayRole) == "Stock"
+    assert m.headerData(7, Qt.Horizontal, Qt.DisplayRole) == "Rotation"
+    assert m.headerData(8, Qt.Horizontal, Qt.DisplayRole) == "Description"  # rightmost
+    assert m.columnCount() == 9
+    row = [m.data(m.index(0, c), Qt.DisplayRole) for c in range(9)]
     assert row[0] == ""            # Accept (checkbox, no text)
     assert row[1] == "R1"          # Ref
     assert row[2] == ""            # LCSC (none yet)
     assert row[3] == "P1-ND"       # DigiKey
     assert row[4] == "RMCF0603FT100K"  # MPN
-    assert row[7] == "10k 0603 resistor"  # Description (trailing column)
+    assert row[6] == "—"           # Stock (no LCSC to check)
+    assert row[8] == "10k 0603 resistor"  # Description (trailing column)
 
 
 def test_description_populated_and_tooltip():
     long_desc = "Generic connector, single row, 01x02, script generated"
     m = LcscTableModel([_rec("J1", Description=long_desc)])
-    assert m.data(m.index(0, 7), Qt.DisplayRole) == long_desc
-    assert m.data(m.index(0, 7), Qt.ToolTipRole) == long_desc  # full text on hover
+    assert m.data(m.index(0, _COL_DESCRIPTION), Qt.DisplayRole) == long_desc
+    assert m.data(m.index(0, _COL_DESCRIPTION), Qt.ToolTipRole) == long_desc  # full text on hover
     # A part without a Description shows (and hovers) nothing.
     m2 = LcscTableModel([_rec("R9")])
-    assert m2.data(m2.index(0, 7), Qt.DisplayRole) == ""
-    assert m2.data(m2.index(0, 7), Qt.ToolTipRole) is None
+    assert m2.data(m2.index(0, _COL_DESCRIPTION), Qt.DisplayRole) == ""
+    assert m2.data(m2.index(0, _COL_DESCRIPTION), Qt.ToolTipRole) is None
 
 
 def test_apply_resolution_fills_lcsc_and_mpn():
@@ -297,3 +300,109 @@ def test_loads_real_board_and_sorts_by_ref():
     caps = [r for r in refs if r.startswith("C")]
     if "C2" in caps and "C10" in caps:
         assert caps.index("C2") < caps.index("C10")
+
+
+# ---- stock + substitutes -----------------------------------------------------
+
+from kicadtools.gui.lcsc import STATUS_SUBSTITUTE, _COL_STOCK, _STOCK_TINT  # noqa: E402
+from kicadtools.substitute import STOCK_LOW, STOCK_OK, STOCK_OUT  # noqa: E402
+from kicadtools.suppliers import JlcPart  # noqa: E402
+
+
+def _stock_model():
+    return LcscTableModel([
+        _rec("C2", LCSC="C9900013546", Footprint="C_0603", MPN="CGA3", **{"DigiKey PN": "445-1-ND"}),
+        _rec("C3", LCSC="C9900013546", Footprint="C_0603", MPN="CGA3", **{"DigiKey PN": "445-1-ND"},
+             Alternates="111-1-ND"),
+        _rec("R1", LCSC="C134320", Footprint="R_0603"),
+        _rec("J1"),
+    ])
+
+
+def test_stock_cell_before_and_after_check():
+    m = _stock_model()
+    assert m.data(m.index(0, _COL_STOCK), Qt.DisplayRole) == ""  # not checked yet
+    assert "Check Stock" in m.data(m.index(0, _COL_STOCK), Qt.ToolTipRole)
+    assert m.data(m.index(3, _COL_STOCK), Qt.DisplayRole) == "—"  # no LCSC
+    assert m.lcsc_codes() == ["C9900013546", "C134320"]
+
+    m.apply_stock("C9900013546", JlcPart("C9900013546", stock=0,
+                                         no_buy_reason="This product is no longer manufactured."))
+    m.apply_stock("C134320", JlcPart("C134320", stock=4088))
+    assert m.data(m.index(2, _COL_STOCK), Qt.DisplayRole) == "4,088"
+    tip = m.data(m.index(0, _COL_STOCK), Qt.ToolTipRole)
+    assert "Need 50 (2 per board × 25 boards)" in tip and "no longer manufactured" in tip
+
+
+def test_stock_tint_follows_build_quantity():
+    m = _stock_model()
+    m.apply_stock("C9900013546", JlcPart("C9900013546", stock=0))
+    m.apply_stock("C134320", JlcPart("C134320", stock=30))
+    assert m.stock_level(0) == STOCK_OUT
+    assert m.data(m.index(0, 1), Qt.BackgroundRole) == _STOCK_TINT[STOCK_OUT]  # whole row
+    assert m.stock_level(2) == STOCK_OK  # 30 covers 25 boards × 1
+    assert m.data(m.index(2, 1), Qt.BackgroundRole) is None
+    m.set_build_qty(40)
+    assert m.stock_level(2) == STOCK_LOW
+    assert m.data(m.index(2, 1), Qt.BackgroundRole) == _STOCK_TINT[STOCK_LOW]
+    assert m.data(m.index(3, 1), Qt.BackgroundRole) is None  # never checked
+
+
+def test_part_not_on_jlcpcb_reads_as_out_of_stock():
+    m = _stock_model()
+    m.apply_stock("C134320", None)
+    assert m.stock_level(2) == STOCK_OUT
+
+
+def test_stock_survives_reload():
+    m = _stock_model()
+    m.apply_stock("C134320", JlcPart("C134320", stock=4088))
+    m.load([_rec("R1", LCSC="C134320")])
+    assert m.data(m.index(0, _COL_STOCK), Qt.DisplayRole) == "4,088"
+
+
+def test_apply_substitute_replaces_lcsc_and_appends_alternates():
+    m = _stock_model()
+    rows = m.rows_like(0)
+    assert rows == [0, 1]  # C2 and C3 place the same part
+    sub = JlcPart("C14663", mpn="CC0603KRX7R9BB104", manufacturer="YAGEO", stock=10**7)
+    m.apply_substitute(rows, sub, "311-1341-1-ND")
+
+    for r in rows:
+        assert m.data(m.index(r, 2), Qt.DisplayRole) == "C14663"
+        assert m.data(m.index(r, 5), Qt.DisplayRole) == STATUS_SUBSTITUTE
+        assert m.data(m.index(r, 3), Qt.DisplayRole) == "445-1-ND"  # original kept
+        assert m.data(m.index(r, 4), Qt.DisplayRole) == "CGA3"      # original kept
+        assert m.data(m.index(r, 1), Qt.BackgroundRole) is None     # new part in stock
+    assert "substitute for C9900013546" in m.data(m.index(0, 5), Qt.ToolTipRole)
+
+    edits = m.accepted_edits()[BOARD]
+    assert edits["uuid-C2"] == {"LCSC": "C14663", "Alternates": "311-1341-1-ND"}
+    assert edits["uuid-C3"] == {"LCSC": "C14663", "Alternates": "111-1-ND, 311-1341-1-ND"}
+
+
+def test_substitute_without_digikey_pn_leaves_alternates_alone():
+    m = _stock_model()
+    m.apply_substitute([2], JlcPart("C23184", stock=10**6), None)
+    assert m.accepted_edits()[BOARD]["uuid-R1"] == {"LCSC": "C23184"}
+
+
+def test_resolution_does_not_overwrite_a_substitute():
+    m = _stock_model()
+    m.apply_substitute([2], JlcPart("C23184", stock=10**6), None)
+    m.apply_resolution(2, _resolution("R1", "uuid-R1", Status.OK, lcsc="C134320"))
+    assert m.data(m.index(2, 2), Qt.DisplayRole) == "C23184"
+
+
+def test_candidate_cells():
+    from kicadtools.gui.substitute_dialog import candidate_cells, describe_part
+    from kicadtools.substitute import Candidate, Check
+
+    part = JlcPart("C14663", mpn="CC0603", manufacturer="YAGEO", library="base",
+                   stock=50001962, unit_price=0.0094)
+    cand = Candidate(part, [Check("Package", "0603", "0603"), Check("Voltage", "≥ 25V", "50V")])
+    assert candidate_cells(cand, ["Voltage", "Tolerance"]) == [
+        "C14663", "CC0603", "YAGEO", "Basic", "50,001,962", "$0.0094", "50V", ""]
+    assert describe_part(JlcPart("C9", mpn="M", stock=0, no_buy_reason="gone")) == \
+        "C9 M — stock 0 (gone)"
+    assert describe_part(None) == "not found on JLCPCB"

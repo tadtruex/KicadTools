@@ -13,23 +13,47 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QApplication, QComboBox, QStyledItemDelegate
 
+from kicadtools.intent import ElectricalIntent
 from kicadtools.partnum import CANONICAL_KEYS, extract_part_numbers
 from kicadtools.partrotation import PartRotationStore
-from kicadtools.resolve import Cache, PartRecord, Resolution, Resolver, Status
-from kicadtools.suppliers import digikey_url, lcsc_url
+from kicadtools.resolve import (
+    Cache,
+    PartRecord,
+    Resolution,
+    Resolver,
+    Status,
+    cached_jlcpcb_part,
+)
+from kicadtools.substitute import (
+    ALTERNATES_KEY,
+    DEFAULT_BUILD_QTY,
+    STOCK_LOW,
+    STOCK_OUT,
+    merge_alternates,
+    search_substitutes,
+    stock_level,
+)
+from kicadtools.suppliers import (
+    DigiKeyClient,
+    JlcPart,
+    digikey_url,
+    jlcpcb_search,
+    lcsc_url,
+)
 
 # An "Accept" checkbox leads the row (mirroring the Intents tab), then the
-# read-only part-number columns, an (editable) JLCPCB rotation override, with the
-# (often long) description trailing last.
-_LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Status", "Rotation",
-                 "Description"]
+# read-only part-number columns, JLCPCB stock, an (editable) JLCPCB rotation
+# override, with the (often long) description trailing last.
+_LCSC_COLUMNS = ["Accept", "Ref", "LCSC", "DigiKey", "MPN", "Status", "Stock",
+                 "Rotation", "Description"]
 _COL_DESCRIPTION = _LCSC_COLUMNS.index("Description")
 _COL_LCSC = _LCSC_COLUMNS.index("LCSC")
 _COL_DIGIKEY = _LCSC_COLUMNS.index("DigiKey")
+_COL_STOCK = _LCSC_COLUMNS.index("Stock")
 _COL_ROTATION = _LCSC_COLUMNS.index("Rotation")
 
 # The rotation-override choices offered in the dropdown (degrees CCW, additive on
@@ -48,6 +72,13 @@ STATUS_NONE = "⚑ no part #"
 STATUS_RESOLVED = "➕ resolved"
 STATUS_FLAGGED = "⚑ flagged"
 STATUS_ACCEPTED = "✔ accepted"
+STATUS_SUBSTITUTE = "⇄ substitute"
+
+# Translucent row tints for stock problems, readable on light and dark themes.
+_STOCK_TINT = {
+    STOCK_OUT: QColor(220, 50, 47, 70),   # red: none in stock / not sold
+    STOCK_LOW: QColor(230, 160, 0, 70),   # amber: fewer than the build needs
+}
 
 _RESULT_STATUS = {
     Status.OK: STATUS_HAS,
@@ -87,6 +118,10 @@ class LcscRow:
     # Newly discovered values the symbol doesn't already have, as canonical
     # {key: value} ready for write-back. Empty until resolution finds something.
     pending: Dict[str, str] = field(default_factory=dict)
+    footprint: str = ""
+    alternates: str = ""  # the symbol's Alternates property, as on disk
+    intent: Optional[ElectricalIntent] = None
+    replaced_lcsc: str = ""  # the LCSC a chosen substitute replaced
 
     @classmethod
     def from_record(cls, record: PartRecord) -> "LcscRow":
@@ -108,6 +143,9 @@ class LcscRow:
             source_file=record.source_file,
             symbol_uuid=record.symbol_uuid,
             had_mpn=bool(pn.mpn),
+            footprint=str(record.props.get("Footprint", "") or ""),
+            alternates=str(record.props.get(ALTERNATES_KEY, "") or ""),
+            intent=record.intent,
         )
 
 
@@ -128,6 +166,10 @@ class LcscTableModel(QAbstractTableModel):
         # Per-LCSC rotation overrides for the CPL export. Ephemeral by default so
         # headless/test models need no file; the app injects a disk-backed store.
         self._store = store if store is not None else PartRotationStore(":memory:")
+        # JLCPCB catalog entries by LCSC code, from Check Stock. Kept across
+        # load() so a save-and-reload doesn't drop the stock colouring.
+        self._stock: Dict[str, JlcPart] = {}
+        self.build_qty = DEFAULT_BUILD_QTY
 
     # ---- loading -----------------------------------------------------
     def load(self, records: Sequence[PartRecord]) -> None:
@@ -175,7 +217,76 @@ class LcscTableModel(QAbstractTableModel):
         return self._store.get(self._rows[row].lcsc) or 0.0
 
     def _status_text(self, row: int) -> str:
-        return STATUS_ACCEPTED if row in self._accepted else self._rows[row].status
+        status = self._rows[row].status
+        if row in self._accepted and status != STATUS_SUBSTITUTE:
+            return STATUS_ACCEPTED
+        return status
+
+    # ---- stock -------------------------------------------------------
+    def set_build_qty(self, qty: int) -> None:
+        """Set how many boards the build places; re-tints every row."""
+        self.build_qty = max(1, int(qty))
+        if self._rows:
+            self.dataChanged.emit(
+                self.index(0, 0), self.index(len(self._rows) - 1, self.columnCount() - 1)
+            )
+
+    def lcsc_codes(self) -> List[str]:
+        """The distinct LCSC codes on the board, in row order."""
+        return list(dict.fromkeys(r.lcsc for r in self._rows if r.lcsc))
+
+    def apply_stock(self, lcsc: str, part: Optional[JlcPart]) -> None:
+        """Record *lcsc*'s catalog entry (``None``: not found on JLCPCB)."""
+        if part is None:
+            # Not in the catalog at all: as unorderable as zero stock.
+            part = JlcPart(lcsc=lcsc, no_buy_reason="not found on JLCPCB")
+        self._stock[lcsc] = part
+        for r, row in enumerate(self._rows):
+            if row.lcsc == lcsc:
+                self.dataChanged.emit(self.index(r, 0), self.index(r, self.columnCount() - 1))
+
+    def part_for(self, lcsc: str) -> Optional[JlcPart]:
+        """The checked catalog entry for LCSC code *lcsc*, if any."""
+        return self._stock.get(lcsc) if lcsc else None
+
+    def stock_part(self, row: int) -> Optional[JlcPart]:
+        return self.part_for(self._rows[row].lcsc)
+
+    def per_board(self, row: int) -> int:
+        """How many places on one board use *row*'s LCSC part (1 without one)."""
+        lcsc = self._rows[row].lcsc
+        if not lcsc:
+            return 1
+        return sum(1 for r in self._rows if r.lcsc == lcsc)
+
+    def needed(self, row: int) -> int:
+        """Units of *row*'s part the whole build needs."""
+        return self.per_board(row) * self.build_qty
+
+    def stock_level(self, row: int) -> Optional[str]:
+        return stock_level(self.stock_part(row), self.needed(row))
+
+    def _stock_cell(self, r: int, role):
+        row = self._rows[r]
+        part = self.stock_part(r)
+        if role == Qt.DisplayRole:
+            if not row.lcsc:
+                return "—"
+            return "" if part is None else f"{part.stock:,}"
+        if role == Qt.ToolTipRole:
+            if not row.lcsc:
+                return "No LCSC number to check."
+            if part is None:
+                return "Run Check Stock to read JLCPCB's stock."
+            lines = [
+                f"Need {self.needed(r):,} ({self.per_board(r)} per board × "
+                f"{self.build_qty} boards); JLCPCB has {part.stock:,}."
+            ]
+            if part.no_buy_reason:
+                lines.append(f"JLCPCB: {part.no_buy_reason}")
+            lines.append(f"{'Basic' if part.is_basic else 'Extended'} part.")
+            return "\n".join(lines)
+        return None
 
     def _link_url(self, row: "LcscRow", col: int) -> Optional[str]:
         """The supplier URL a cell links to (LCSC/DigiKey with a value), else
@@ -196,6 +307,12 @@ class LcscTableModel(QAbstractTableModel):
             if not self._checkable(r):
                 return None
             return Qt.Checked if r in self._checked else Qt.Unchecked
+
+        if role == Qt.BackgroundRole:
+            return _STOCK_TINT.get(self.stock_level(r))
+
+        if col == _COL_STOCK:
+            return self._stock_cell(r, role)
 
         if col == _COL_ROTATION:
             if not self._rotatable(r):
@@ -247,6 +364,7 @@ class LcscTableModel(QAbstractTableModel):
                 row.digikey_pn,
                 row.mpn,
                 self._status_text(r),
+                "",  # Stock handled above
                 "",  # Rotation handled above (needs the store)
                 row.description,
             )[col]
@@ -289,6 +407,8 @@ class LcscTableModel(QAbstractTableModel):
         if not 0 <= row < len(self._rows):
             return
         r = self._rows[row]
+        if r.status == STATUS_SUBSTITUTE:
+            return  # a chosen substitute outranks a re-resolution of the old part
         if result.lcsc:
             r.lcsc = result.lcsc
         if result.resolved_mpn:
@@ -342,6 +462,48 @@ class LcscTableModel(QAbstractTableModel):
 
     def rows(self) -> List[LcscRow]:
         return self._rows
+
+    # ---- substitutes -------------------------------------------------
+    def rows_like(self, row: int) -> List[int]:
+        """*row* and every other row placing the same part (same LCSC and
+        footprint) — the set one substitute choice replaces. A row without an
+        LCSC number stands alone."""
+        base = self._rows[row]
+        if not base.lcsc:
+            return [row]
+        return [
+            i for i, r in enumerate(self._rows)
+            if r.lcsc == base.lcsc and r.footprint == base.footprint
+        ]
+
+    def apply_substitute(
+        self, rows: Sequence[int], part: JlcPart, digikey_pn: Optional[str]
+    ) -> None:
+        """Replace *rows*' LCSC part with *part* and accept the change.
+
+        Queues ``LCSC`` = the substitute's code and, when *digikey_pn* is known,
+        appends it to the symbol's ``Alternates`` list. The symbol's original
+        ``MPN`` / ``DigiKeyPN`` / ``Manufacturer`` are left as they are. Any
+        part numbers resolution had already queued for the row are kept.
+        """
+        self._stock[part.lcsc] = part
+        for i in rows:
+            r = self._rows[i]
+            r.replaced_lcsc = r.replaced_lcsc or r.lcsc
+            r.lcsc = part.lcsc
+            r.status = STATUS_SUBSTITUTE
+            r.pending = dict(r.pending)
+            r.pending[CANONICAL_KEYS["lcsc"]] = part.lcsc
+            if digikey_pn:
+                r.pending[ALTERNATES_KEY] = merge_alternates(
+                    r.pending.get(ALTERNATES_KEY, r.alternates), digikey_pn
+                )
+            was = f" for {r.replaced_lcsc}" if r.replaced_lcsc else ""
+            r.reason = f"substitute{was}: {part.mpn} ({part.manufacturer})"
+            self._accepted.add(i)
+            self._checked.discard(i)
+        for i in rows:
+            self.dataChanged.emit(self.index(i, 0), self.index(i, self.columnCount() - 1))
 
     def rotation_overrides(self) -> Dict[str, float]:
         """``{reference: degrees}`` for every row whose LCSC part has a non-zero
@@ -410,6 +572,8 @@ class ResolveWorker(QObject):
         )
         counts = {Status.OK: 0, Status.RESOLVED: 0, Status.FLAGGED: 0}
         for i, record in enumerate(self._records):
+            if QThread.currentThread().isInterruptionRequested():
+                break  # the window is closing
             result = resolver.resolve(record)
             counts[result.status] += 1
             self.row_resolved.emit(i, result)
@@ -418,3 +582,77 @@ class ResolveWorker(QObject):
         self.finished.emit(
             counts[Status.OK], counts[Status.RESOLVED], counts[Status.FLAGGED]
         )
+
+
+class StockWorker(QObject):
+    """Reads JLCPCB's catalog entry (stock included) for each LCSC code, off
+    the GUI thread. Emits ``part_checked`` per code and ``finished`` with the
+    number found, then ends its thread's event loop itself so the window can
+    ``wait()`` on the thread while closing."""
+
+    progress = Signal(str)
+    part_checked = Signal(str, object)   # (lcsc, JlcPart or None)
+    finished = Signal(int, int)          # (found, not found)
+
+    def __init__(self, codes: Sequence[str], cache_path: Optional[Path] = None):
+        super().__init__()
+        self._codes = list(codes)
+        self._cache_path = cache_path
+
+    def run(self) -> None:
+        cache = Cache(self._cache_path) if self._cache_path else None
+        found = missing = 0
+        for i, code in enumerate(self._codes, 1):
+            if QThread.currentThread().isInterruptionRequested():
+                break
+            self.progress.emit(f"Checking JLCPCB stock {i}/{len(self._codes)}: {code}…")
+            part = cached_jlcpcb_part(code, cache)
+            found += part is not None
+            missing += part is None
+            self.part_checked.emit(code, part)
+        if cache:
+            cache.close()
+        self.finished.emit(found, missing)
+        QThread.currentThread().quit()
+
+
+class SubstituteWorker(QObject):
+    """Runs :func:`kicadtools.substitute.search_substitutes` for one part off
+    the GUI thread; emits ``found`` (a ``SubstituteSearch``) or ``failed``."""
+
+    found = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, *, row: LcscRow, needed: int, cache_path: Optional[Path] = None):
+        super().__init__()
+        self._row = row
+        self._needed = needed
+        self._cache_path = cache_path
+
+    def run(self) -> None:
+        cache = Cache(self._cache_path) if self._cache_path else None
+        try:
+            # The current part comes from the board's own numbers, not a
+            # substitute already chosen this session.
+            lcsc = self._row.replaced_lcsc or self._row.lcsc
+            result = search_substitutes(
+                intent=self._row.intent,
+                footprint=self._row.footprint,
+                lcsc=lcsc,
+                mpn=self._row.mpn,
+                digikey_pn=self._row.digikey_pn,
+                needed=self._needed,
+                part_lookup=lambda code: cached_jlcpcb_part(code, cache),
+                search=jlcpcb_search,
+                digikey=DigiKeyClient(),
+            )
+            if cache:
+                for cand in result.candidates:
+                    cache.put_part(cand.part)
+            self.found.emit(result)
+        except Exception as exc:  # noqa: BLE001 — report any failure in the dialog
+            self.failed.emit(str(exc))
+        finally:
+            if cache:
+                cache.close()
+            QThread.currentThread().quit()

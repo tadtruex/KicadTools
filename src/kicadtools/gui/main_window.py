@@ -8,15 +8,18 @@ from typing import Optional
 from PySide6.QtCore import Qt, QThread, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableView,
     QTabWidget,
     QVBoxLayout,
@@ -46,14 +49,24 @@ from kicadtools.gui.lcsc import (
     LcscTableModel,
     ResolveWorker,
     RotationDelegate,
+    StockWorker,
+    SubstituteWorker,
     _COL_ROTATION,
 )
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.gui.param_editor import ElectricalParamsDialog
+from kicadtools.gui.substitute_dialog import SubstituteDialog, describe_part
+from kicadtools.naturalsort import natural_key
 from kicadtools.partrotation import PartRotationStore
 from kicadtools.resolve import iter_bom_part_records
 from kicadtools.sexpr_parser import has_instantiated_sheets
-from kicadtools.suppliers import DigiKeyClient
+from kicadtools.substitute import (
+    DEFAULT_BUILD_QTY,
+    STOCK_LOW,
+    STOCK_OUT,
+    SUPPORTED_TYPES,
+)
+from kicadtools.suppliers import DigiKeyClient, _norm_mpn, preferred_digikey_pn
 
 _LCSC_CACHE = Path.home() / ".kicadtools" / "lcsc_cache.sqlite"
 
@@ -71,6 +84,8 @@ class MainWindow(QMainWindow):
         self._records: list = []
         self._resolve_thread: Optional[QThread] = None
         self._resolve_worker: Optional[ResolveWorker] = None
+        # (thread, worker) pairs for the stock and substitute lookups.
+        self._threads: list = []
 
         tabs = QTabWidget()
         tabs.addTab(self._build_intent_tab(), "Intents")
@@ -139,19 +154,33 @@ class MainWindow(QMainWindow):
         self.lcsc_table.setMouseTracking(True)
         self.lcsc_table.clicked.connect(self._open_link)
         self.lcsc_table.entered.connect(self._hover_link)
+        # Right-click a row to search for an in-stock substitute.
+        self.lcsc_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.lcsc_table.customContextMenuRequested.connect(self._lcsc_context_menu)
 
         self.resolve_btn = QPushButton("Resolve LCSC")
         self.resolve_btn.clicked.connect(self._resolve_lcsc)
+        self.stock_btn = QPushButton("Check Stock")
+        self.stock_btn.clicked.connect(self._check_stock)
         lcsc_accept_checked = QPushButton("Accept Checked")
         lcsc_accept_all = QPushButton("Accept All")
         lcsc_accept_checked.clicked.connect(self._lcsc_accept_checked)
         lcsc_accept_all.clicked.connect(self._lcsc_accept_all)
 
+        self.build_qty = QSpinBox()
+        self.build_qty.setRange(1, 1_000_000)
+        self.build_qty.setValue(DEFAULT_BUILD_QTY)
+        self.build_qty.setToolTip("Boards in the build; stock is checked against this.")
+        self.build_qty.valueChanged.connect(self.lcsc_model.set_build_qty)
+
         buttons = QHBoxLayout()
         buttons.addWidget(self.resolve_btn)
+        buttons.addWidget(self.stock_btn)
         buttons.addWidget(lcsc_accept_checked)
         buttons.addWidget(lcsc_accept_all)
         buttons.addStretch(1)
+        buttons.addWidget(QLabel("Boards:"))
+        buttons.addWidget(self.build_qty)
 
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -189,6 +218,8 @@ class MainWindow(QMainWindow):
 
     # ---- open --------------------------------------------------------
     def _open_dialog(self) -> None:
+        if self._refuse_if_busy():
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, "Open KiCad schematic", "", "KiCad schematic (*.kicad_sch)"
         )
@@ -241,7 +272,29 @@ class MainWindow(QMainWindow):
                 f"{intent.reference} has no source location on file to write to.",
             )
             return
+        if self._refuse_if_busy():
+            return
         plan = {Path(intent.source_file): {intent.symbol_uuid: edits}}
+        # Writing reloads the board, which would drop any accepted-but-unsaved
+        # edits — so offer to save them in the same write instead.
+        pending = self._merged_edits()
+        if pending:
+            n = self._change_count(pending)
+            resp = QMessageBox.question(
+                self,
+                "Save other changes too?",
+                "Writing these parameters saves the schematic and reloads it. "
+                f"Your {n} other unsaved change{'s' * (n != 1)} will be saved "
+                "with them.",
+                QMessageBox.Save | QMessageBox.Cancel,
+                QMessageBox.Save,
+            )
+            if resp != QMessageBox.Save:
+                return
+            for src, by_uuid in plan.items():
+                for uuid, props in by_uuid.items():
+                    pending.setdefault(src, {}).setdefault(uuid, {}).update(props)
+            plan = pending
         self._write_in_place(plan)
 
     # ---- LCSC / DigiKey links ---------------------------------------
@@ -258,12 +311,183 @@ class MainWindow(QMainWindow):
         self.lcsc_table.viewport().setCursor(cursor)
 
     # ---- LCSC resolution --------------------------------------------
+    # ---- background work --------------------------------------------
+    def _busy(self) -> bool:
+        return self._resolve_thread is not None or bool(self._threads)
+
+    def _refuse_if_busy(self) -> bool:
+        """Tell the user to wait (and return True) while a lookup runs. Workers
+        report results by row index, so the board must not reload under them."""
+        if not self._busy():
+            return False
+        QMessageBox.information(
+            self, "Lookup running", "Wait for the current JLCPCB / DigiKey lookup to finish."
+        )
+        return True
+
+    def _start(self, worker) -> QThread:
+        """Run *worker* (a QObject with ``run()`` that quits its own thread when
+        done) on a new thread, tracked in ``_threads`` until it finishes."""
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        thread.finished.connect(self._on_thread_finished)
+        self._threads.append((thread, worker))
+        thread.start()
+        return thread
+
+    def _on_thread_finished(self) -> None:
+        thread = self.sender()
+        for t, w in [pair for pair in self._threads if pair[0] is thread]:
+            w.deleteLater()
+            t.deleteLater()
+        self._threads = [pair for pair in self._threads if pair[0] is not thread]
+
+    def _stop_threads(self) -> None:
+        """Ask every lookup to stop and wait for it (the window is closing)."""
+        threads = [t for t, _ in self._threads]
+        if self._resolve_thread is not None:
+            threads.append(self._resolve_thread)
+        for t in threads:
+            t.requestInterruption()
+        if self._resolve_thread is not None:
+            self._resolve_thread.quit()
+        for t in threads:
+            t.wait(30_000)
+
+    # ---- stock -------------------------------------------------------
+    def _check_stock(self) -> None:
+        if not self._records:
+            QMessageBox.information(self, "No board", "Open a schematic first.")
+            return
+        if self._refuse_if_busy():
+            return
+        codes = self.lcsc_model.lcsc_codes()
+        if not codes:
+            QMessageBox.information(
+                self, "No LCSC numbers", "No part has an LCSC number yet. Run Resolve LCSC first."
+            )
+            return
+        _LCSC_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        self.stock_btn.setEnabled(False)
+        self.stock_btn.setText("Checking…")
+        worker = StockWorker(codes, _LCSC_CACHE)
+        worker.progress.connect(self.statusBar().showMessage)
+        worker.part_checked.connect(self.lcsc_model.apply_stock)
+        worker.finished.connect(self._on_stock_done)
+        self._start(worker)
+
+    def _on_stock_done(self, _found: int, _missing: int) -> None:
+        self.stock_btn.setEnabled(True)
+        self.stock_btn.setText("Check Stock")
+        levels = [self.lcsc_model.stock_level(r) for r in range(self.lcsc_model.rowCount())]
+        out, low = levels.count(STOCK_OUT), levels.count(STOCK_LOW)
+        qty = self.lcsc_model.build_qty
+        if not out and not low:
+            self.statusBar().showMessage(f"Stock: every part covers {qty} boards.")
+        else:
+            self.statusBar().showMessage(
+                f"Stock: {out} part(s) unavailable (red), {low} short for {qty} boards "
+                "(amber). Right-click one to find a substitute."
+            )
+
+    # ---- substitutes -------------------------------------------------
+    def _lcsc_context_menu(self, pos) -> None:
+        index = self.lcsc_table.indexAt(pos)
+        if not index.isValid():
+            return
+        row = self.lcsc_table.model().mapToSource(index).row()
+        lrow = self.lcsc_model.rows()[row]
+        intent_type = (lrow.intent.intent_type if lrow.intent else "").lower()
+        menu = QMenu(self)
+        act = menu.addAction("Find Parametrically Equivalent Substitute…")
+        if intent_type not in SUPPORTED_TYPES:
+            act.setText("Find Parametrically Equivalent Substitute… (resistors and capacitors only)")
+            act.setEnabled(False)
+        chosen = menu.exec(self.lcsc_table.viewport().mapToGlobal(pos))
+        if chosen is act:
+            self._find_substitute(row)
+
+    def _find_substitute(self, row: int) -> None:
+        if self._refuse_if_busy():
+            return
+        rows = self.lcsc_model.rows_like(row)
+        lrows = self.lcsc_model.rows()
+        base = lrows[row]
+        refs = sorted((lrows[i].reference for i in rows), key=natural_key)
+        needed = len(rows) * self.lcsc_model.build_qty
+
+        current_code = base.replaced_lcsc or base.lcsc
+        current_part = self.lcsc_model.part_for(current_code)
+        if current_part is not None:
+            current = describe_part(current_part)
+        else:
+            current = current_code or "no LCSC number"
+            if base.mpn:
+                current += f", MPN {base.mpn}"
+
+        _LCSC_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        dialog = SubstituteDialog(refs, current, needed, self)
+        worker = SubstituteWorker(row=base, needed=needed, cache_path=_LCSC_CACHE)
+        worker.found.connect(dialog.show_result)
+        worker.failed.connect(dialog.show_error)
+        self._start(worker)
+        accepted = dialog.exec() == QDialog.Accepted
+        cand = dialog.chosen() if accepted else None
+        try:  # a search still running must not report into a closed dialog
+            worker.found.disconnect(dialog.show_result)
+            worker.failed.disconnect(dialog.show_error)
+        except (RuntimeError, TypeError):
+            pass  # the worker already finished and was deleted
+        dialog.deleteLater()
+        if cand is None:
+            return
+
+        digikey_pn, why = self._digikey_pn_for(cand.part.mpn)
+        if not digikey_pn:
+            resp = QMessageBox.question(
+                self,
+                "No DigiKey part number",
+                f"{why}\n\nUse {cand.part.lcsc} anyway? The LCSC number changes, "
+                "but Alternates isn't updated.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+        self.lcsc_model.apply_substitute(rows, cand.part, digikey_pn)
+        self._mark_dirty()
+        alt = f"; Alternates += {digikey_pn}" if digikey_pn else ""
+        self.statusBar().showMessage(
+            f"{', '.join(refs)} → {cand.part.lcsc} ({cand.part.mpn}){alt}. Save to write it."
+        )
+
+    def _digikey_pn_for(self, mpn: str) -> "tuple[Optional[str], str]":
+        """The cut-tape DigiKey PN for *mpn*, or ``(None, reason)``."""
+        dk = DigiKeyClient()
+        if not dk.configured:
+            return None, (
+                "DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET are not set, so the "
+                f"DigiKey part number for {mpn} can't be looked up."
+            )
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            product = dk.product_for(mpn)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if product is None or _norm_mpn(product.mpn or "") != _norm_mpn(mpn):
+            return None, f"DigiKey has no exact match for MPN {mpn}."
+        pn = preferred_digikey_pn(product.digikey_pns)
+        if not pn:
+            return None, f"DigiKey lists {mpn} but gives no part number for it."
+        return pn, ""
+
     def _resolve_lcsc(self) -> None:
         if not self._records:
             QMessageBox.information(self, "No board", "Open a schematic first.")
             return
-        if self._resolve_thread is not None:
-            return  # a resolution is already in flight
+        if self._refuse_if_busy():
+            return
 
         # Warn if any part relies on DigiKey but credentials are missing.
         from kicadtools.partnum import extract_part_numbers
@@ -395,6 +619,8 @@ class MainWindow(QMainWindow):
     def _save(self) -> bool:
         """Confirm, then write accepted edits back into the open schematic in
         place. Returns whether the save actually happened (Cancel → ``False``)."""
+        if self._refuse_if_busy():
+            return False
         edits = self._pending_edits()
         if edits is None:
             return False
@@ -417,6 +643,8 @@ class MainWindow(QMainWindow):
         Only single-file schematics are supported for now: a hierarchical design
         would leave its subsheet links pointing at the old files, and we don't
         relink them yet — so we refuse and steer the user to Save (in place)."""
+        if self._refuse_if_busy():
+            return
         edits = self._pending_edits()
         if edits is None:
             return
@@ -633,6 +861,7 @@ class MainWindow(QMainWindow):
         Discard, or Cancel. Fires for both File ▸ Quit (which calls ``close``)
         and the window's close button."""
         if not self.isWindowModified():
+            self._stop_threads()
             event.accept()
             return
         resp = QMessageBox.question(
@@ -646,10 +875,12 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         if resp == QMessageBox.Discard:
+            self._stop_threads()
             event.accept()
             return
         # Save: write in place (no second confirmation) and only quit if it
         # succeeds — a failed write keeps the window open so nothing is lost.
+        self._stop_threads()  # a reload must not happen under a running lookup
         edits = self._merged_edits()
         if edits and not self._write_in_place(edits):
             event.ignore()

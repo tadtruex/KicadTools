@@ -256,3 +256,71 @@ def test_digikey_product_for_empty_pn_short_circuits(monkeypatch):
     client._token = "tok"  # pretend already authed
     client._token_expires_at = float("inf")
     assert client.product_for("") is None
+
+
+# ---- JLCPCB catalog entries (stock, attributes) ------------------------------
+
+def _hit(code, model="M1", **extra):
+    hit = {
+        "componentCode": code,
+        "componentModelEn": model,
+        "componentBrandEn": "Yageo",
+        "componentLibraryType": "base",
+        "stockCount": 1234,
+        "componentSpecificationEn": "0603",
+        "componentPrices": [{"productPrice": 0.002}, {"productPrice": 0.001}],
+        "attributes": [
+            {"attribute_name_en": "Capacitance", "attribute_value_name": "100nF"},
+            {"attribute_name_en": "Voltage Rating", "attribute_value_name": "50V"},
+        ],
+    }
+    hit.update(extra)
+    return hit
+
+
+def test_jlcpcb_part_parses_stock_and_attributes(monkeypatch):
+    _patch_post(monkeypatch, FakeResp(_list_payload([_hit("C14663")])))
+    part = suppliers.jlcpcb_part("c14663")
+    assert part.lcsc == "C14663" and part.mpn == "M1" and part.manufacturer == "Yageo"
+    assert part.is_basic and part.stock == 1234 and part.unit_price == 0.001
+    assert part.package == "0603"
+    assert part.attributes == {"Capacitance": "100nF", "Voltage Rating": "50V"}
+    assert part.orderable
+
+
+def test_jlcpcb_part_requires_exact_code(monkeypatch):
+    _patch_post(monkeypatch, FakeResp(_list_payload([_hit("C146630")])))
+    assert suppliers.jlcpcb_part("C14663") is None
+    assert suppliers.jlcpcb_part("") is None
+
+
+def test_jlcpcb_part_not_orderable_with_no_buy_reason(monkeypatch):
+    hit = _hit("C9900013546", stockCount=0, attributes=None,
+               noBuyReason="This product is no longer manufactured.")
+    _patch_post(monkeypatch, FakeResp(_list_payload([hit])))
+    part = suppliers.jlcpcb_part("C9900013546")
+    assert part.attributes == {} and not part.orderable
+    assert part.no_buy_reason.startswith("This product")
+
+
+def test_jlcpcb_search_pages_until_a_short_page(monkeypatch):
+    pages = {1: [_hit("C1"), _hit("C2")], 2: [_hit("C3")]}
+    seen = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen.append(json["currentPage"])
+        return FakeResp(_list_payload(pages.get(json["currentPage"], [])))
+
+    monkeypatch.setattr(suppliers.requests, "post", fake_post)
+    parts = suppliers.jlcpcb_search("100nF 0603", pages=5, page_size=2)
+    assert [p.lcsc for p in parts] == ["C1", "C2", "C3"]
+    assert seen == [1, 2]
+
+
+def test_preferred_digikey_pn_picks_cut_tape():
+    assert suppliers.preferred_digikey_pn(
+        ["445-5667-2-ND", "445-5667-1-ND", "445-5667-6-ND"]) == "445-5667-1-ND"
+    assert suppliers.preferred_digikey_pn(
+        ["311-49.9KHRTR-ND", "311-49.9KHRCT-ND", "311-49.9KHRDKR-ND"]) == "311-49.9KHRCT-ND"
+    assert suppliers.preferred_digikey_pn(["X-ND"]) == "X-ND"
+    assert suppliers.preferred_digikey_pn([]) is None

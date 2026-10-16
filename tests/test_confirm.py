@@ -236,3 +236,38 @@ def test_resolver_confirm_none_when_digikey_misses():
     r = Resolver(digikey=dk)
     assert r.confirm(_record(_resistor(value="10k"), MPN="bogus")) is None
     assert dk.calls == ["bogus"]
+
+
+@pytest.mark.parametrize("text, watts", [
+    ("100mW", 0.1),
+    ("62.5mW", 0.0625),
+    ("1/10W", 0.1),
+])
+def test_parse_watts_milliwatts(text, watts):
+    assert parse_watts(text) == pytest.approx(watts)
+
+
+@pytest.mark.parametrize("text, farads", [
+    ("100nF", 100e-9),
+    ("0.1 µF", 100e-9),
+    ("0.1μF", 100e-9),
+    ("4.7uF", 4.7e-6),
+    ("4u7", 4.7e-6),
+    ("22pF", 22e-12),
+    ("100n", 100e-9),
+])
+def test_parse_capacitance(text, farads):
+    from kicadtools.confirm import parse_capacitance
+    assert parse_capacitance(text) == pytest.approx(farads)
+
+
+@pytest.mark.parametrize("text", ["C_P1U", "", None, "abc"])
+def test_parse_capacitance_rejects(text):
+    from kicadtools.confirm import parse_capacitance
+    assert parse_capacitance(text) is None
+
+
+@pytest.mark.parametrize("text, volts", [("25V", 25), ("6.3 V", 6.3), ("1kV", 1000)])
+def test_parse_volts(text, volts):
+    from kicadtools.confirm import parse_volts
+    assert parse_volts(text) == pytest.approx(volts)

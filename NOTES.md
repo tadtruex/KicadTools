@@ -3,6 +3,52 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## JLCPCB stock check + parametric substitutes (2026-10-15)
+
+Motivation: BarrelJackAdapter reached JLCPCB with unavailable parts. Check
+Stock on it: C2/C3 carry `C9900013546`, a placeholder SKU JLCPCB reports as "This
+product is no longer manufactured."; C6, C4/C7 at 0 stock; U1 has 2. `lcsc`
+never caught these because a part that already has an LCSC is trusted without a
+lookup.
+
+- **Correction to the 2026-07-18 note:** JLCPCB's keyword search
+  (`selectSmtComponentList`) *does* return structured `attributes`
+  (`Capacitance`, `Voltage Rating`, `Tolerance`, `Temperature Coefficient`,
+  `Resistance`, `Power(Watts)`) for catalog parts, plus `stockCount`,
+  `noBuyReason`, `componentLibraryType`. Placeholders have `attributes: null`.
+  `componentAlternativesCode` exists but was empty on every part probed.
+- `suppliers.py`: `JlcPart` (+ `orderable` = stock > 0 and no `noBuyReason`),
+  `jlcpcb_part(lcsc)` (exact code), `jlcpcb_search(kw, pages, page_size)`,
+  `preferred_digikey_pn` (cut tape: `-1-ND` / `CT-ND`). `jlcpcb_lcsc_for` now
+  shares `_jlc_search_raw`.
+- `resolve.Cache`: `jlc_part` table with `fetched_at`; `get_part` serves rows
+  younger than `PART_MAX_AGE` (12 h). `cached_jlcpcb_part(lcsc, cache)`.
+- `substitute.py` (new, pure; network injected into `search_substitutes`):
+  spec per parameter from the current part (JLCPCB attrs, else DigiKey params of
+  MPN/DK PN), intent fields fill gaps (user decision: current part first). Package
+  from the footprint. Rules: value EQ (0.1 %), voltage/power MIN, tolerance MAX,
+  dielectric ONE_OF (current + upgrades to X7R; an intent's `Class:Preferred` is
+  taken literally). Capacitor voltage is required. One search per allowed
+  dielectric (an X6S search buries X7R hits). Rank: enough stock → Basic →
+  preferred → price → stock. `confirm.parse_watts` now reads `mW`; new
+  `parse_capacitance`, `parse_volts`.
+- GUI: LCSC tab Stock column (index 6; Rotation → 7, Description → 8), row tints,
+  Boards spinbox (default 25), Check Stock (`StockWorker`), right-click substitute
+  (`SubstituteWorker` + `gui/substitute_dialog.py`). Picking applies to every row
+  with the same LCSC + footprint, auto-accepts, queues `LCSC` + `Alternates`
+  (user decision: original MPN/DigiKeyPN/Manufacturer untouched; alternate's DK
+  PN appended to `Alternates`). Stock map survives reload.
+- Fixed while here: the parameter editor's immediate write reloaded the board and
+  dropped accepted-but-unsaved edits (now offers to save them in the same write);
+  open/save/edit are refused while a lookup thread runs (workers report by row
+  index); closing the window interrupts and waits for workers.
+- Live-verified on a scratch copy of BarrelJackAdapter: C2/C3 → C14663 (Yageo
+  Basic, 50V X7R, ~50M stock), Alternates `311-1344-1-ND`, Save wrote both props.
+  Suite 369 passing.
+- Not done: substitutes for other types (inductor/IC); editing the spec in the
+  dialog; finding parts from intents alone (the user's stated longer-term goal —
+  `build_spec(intent=…)` without part attrs already does the spec half).
+
 ## Per-LCSC CPL rotation overrides (2026-07-21)
 
 Fixes the KiCad↔JLCPCB orientation mismatch (e.g. ECG's SOT-23 transistors land
@@ -44,7 +90,9 @@ New feature: make the electrical-intent model actively resolve parts. User
 specifies a minimal param set per component (a resistor: likely just resistance
 + footprint); KicadTools confirms/fills the rest. **DigiKey is the parametric
 source of truth** (JLCPCB has no structured attributes — see the API probe
-below); JLCPCB is an existence-check-by-MPN only for now. 8-task backbone.
+below; **wrong, see the 2026-10-15 correction at the top**: its keyword search
+does return attributes); JLCPCB is an existence-check-by-MPN only for now.
+8-task plan.
 
 **DONE:**
 - `ResistorIntent.power_min` (`Power:Min` property → `power_min: str|None`, optional
@@ -616,9 +664,10 @@ kicadtools bom -v ../../ECG/ECG/ECG.kicad_sch
 
 ## Next steps / open decisions
 
-- **Check JLCPCB inventory for matched parts and suggest in-stock alternatives
-  for any shortfalls.** (i.e. once a part is matched to an LCSC number, verify it
-  has enough stock; where it falls short, surface orderable in-stock substitutes.)
+- ~~**Check JLCPCB inventory for matched parts and suggest in-stock alternatives
+  for any shortfalls.**~~ **Done (2026-10-15)** for resistors and capacitors —
+  Check Stock + Find Parametrically Equivalent Substitute in the LCSC tab; see the
+  top section. Inductors and ICs are only coloured, not searched.
 - **CPL rotation: many parts land rotated 180°.** Revisit the intent system and
   add an optional parameter to the base intent spec that lets us specify an extra
   rotation offset per part type (folded into the CPL `Rotation` on export, on top

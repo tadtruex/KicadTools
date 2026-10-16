@@ -276,6 +276,140 @@ def _parse_product(product: dict) -> DigiKeyProduct:
     )
 
 
+_JLC_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0",
+    "Origin": "https://jlcpcb.com",
+    "Referer": "https://jlcpcb.com/parts",
+}
+
+
+def _jlc_search_raw(
+    keyword: str, *, page: int = 1, page_size: int = 25
+) -> Optional[List[dict]]:
+    """One page of raw JLCPCB search hits for *keyword*, or ``None`` on any
+    network/HTTP/JSON failure (reported on stdout, never raised)."""
+    body = {
+        "currentPage": page,
+        "pageSize": page_size,
+        "keyword": keyword,
+        "searchSource": "search",
+    }
+    try:
+        resp = requests.post(
+            LCSC_SEARCH_URL, headers=_JLC_HEADERS, json=body, timeout=_TIMEOUT
+        )
+    except requests.RequestException as exc:
+        print(f"⚠️  Network error searching LCSC for {keyword}: {exc}")
+        return None
+    if resp.status_code != 200:
+        print(f"⚠️  LCSC search failed ({resp.status_code}) for {keyword}")
+        return None
+    try:
+        data = resp.json().get("data") or {}
+    except ValueError:
+        print(f"⚠️  LCSC search returned non-JSON for {keyword}")
+        return None
+    return (data.get("componentPageInfo") or {}).get("list") or []
+
+
+@dataclass
+class JlcPart:
+    """One JLCPCB catalog entry: what the assembly line can place, how many are
+    in stock, and the part's parametric attributes.
+
+    ``attributes`` maps JLCPCB's ``attribute_name_en`` (``"Capacitance"``,
+    ``"Voltage Rating"``, ``"Power(Watts)"`` …) to the raw value text
+    (``"100nF"``, ``"25V"``, ``"100mW"``). Placeholder ``C9900…`` SKUs carry no
+    attributes. ``no_buy_reason`` is JLCPCB's own explanation when the part can't
+    be bought (e.g. ``"This product is no longer manufactured."``).
+    """
+    lcsc: str
+    mpn: str = ""
+    manufacturer: str = ""
+    library: str = ""          # "base" (Basic) | "expand" (Extended)
+    preferred: bool = False    # JLCPCB "preferred" Extended part
+    stock: int = 0
+    unit_price: float = float("inf")  # lowest tier price, USD
+    package: str = ""          # e.g. "0603"
+    description: str = ""
+    no_buy_reason: str = ""
+    catalog_url: str = ""
+    attributes: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_basic(self) -> bool:
+        return self.library.lower() == "base"
+
+    @property
+    def orderable(self) -> bool:
+        """In stock and not marked unbuyable by JLCPCB."""
+        return self.stock > 0 and not self.no_buy_reason
+
+
+def _parse_jlc_part(hit: dict) -> JlcPart:
+    attrs = {
+        str(a.get("attribute_name_en")): str(a.get("attribute_value_name"))
+        for a in (hit.get("attributes") or [])
+        if a.get("attribute_name_en") and a.get("attribute_value_name") is not None
+    }
+    return JlcPart(
+        lcsc=str(hit.get("componentCode") or ""),
+        mpn=str(hit.get("componentModelEn") or ""),
+        manufacturer=str(hit.get("componentBrandEn") or ""),
+        library=str(hit.get("componentLibraryType") or ""),
+        preferred=bool(hit.get("preferredComponentFlag")),
+        stock=int(_stock_count(hit)),
+        unit_price=_min_price(hit),
+        package=str(hit.get("componentSpecificationEn") or ""),
+        description=str(hit.get("describe") or ""),
+        no_buy_reason=str(hit.get("noBuyReason") or ""),
+        catalog_url=str(hit.get("lcscGoodsUrl") or ""),
+        attributes=attrs,
+    )
+
+
+def jlcpcb_part(lcsc: str) -> Optional[JlcPart]:
+    """The JLCPCB catalog entry for LCSC code *lcsc* (exact code match), or
+    ``None`` when it isn't found or the lookup fails."""
+    code = (lcsc or "").strip().upper()
+    if not code:
+        return None
+    hits = _jlc_search_raw(code, page_size=10)
+    for hit in hits or []:
+        if str(hit.get("componentCode") or "").upper() == code:
+            return _parse_jlc_part(hit)
+    return None
+
+
+def jlcpcb_search(keyword: str, *, pages: int = 3, page_size: int = 100) -> List[JlcPart]:
+    """Up to ``pages × page_size`` JLCPCB catalog hits for *keyword*, in
+    JLCPCB's relevance order. Stops early on a short page or a failed request."""
+    parts: List[JlcPart] = []
+    for page in range(1, pages + 1):
+        hits = _jlc_search_raw(keyword, page=page, page_size=page_size)
+        if not hits:
+            break
+        parts.extend(_parse_jlc_part(h) for h in hits)
+        if len(hits) < page_size:
+            break
+    return parts
+
+
+def preferred_digikey_pn(digikey_pns: List[str]) -> Optional[str]:
+    """Pick the cut-tape variant from a product's DigiKey part numbers.
+
+    DigiKey lists one product under several packagings — tape & reel
+    (``…-2-ND`` / ``…TR-ND``), cut tape (``…-1-ND`` / ``…CT-ND``) and Digi-Reel
+    (``…-6-ND`` / ``…DKR-ND``). Cut tape is what a small build orders and what
+    the boards here already store, so it wins; otherwise the first listed."""
+    for pn in digikey_pns:
+        if re.search(r"(-1-ND|CT-ND)$", pn):
+            return pn
+    return digikey_pns[0] if digikey_pns else None
+
+
 def jlcpcb_lcsc_for(mpn: str) -> Optional[str]:
     """Return the LCSC part number for *mpn* via JLCPCB's parts API, or ``None``.
 
@@ -288,32 +422,9 @@ def jlcpcb_lcsc_for(mpn: str) -> Optional[str]:
     if not mpn:
         return None
 
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0",
-        "Origin": "https://jlcpcb.com",
-        "Referer": "https://jlcpcb.com/parts",
-    }
-    body = {"currentPage": 1, "pageSize": 25, "keyword": mpn, "searchSource": "search"}
-
-    try:
-        resp = requests.post(
-            LCSC_SEARCH_URL, headers=headers, json=body, timeout=_TIMEOUT
-        )
-    except requests.RequestException as exc:
-        print(f"⚠️  Network error searching LCSC for {mpn}: {exc}")
+    parts = _jlc_search_raw(mpn)
+    if parts is None:
         return None
-    if resp.status_code != 200:
-        print(f"⚠️  LCSC search failed ({resp.status_code}) for {mpn}")
-        return None
-    try:
-        data = resp.json().get("data") or {}
-    except ValueError:
-        print(f"⚠️  LCSC search returned non-JSON for {mpn}")
-        return None
-
-    parts = (data.get("componentPageInfo") or {}).get("list") or []
     target = _norm_mpn(mpn)
     matches = [
         p for p in parts if _norm_mpn(str(p.get("componentModelEn", ""))) == target

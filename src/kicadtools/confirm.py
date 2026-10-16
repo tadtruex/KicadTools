@@ -79,8 +79,8 @@ def parse_percent(text: object) -> Optional[float]:
 
 def parse_watts(text: object) -> Optional[float]:
     """Watts from a power rendering, taking the first parseable token so a
-    compound ``"0.063W, 1/16W"`` (two spellings of one value) parses to ``0.063``
-    and a fraction ``"1/4W"`` parses to ``0.25``."""
+    compound ``"0.063W, 1/16W"`` (two spellings of one value) parses to ``0.063``,
+    a fraction ``"1/4W"`` parses to ``0.25`` and JLCPCB's ``"100mW"`` to ``0.1``."""
     if text is None:
         return None
     for token in str(text).split(","):
@@ -88,17 +88,57 @@ def parse_watts(text: object) -> Optional[float]:
         t = "".join(t.replace("W", "").replace("w", "").split())
         if not t:
             continue
+        scale = 1.0
+        if t.endswith("m"):  # "100mW" -> "100m" once the W is gone
+            t, scale = t[:-1], 1e-3
         if "/" in t:
             num, _, den = t.partition("/")
             try:
-                return float(num) / float(den)
+                return float(num) / float(den) * scale
             except (ValueError, ZeroDivisionError):
                 continue
         try:
-            return float(t)
+            return float(t) * scale
         except ValueError:
             continue
     return None
+
+
+# Capacitance multipliers; "u" and "µ" (micro sign) and "μ" (Greek mu) all mean micro.
+_CAP_MULT = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3}
+
+
+def parse_capacitance(text: object) -> Optional[float]:
+    """Farads from a capacitance rendering (``"100nF"``, ``"0.1 µF"``, ``"4.7uF"``,
+    ``"4u7"``, ``"22pF"``), or ``None`` when it can't be parsed."""
+    if text is None:
+        return None
+    s = "".join(str(text).split()).replace("F", "").replace("f", "")
+    if not s:
+        return None
+    m = re.fullmatch(r"([0-9.]*)([pnuµμm])?([0-9.]*)", s)
+    if not m or not (m.group(1) or m.group(3)):
+        return None
+    head, letter, tail = m.group(1), m.group(2) or "", m.group(3)
+    num = f"{head}.{tail}" if tail else head  # letter as decimal point: "4u7"
+    try:
+        return float(num) * _CAP_MULT.get(letter, 1.0)
+    except ValueError:
+        return None
+
+
+def parse_volts(text: object) -> Optional[float]:
+    """Volts from a voltage rendering (``"25V"``, ``"6.3 V"``, ``"1kV"``)."""
+    if text is None:
+        return None
+    s = "".join(str(text).split()).upper().replace("V", "")
+    scale = 1.0
+    if s.endswith("K"):
+        s, scale = s[:-1], 1e3
+    try:
+        return float(s) * scale
+    except ValueError:
+        return None
 
 
 def _close(a: float, b: float, rel: float = 0.01) -> bool:

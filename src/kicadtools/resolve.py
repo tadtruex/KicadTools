@@ -18,9 +18,10 @@ both drive :meth:`Resolver.resolve`.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -36,7 +37,10 @@ from kicadtools.sexpr_parser import (
     load_schematic_tree,
     symbol_uuid,
 )
-from kicadtools.suppliers import DigiKeyClient, jlcpcb_lcsc_for
+from kicadtools.suppliers import DigiKeyClient, JlcPart, jlcpcb_lcsc_for, jlcpcb_part
+
+# How long a cached JLCPCB catalog entry (stock count included) stays usable.
+PART_MAX_AGE = 12 * 3600.0
 
 
 class Status(str, Enum):
@@ -132,6 +136,13 @@ class Cache:
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
         )
+        # Whole JLCPCB catalog entries (stock, attributes) keyed by LCSC code.
+        # Unlike the two lookup tables these go stale — stock moves daily — so
+        # each row is timestamped and read back only while younger than max_age.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS jlc_part "
+            "(lcsc TEXT PRIMARY KEY, json TEXT NOT NULL, fetched_at REAL NOT NULL)"
+        )
         self.conn.commit()
         self._invalidate_stale_lcsc()
 
@@ -176,8 +187,47 @@ class Cache:
         )
         self.conn.commit()
 
+    def get_part(self, lcsc: str, max_age: float = PART_MAX_AGE) -> Optional[JlcPart]:
+        """The cached :class:`JlcPart` for *lcsc* if fetched less than *max_age*
+        seconds ago, else ``None``."""
+        row = self.conn.execute(
+            "SELECT json, fetched_at FROM jlc_part WHERE lcsc = ?", (lcsc,)
+        ).fetchone()
+        if row is None or time.time() - row[1] > max_age:
+            return None
+        data = json.loads(row[0])
+        # inf isn't valid JSON; it's stored as null.
+        if data.get("unit_price") is None:
+            data["unit_price"] = float("inf")
+        return JlcPart(**data)
+
+    def put_part(self, part: JlcPart) -> None:
+        data = asdict(part)
+        if data["unit_price"] == float("inf"):
+            data["unit_price"] = None
+        self.conn.execute(
+            "INSERT OR REPLACE INTO jlc_part(lcsc, json, fetched_at) VALUES (?, ?, ?)",
+            (part.lcsc, json.dumps(data), time.time()),
+        )
+        self.conn.commit()
+
     def close(self) -> None:
         self.conn.close()
+
+
+def cached_jlcpcb_part(
+    lcsc: str,
+    cache: Optional[Cache],
+    lookup: Callable[[str], Optional[JlcPart]] = jlcpcb_part,
+) -> Optional[JlcPart]:
+    """*lcsc*'s catalog entry from *cache* when fresh, else from *lookup* (and
+    cached). Misses aren't cached, so a failed request is retried next time."""
+    if cache and (hit := cache.get_part(lcsc)):
+        return hit
+    part = lookup(lcsc)
+    if part and cache:
+        cache.put_part(part)
+    return part
 
 
 class Resolver:
