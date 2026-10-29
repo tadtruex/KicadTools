@@ -185,3 +185,31 @@ def test_specific_part_with_only_empty_variants_is_not_classified():
     # No usable part number -> falls back to a plain, unclassified intent.
     c = ElectricalIntent.from_dict(_specific(DigikeyPN=""))
     assert type(c) is ElectricalIntent
+
+
+def test_capacitor_tolerance_preferred_parsed_and_described():
+    from kicadtools.intent import CapacitorIntent
+
+    c = ElectricalIntent.from_dict({
+        "Reference": "C1", "dnp": False, "in_bom": True,
+        "Intent:Type": "capacitor", "Value": "100nF",
+        "Voltage:Min": "25V", "Tolerance:Preferred": "5%, 10%",
+    })
+    assert isinstance(c, CapacitorIntent)
+    assert c.tolerance_preferred == ["5%", "10%"]
+    assert c.description() == "C1: 100nF ±5% capacitor, min-V 25V"
+
+    bare = ElectricalIntent.from_dict({
+        "Reference": "C2", "dnp": False, "in_bom": True,
+        "Intent:Type": "capacitor", "Value": "1uF",
+    })
+    assert bare.tolerance_preferred == []
+    assert bare.description() == "C2: 1uF capacitor"
+
+
+def test_capacitor_empty_tolerance_preferred_is_empty_list():
+    c = ElectricalIntent.from_dict({
+        "Reference": "C3", "dnp": False, "in_bom": True,
+        "Intent:Type": "capacitor", "Value": "1nF", "Tolerance:Preferred": " , ",
+    })
+    assert c.tolerance_preferred == []

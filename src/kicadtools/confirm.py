@@ -12,8 +12,8 @@ the minimum spec the schematic author wrote on the symbol. Each intent field is:
 
 Values are compared through small per-parameter normalizers because DigiKey
 renders them its own way (``"10 kOhms"``, ``"±1%"``, ``"0.063W, 1/16W"``) while a
-schematic carries terse opaque strings (``"10k"``, ``"1%"``). Normalization lives
-here, in the confirm layer — the intent model keeps values opaque on purpose.
+schematic holds terse opaque strings (``"10k"``, ``"1%"``). The parsers are in
+:mod:`kicadtools.units`; the intent model keeps values opaque on purpose.
 
 Resistors only for now; other types are added by writing their :class:`_FieldSpec`
 list. This module is GUI-agnostic and does no network I/O: :func:`confirm_resistor`
@@ -28,117 +28,26 @@ from typing import Callable, List, Optional, Tuple
 
 from kicadtools.intent import ResistorIntent
 from kicadtools.suppliers import DigiKeyProduct
+# parse_capacitance and parse_volts are unused here; they stay importable from
+# kicadtools.confirm for existing callers.
+from kicadtools.units import (  # noqa: F401
+    parse_capacitance,
+    parse_percent,
+    parse_resistance,
+    parse_volts,
+    parse_watts,
+)
 
 
 # --------------------------------------------------------------------------- #
 # Value normalizers — DigiKey rendering  <->  opaque intent string.
 #
-# Each returns a comparable number (SI base units) or ``None`` when the text
-# can't be parsed. Comparisons downstream use a small relative epsilon so
-# "10 kOhms" and "10k" agree despite rounding in DigiKey's rendering.
+# The parsers are defined in kicadtools.units and re-exported here. Each returns
+# a comparable number (SI base units) or ``None`` when the text can't be parsed.
+# Comparisons downstream use a small relative epsilon so "10 kOhms" and "10k"
+# agree despite rounding in DigiKey's rendering.
 # --------------------------------------------------------------------------- #
 
-# Resistance multipliers. Case matters for 'M' (mega) vs 'm' (milli); a letter
-# may also stand in for the decimal point (R-notation: "4k7" == 4.7k, "4R7" == 4.7).
-_RES_MULT = {"R": 1.0, "r": 1.0, "K": 1e3, "k": 1e3, "M": 1e6, "m": 1e-3, "G": 1e9}
-
-
-def parse_resistance(text: object) -> Optional[float]:
-    """Ohms from a resistance rendering (``"10 kOhms"``, ``"10k"``, ``"4R7"``,
-    ``"1M"``, ``"0"``), or ``None`` when it can't be parsed."""
-    if text is None:
-        return None
-    s = re.sub(r"(?i)ohms?", "", str(text))          # drop 'Ohm(s)'
-    s = s.replace("Ω", "").replace("±", "")  # drop 'Ω' and '±'
-    s = "".join(s.split())                            # drop all whitespace
-    if not s:
-        return None
-    m = re.fullmatch(r"([0-9.]*)([RrKkMmG])?([0-9.]*)", s)
-    if not m:
-        return None
-    head, letter, tail = m.group(1), m.group(2) or "", m.group(3)
-    num = f"{head}.{tail}" if tail else head          # letter as decimal point
-    try:
-        return float(num) * _RES_MULT.get(letter, 1.0)
-    except ValueError:
-        return None
-
-
-def parse_percent(text: object) -> Optional[float]:
-    """Percent from a tolerance rendering (``"±1%"``, ``"1 %"``, ``"0.1%"``)."""
-    if text is None:
-        return None
-    s = "".join(str(text).replace("±", "").replace("%", "").split())
-    if not s:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def parse_watts(text: object) -> Optional[float]:
-    """Watts from a power rendering, taking the first parseable token so a
-    compound ``"0.063W, 1/16W"`` (two spellings of one value) parses to ``0.063``,
-    a fraction ``"1/4W"`` parses to ``0.25`` and JLCPCB's ``"100mW"`` to ``0.1``."""
-    if text is None:
-        return None
-    for token in str(text).split(","):
-        t = re.sub(r"(?i)watts?", "", token)
-        t = "".join(t.replace("W", "").replace("w", "").split())
-        if not t:
-            continue
-        scale = 1.0
-        if t.endswith("m"):  # "100mW" -> "100m" once the W is gone
-            t, scale = t[:-1], 1e-3
-        if "/" in t:
-            num, _, den = t.partition("/")
-            try:
-                return float(num) / float(den) * scale
-            except (ValueError, ZeroDivisionError):
-                continue
-        try:
-            return float(t) * scale
-        except ValueError:
-            continue
-    return None
-
-
-# Capacitance multipliers; "u" and "µ" (micro sign) and "μ" (Greek mu) all mean micro.
-_CAP_MULT = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3}
-
-
-def parse_capacitance(text: object) -> Optional[float]:
-    """Farads from a capacitance rendering (``"100nF"``, ``"0.1 µF"``, ``"4.7uF"``,
-    ``"4u7"``, ``"22pF"``), or ``None`` when it can't be parsed."""
-    if text is None:
-        return None
-    s = "".join(str(text).split()).replace("F", "").replace("f", "")
-    if not s:
-        return None
-    m = re.fullmatch(r"([0-9.]*)([pnuµμm])?([0-9.]*)", s)
-    if not m or not (m.group(1) or m.group(3)):
-        return None
-    head, letter, tail = m.group(1), m.group(2) or "", m.group(3)
-    num = f"{head}.{tail}" if tail else head  # letter as decimal point: "4u7"
-    try:
-        return float(num) * _CAP_MULT.get(letter, 1.0)
-    except ValueError:
-        return None
-
-
-def parse_volts(text: object) -> Optional[float]:
-    """Volts from a voltage rendering (``"25V"``, ``"6.3 V"``, ``"1kV"``)."""
-    if text is None:
-        return None
-    s = "".join(str(text).split()).upper().replace("V", "")
-    scale = 1.0
-    if s.endswith("K"):
-        s, scale = s[:-1], 1e3
-    try:
-        return float(s) * scale
-    except ValueError:
-        return None
 
 
 def _close(a: float, b: float, rel: float = 0.01) -> bool:

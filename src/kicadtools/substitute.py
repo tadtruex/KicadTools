@@ -28,19 +28,26 @@ Pure apart from :func:`search_substitutes`, whose network calls are injected.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from kicadtools.confirm import (
+from kicadtools.intent import ElectricalIntent
+from kicadtools.suppliers import JlcPart
+from kicadtools.units import (
+    dielectric_upgrades,
+    fmt_farads,
+    fmt_ohms,
+    fmt_percent,
+    fmt_volts,
+    fmt_watts,
+    norm_dielectric,
+    package_code,
     parse_capacitance,
     parse_percent,
     parse_resistance,
     parse_volts,
     parse_watts,
 )
-from kicadtools.intent import ElectricalIntent
-from kicadtools.suppliers import JlcPart
 
 SUPPORTED_TYPES = ("resistor", "capacitor")
 
@@ -70,75 +77,6 @@ def stock_level(part: Optional[JlcPart], needed: int) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Formatting — how a wanted value is shown, and how it is typed into the search.
-# --------------------------------------------------------------------------- #
-
-def _fmt_ohms(v: float) -> str:
-    for scale, suffix in ((1e6, "M"), (1e3, "k")):
-        if v >= scale:
-            return f"{round(v / scale, 6):g}{suffix}"
-    return f"{round(v, 6):g}"
-
-
-def _fmt_farads(v: float) -> str:
-    for scale, suffix in ((1e-6, "uF"), (1e-9, "nF")):
-        if v >= scale:
-            return f"{round(v / scale, 6):g}{suffix}"
-    return f"{round(v / 1e-12, 6):g}pF"
-
-
-def _fmt_volts(v: float) -> str:
-    return f"{v:g}V"
-
-
-def _fmt_percent(v: float) -> str:
-    return f"{v:g}%"
-
-
-def _fmt_watts(v: float) -> str:
-    return f"{round(v * 1000, 6):g}mW" if v < 1 else f"{v:g}W"
-
-
-# --------------------------------------------------------------------------- #
-# Package and dielectric normalization.
-# --------------------------------------------------------------------------- #
-
-_IMPERIAL_RE = re.compile(
-    r"(?<![0-9])(01005|0201|0402|0603|0805|1206|1210|1812|2010|2220|2512)(?![0-9])"
-)
-
-
-def package_code(text: object) -> Optional[str]:
-    """The imperial chip-size code in *text* (a KiCad footprint like
-    ``Capacitor_SMD:C_0603_1608Metric``, JLCPCB's ``0603``, DigiKey's
-    ``0603 (1608 Metric)``), or ``None``. Only the name after a ``Library:``
-    prefix is searched, so the library name can't contribute a false match."""
-    s = str(text or "")
-    s = s.split(":", 1)[1] if ":" in s else s
-    m = _IMPERIAL_RE.search(s)
-    return m.group(1) if m else None
-
-
-def _norm_dielectric(text: object) -> str:
-    s = re.sub(r"[^A-Z0-9]", "", str(text or "").upper())
-    return "C0G" if s == "COG" else s
-
-
-# The dielectrics a substitute may use in place of the current one: the same, or
-# one with a tighter capacitance change over a wider temperature range. X7R
-# (±15 %, −55…125 °C) dominates X5R (±15 %, −55…85 °C), X6S (±22 %, −55…105 °C)
-# and X7S (±22 %, −55…125 °C). C0G and NP0 are two names for one class.
-_DIELECTRIC_UPGRADES: Dict[str, Tuple[str, ...]] = {
-    "X5R": ("X5R", "X7R"),
-    "X6S": ("X6S", "X7R"),
-    "X7S": ("X7S", "X7R"),
-    "X7R": ("X7R",),
-    "C0G": ("C0G", "NP0"),
-    "NP0": ("NP0", "C0G"),
-}
-
-
-# --------------------------------------------------------------------------- #
 # Parameter table.
 # --------------------------------------------------------------------------- #
 
@@ -165,23 +103,23 @@ class _Param:
 _PARAMS: Dict[str, Tuple[_Param, ...]] = {
     "resistor": (
         _Param("resistance", "Resistance", EQ, "Resistance", "Resistance", True,
-               parse_resistance, _fmt_ohms),
+               parse_resistance, fmt_ohms),
         _Param("tolerance", "Tolerance", MAX, "Tolerance", "Tolerance", False,
-               parse_percent, _fmt_percent),
+               parse_percent, fmt_percent),
         _Param("power", "Power", MIN, "Power(Watts)", "Power (Watts)", False,
-               parse_watts, _fmt_watts),
+               parse_watts, fmt_watts),
     ),
     "capacitor": (
         _Param("capacitance", "Capacitance", EQ, "Capacitance", "Capacitance", True,
-               parse_capacitance, _fmt_farads),
+               parse_capacitance, fmt_farads),
         # A capacitor substitute with an unknown voltage floor could be any
         # rating at all, so the voltage is required.
         _Param("voltage", "Voltage", MIN, "Voltage Rating", "Voltage - Rated", True,
-               parse_volts, _fmt_volts),
+               parse_volts, fmt_volts),
         _Param("dielectric", "Dielectric", ONE_OF, "Temperature Coefficient",
                "Temperature Coefficient", False),
         _Param("tolerance", "Tolerance", MAX, "Tolerance", "Tolerance", False,
-               parse_percent, _fmt_percent),
+               parse_percent, fmt_percent),
     ),
 }
 
@@ -279,12 +217,12 @@ def _constraint_from(p: _Param, raw, source: str, *, from_part: bool) -> Optiona
         return None
     if p.rule == ONE_OF:
         values = raw if isinstance(raw, (list, tuple)) else [raw]
-        normed = [_norm_dielectric(v) for v in values if _norm_dielectric(v)]
+        normed = [norm_dielectric(v) for v in values if norm_dielectric(v)]
         if not normed:
             return None
         if from_part and len(normed) == 1:
             # The current part's dielectric admits the upgrades.
-            choices = _DIELECTRIC_UPGRADES.get(normed[0], (normed[0],))
+            choices = dielectric_upgrades(normed[0])
         else:
             choices = tuple(dict.fromkeys(normed))  # the intent's list, as given
         return Constraint(p.name, p.label, p.rule, choices=choices, source=source)
@@ -376,7 +314,7 @@ def evaluate(spec: SearchSpec, part: JlcPart) -> Optional[Candidate]:
         if raw is None:
             return None
         if c.rule == ONE_OF:
-            if _norm_dielectric(raw) not in c.choices:
+            if norm_dielectric(raw) not in c.choices:
                 return None
         else:
             v = p.parse(raw)

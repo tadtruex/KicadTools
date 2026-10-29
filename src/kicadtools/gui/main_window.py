@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from kicadtools import writer
+from kicadtools import partsdb, writer
+from kicadtools.assign import assignment_plan
 from kicadtools.components import bom_components, get_components
 from kicadtools.jlcpcb import (
     build_jlcpcb_bom,
@@ -53,11 +54,24 @@ from kicadtools.gui.lcsc import (
     SubstituteWorker,
     _COL_ROTATION,
 )
+from kicadtools.gui.assign_dialog import AssignDialog
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
+from kicadtools.gui.parts import (
+    STATUS_ASSIGNED,
+    STATUS_CONFLICT,
+    STATUS_NOT_SEARCHABLE,
+    STATUS_UNASSIGNED,
+    CandidateWorker,
+    PartsTableModel,
+    board_label,
+    requirement_settings,
+)
 from kicadtools.gui.param_editor import ElectricalParamsDialog
 from kicadtools.gui.substitute_dialog import SubstituteDialog, describe_part
 from kicadtools.naturalsort import natural_key
 from kicadtools.partrotation import PartRotationStore
+from kicadtools.partsdb import PartsDb
+from kicadtools.requirement import capacitor_defaults, group_capacitors
 from kicadtools.resolve import iter_bom_part_records
 from kicadtools.sexpr_parser import has_instantiated_sheets
 from kicadtools.substitute import (
@@ -86,9 +100,32 @@ class MainWindow(QMainWindow):
         self._resolve_worker: Optional[ResolveWorker] = None
         # (thread, worker) pairs for the stock and substitute lookups.
         self._threads: list = []
+        # The Parts tab's candidate search: one worker at a time. A request made
+        # while one runs is kept in _search_next; only the latest is kept.
+        self._assign_dialog: Optional[AssignDialog] = None
+        self._search_running = False
+        # The dialog and request number of the running search, so an outcome is
+        # shown only in the dialog (and for the request) it was made for.
+        self._search_for: Optional[tuple] = None
+        self._search_next: Optional[tuple] = None
+
+        # The parts database, opened once on the GUI thread for settings and
+        # accept/reject writes. Search workers open their own connection.
+        self._parts_db_path = partsdb.default_path()
+        self._parts_db: Optional[PartsDb] = None
+        try:
+            self._parts_db = PartsDb(self._parts_db_path)
+        except Exception as exc:  # noqa: BLE001 — report and run without it
+            QMessageBox.warning(
+                self,
+                "Parts database unavailable",
+                f"Could not open {self._parts_db_path}:\n{exc}\n\n"
+                "The Parts tab lists requirements but cannot assign parts.",
+            )
 
         tabs = QTabWidget()
         tabs.addTab(self._build_intent_tab(), "Intents")
+        tabs.addTab(self._build_parts_tab(), "Parts")
         tabs.addTab(self._build_lcsc_tab(), "LCSC")
         self.setCentralWidget(tabs)
 
@@ -140,6 +177,24 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.addWidget(self.table)
         layout.addLayout(buttons)
+        return tab
+
+    def _build_parts_tab(self) -> QWidget:
+        self.parts_model = PartsTableModel()
+        self.parts_table = self._make_table(self.parts_model)
+        self.parts_proxy = self.parts_table.model()
+        # Double-click an unassigned or queued group to choose its part.
+        self.parts_table.doubleClicked.connect(self._parts_double_clicked)
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(self.parts_table)
+        hint = QLabel(
+            "Double-click a capacitor group to choose its part. Stock is checked "
+            "against the Boards count on the LCSC tab."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         return tab
 
     def _build_lcsc_tab(self) -> QWidget:
@@ -238,6 +293,8 @@ class MainWindow(QMainWindow):
         self.table.resizeColumnsToContents()  # sensible initial widths; still draggable
         self.lcsc_model.load(self._records)
         self.lcsc_table.resizeColumnsToContents()
+        self.parts_model.load(group_capacitors(self._records, self._cap_defaults()))
+        self.parts_table.resizeColumnsToContents()
         self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
         self.setWindowModified(False)  # a fresh load matches disk → clean
         self._refresh_status()
@@ -542,9 +599,194 @@ class MainWindow(QMainWindow):
         self._resolve_thread = None
         self._resolve_worker = None
 
+    # ---- part assignment (Parts tab) ---------------------------------
+    def _cap_defaults(self) -> "dict[str, str]":
+        """The capacitor defaults: built-in values overlaid by the database's
+        remembered settings."""
+        settings = self._parts_db.settings() if self._parts_db is not None else {}
+        return capacitor_defaults(settings)
+
+    def _parts_double_clicked(self, index) -> None:
+        row = self.parts_proxy.mapToSource(index).row()
+        if self.parts_model.status(row) == STATUS_ASSIGNED:
+            self.statusBar().showMessage(
+                "That group already has its part numbers and footprint on the schematic."
+            )
+            return
+        if self.parts_model.status(row) == STATUS_NOT_SEARCHABLE:
+            self.statusBar().showMessage(
+                "Not searchable: the footprint has no chip size (0402–1210). "
+                "Other packages are not supported yet."
+            )
+            return
+        self._assign_group(row)
+
+    def _assign_group(self, row: int) -> None:
+        """Open the assign dialog for Parts-tab *row*; on Accept, record the
+        part in the database and queue its write plan."""
+        if self._parts_db is None:
+            QMessageBox.warning(
+                self, "No parts database",
+                f"The parts database {self._parts_db_path} could not be opened.",
+            )
+            return
+        # Re-read the remembered settings, so a defaulted field starts with the
+        # last value used (an earlier accept this session may have changed it).
+        defaults = self._cap_defaults()
+        self.parts_model.set_defaults(defaults)
+        group = self.parts_model.group_at(row)
+        req = self.parts_model.requirement_at(row)
+        build_qty = self.build_qty.value()
+
+        # The lookup recorded for this row by an earlier dialog is reused, so
+        # the existing part is looked up once per session.
+        dialog = AssignDialog(group, req, build_qty, self, defaults=defaults,
+                              existing=self.parts_model.lookup_at(row))
+        self._assign_dialog = dialog
+        self._search_next = None
+        dialog.search_requested.connect(self._request_candidates)
+        dialog.reject_requested.connect(self._reject_candidate)
+        dialog.request_search(False)
+        accepted = dialog.exec() == QDialog.Accepted
+        cand = dialog.chosen() if accepted else None
+        final_req = dialog.requirement_for(cand) if accepted and cand is not None else None
+        # The outcome of a search still running is passed to _on_candidates,
+        # which discards it once the dialog is gone; a queued request is dropped.
+        for signal, slot in (
+            (dialog.search_requested, self._request_candidates),
+            (dialog.reject_requested, self._reject_candidate),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._assign_dialog = None
+        self._search_next = None
+        lookup = dialog.existing_lookup
+        dialog.deleteLater()
+        # A save while the dialog was open reloads the rows; the lookup is then
+        # recorded only when the row still holds this group.
+        still_here = (row < self.parts_model.rowCount()
+                      and self.parts_model.group_at(row) is group)
+        if (still_here and lookup is not None
+                and lookup is not self.parts_model.lookup_at(row)):
+            # The row now shows the part's evidence and any warning it gave.
+            self.parts_model.record_lookup(row, lookup, self._cap_defaults())
+            self._refresh_status()
+        if cand is None or final_req is None:
+            return
+        self._accept_candidate(row, group, final_req, cand)
+
+    def _accept_candidate(self, row: int, group, req, cand) -> None:
+        """Record *cand* for *group*: database accept and usage, remembered
+        settings, and the queued write plan."""
+        try:
+            plan = assignment_plan(group, req, cand)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Can't assign", str(exc))
+            return
+        db = self._parts_db
+        if db is None:
+            return
+        try:
+            part_id = db.accept_capacitor(cand.choice())
+            if self._board is not None:
+                db.record_usage(part_id, board_label(self._board), group.references)
+            for key, value in requirement_settings(req).items():
+                db.set_setting(key, value)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Parts database", f"Could not record the part:\n{exc}")
+            return
+        self.parts_model.queue(row, req, cand, plan)
+        # The settings written above are the new defaults for the other groups.
+        self.parts_model.set_defaults(self._cap_defaults())
+        self._mark_dirty()
+        self.statusBar().showMessage(
+            f"{', '.join(group.references)} → {cand.mpn} ({cand.lcsc}, "
+            f"{cand.digikey_pn}). Save to write it."
+        )
+
+    def _request_candidates(self, req, search_suppliers: bool) -> None:
+        """Run a candidate search for the open dialog, or keep it as the next
+        request while one runs."""
+        dialog = self._assign_dialog
+        if dialog is None:
+            return
+        request = (req, bool(search_suppliers), dialog.request_id)
+        if self._search_running:
+            self._search_next = request
+            return
+        self._run_search(request)
+
+    def _run_search(self, request: tuple) -> None:
+        req, search_suppliers, tag = request
+        dialog = self._assign_dialog
+        needed = dialog.needed if dialog is not None else 1
+        self._search_running = True
+        self._search_for = (dialog, tag)
+        # The group, defaults and existing-part lookup are read when the
+        # search starts, so a request queued behind the first one reuses the
+        # lookup that the first one returned.
+        worker = CandidateWorker(
+            group=dialog.group if dialog is not None else None,
+            defaults=self._cap_defaults(),
+            requirement=req,
+            needed=needed,
+            db_path=self._parts_db_path,
+            search_suppliers=search_suppliers,
+            cache_path=_LCSC_CACHE,
+            existing=dialog.existing_lookup if dialog is not None else None,
+        )
+        # Slots on the window (GUI thread), so the results cross threads as
+        # queued calls; _on_candidates routes them to the dialog by tag.
+        worker.found.connect(self._on_candidates)
+        worker.failed.connect(self._on_candidates_failed)
+        self._start(worker)
+
+    def _search_done(self) -> None:
+        self._search_running = False
+        self._search_for = None
+        nxt, self._search_next = self._search_next, None
+        if nxt is not None and self._assign_dialog is not None:
+            self._run_search(nxt)
+
+    def _search_target(self) -> "tuple[Optional[AssignDialog], Optional[int]]":
+        """The open dialog and the request number of the finished search, or
+        ``(None, None)`` when that dialog has closed."""
+        dialog, tag = self._search_for or (None, None)
+        if dialog is None or dialog is not self._assign_dialog:
+            return None, None
+        return dialog, tag
+
+    def _on_candidates(self, result) -> None:
+        dialog, tag = self._search_target()
+        if dialog is not None:
+            dialog.show_result(result, tag)
+        self._search_done()
+
+    def _on_candidates_failed(self, message: str) -> None:
+        dialog, tag = self._search_target()
+        if dialog is not None:
+            dialog.show_error(message, tag)
+        self._search_done()
+
+    def _reject_candidate(self, cand) -> None:
+        """Record *cand* as rejected and search again without it."""
+        if self._parts_db is None:
+            return
+        try:
+            self._parts_db.reject_capacitor(cand.choice())
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Parts database", f"Could not reject the part:\n{exc}")
+            return
+        self.statusBar().showMessage(f"Rejected {cand.manufacturer} {cand.mpn}.")
+        if self._assign_dialog is not None:
+            self._assign_dialog.drop_candidate(cand)
+            self._assign_dialog.rerun()
+
     # ---- accept ------------------------------------------------------
     def _mark_dirty(self) -> None:
-        """Flag unsaved edits — drives the title's ``*`` and the quit prompt."""
+        """Flag unsaved edits: sets the title's ``*`` and enables the quit prompt."""
         self.setWindowModified(True)
 
     def _accept_checked(self) -> None:
@@ -566,18 +808,23 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
 
     # ---- write -------------------------------------------------------
-    def _merged_edits(self) -> "dict[Path, dict[str, dict[str, str]]]":
-        """Merge accepted edits from both tabs into one
+    def _merged_edits(self) -> "dict[Path, dict[str, dict[str, Optional[str]]]]":
+        """Merge accepted edits from every tab into one
         ``{file: {uuid: {key: value}}}`` plan. The Intents tab contributes an
         ``Intent:Type`` per accepted guess; the LCSC tab contributes resolved
-        ``LCSC`` / ``MPN`` values. A symbol touched by both tabs gets both."""
-        merged: dict[Path, dict[str, dict[str, str]]] = defaultdict(dict)
+        ``LCSC`` / ``MPN`` values; the Parts tab contributes each queued part
+        assignment, in which a ``None`` value removes that property. A symbol
+        touched by several tabs gets every edit; the Parts tab is merged last."""
+        merged: dict[Path, dict[str, dict[str, Optional[str]]]] = defaultdict(dict)
         for src, uuid_to_type in self.model.accepted_edits().items():
             for uuid, intent_type in uuid_to_type.items():
                 merged[src].setdefault(uuid, {})["Intent:Type"] = intent_type
         for src, uuid_to_props in self.lcsc_model.accepted_edits().items():
             for uuid, props in uuid_to_props.items():
                 merged[src].setdefault(uuid, {}).update(props)
+        for src, uuid_to_props in self.parts_model.accepted_edits().items():
+            for uuid, props in uuid_to_props.items():
+                merged[Path(src)].setdefault(uuid, {}).update(props)
         return dict(merged)
 
     def _pending_edits(self) -> "Optional[dict[Path, dict[str, dict[str, str]]]]":
@@ -588,15 +835,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Nothing to save",
-                "Accept one or more guesses (Intents) or resolved LCSC numbers first.",
+                "Accept one or more guesses (Intents), resolved LCSC numbers, or "
+                "part assignments (Parts) first.",
             )
             return None
         return edits
 
     @staticmethod
     def _change_count(edits: "dict[Path, dict[str, dict[str, str]]]") -> int:
-        # Count individual properties, not just symbols — a symbol may carry both
-        # an Intent:Type and an LCSC.
+        # Count individual properties rather than symbols: a symbol may get both an
+        # Intent:Type and an LCSC. A removal (None) counts as one change.
         return sum(len(props) for m in edits.values() for props in m.values())
 
     def _write_in_place(self, edits: "dict[Path, dict[str, dict[str, str]]]") -> bool:
@@ -861,7 +1109,9 @@ class MainWindow(QMainWindow):
         Discard, or Cancel. Fires for both File ▸ Quit (which calls ``close``)
         and the window's close button."""
         if not self.isWindowModified():
+            self._close_assign_dialog()
             self._stop_threads()
+            self._close_parts_db()
             event.accept()
             return
         resp = QMessageBox.question(
@@ -875,23 +1125,44 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         if resp == QMessageBox.Discard:
+            self._close_assign_dialog()
             self._stop_threads()
+            self._close_parts_db()
             event.accept()
             return
         # Save: write in place (no second confirmation) and only quit if it
         # succeeds — a failed write keeps the window open so nothing is lost.
+        self._close_assign_dialog()
         self._stop_threads()  # a reload must not happen under a running lookup
         edits = self._merged_edits()
         if edits and not self._write_in_place(edits):
             event.ignore()
             return
+        self._close_parts_db()
         event.accept()
+
+    def _close_assign_dialog(self) -> None:
+        """Reject the open assign dialog (the window is quitting), so nothing is
+        recorded after the database closes. A cancelled quit leaves it open."""
+        if self._assign_dialog is not None:
+            self._assign_dialog.reject()
+
+    def _close_parts_db(self) -> None:
+        if self._parts_db is not None:
+            self._parts_db.close()
+            self._parts_db = None
 
     # ---- status bar --------------------------------------------------
     def _refresh_status(self) -> None:
         s = self.model.summary()
+        p = self.parts_model.summary()
         self.statusBar().showMessage(
             f"{sum(s.values())} components — {s['typed']} typed, "
             f"{s['guessed']} guessed, {s['accepted']} accepted, "
-            f"{s['unclassified']} unclassified"
+            f"{s['unclassified']} unclassified; "
+            f"{sum(p.values())} capacitor groups, {p[STATUS_UNASSIGNED]} unassigned"
+            + (f", {p[STATUS_CONFLICT]} with conflicts"
+               if p[STATUS_CONFLICT] else "")
+            + (f", {p[STATUS_NOT_SEARCHABLE]} not searchable"
+               if p[STATUS_NOT_SEARCHABLE] else "")
         )

@@ -117,7 +117,7 @@ def insert_property(text: str, symbol_uuid: str, key: str, value: str) -> str:
     The node is inserted right after the symbol's ``Reference`` property (which
     always exists and is the first property after the uuid), at the same
     indentation. Raises ``KeyError`` if the uuid isn't found, or ``ValueError``
-    if the symbol already carries *key*.
+    if the symbol already has *key*.
     """
     u = text.find(f'(uuid "{symbol_uuid}")')
     sym_open, sym_end = _symbol_bounds(text, symbol_uuid)
@@ -158,7 +158,7 @@ def set_or_insert_property(
     (including a present-but-empty one), otherwise insert a new one.
 
     This is the set-or-insert the LCSC write-back needs — a symbol may already
-    carry an empty ``LCSC`` property, which :func:`insert_property` would refuse.
+    have an empty ``LCSC`` property, which :func:`insert_property` would refuse.
     """
     sym_open, sym_end = _symbol_bounds(text, symbol_uuid)
     if _find_property(text, sym_open, sym_end, key) != -1:
@@ -219,28 +219,39 @@ def add_intent_types(text: str, uuid_to_type: Dict[str, str]) -> str:
     return text
 
 
-def add_properties(text: str, uuid_to_props: Dict[str, Dict[str, str]]) -> str:
+def add_properties(
+    text: str, uuid_to_props: Dict[str, Dict[str, Optional[str]]]
+) -> str:
     """Apply a ``{uuid: {key: value}}`` plan to one file's text, set-or-insert.
 
     Generic counterpart to :func:`add_intent_types`: each property is updated in
-    place when the symbol already carries it (even empty) and inserted otherwise,
+    place when the symbol already has it (even empty) and inserted otherwise,
     so mixed Intent:Type + LCSC/MPN write-backs share one surgical pass.
+
+    A value of ``None`` removes the property: the whole node is deleted when
+    the symbol has it, and the symbol is left unchanged when it does not.
     """
     for uuid, props in uuid_to_props.items():
         for key, value in props.items():
+            if value is None:
+                sym_open, sym_end = _symbol_bounds(text, uuid)
+                if _find_property(text, sym_open, sym_end, key) != -1:
+                    text = remove_property(text, uuid, key)
+                continue
             text = set_or_insert_property(text, uuid, key, value)
     return text
 
 
 def write_properties(
     path: Path,
-    uuid_to_props: Dict[str, Dict[str, str]],
+    uuid_to_props: Dict[str, Dict[str, Optional[str]]],
     *,
     dest: Optional[Callable[[Path], Path]] = None,
 ) -> Path:
-    """Read *path*, set-or-insert every ``{uuid: {key: value}}`` property, and
-    write the result (in place by default; pass *dest* to redirect). Returns the
-    path written."""
+    """Read *path*, set-or-insert every ``{uuid: {key: value}}`` property
+    (``None`` removes the property, see :func:`add_properties`), and write the
+    result (in place by default; pass *dest* to redirect). Returns the path
+    written."""
     path = Path(path)
     updated = add_properties(path.read_text(encoding="utf-8"), uuid_to_props)
     target = dest(path) if dest is not None else path

@@ -210,10 +210,12 @@ class ResistorIntent(ElectricalIntent):
 @intent_subclass("capacitor")
 @dataclass(kw_only=True)
 class CapacitorIntent(ElectricalIntent):
-    """Capacitor – requires ``Value``; optional ``Voltage:Min`` & ``Class:Preferred``."""
+    """Capacitor – requires ``Value``; optional ``Voltage:Min``,
+    ``Class:Preferred`` & ``Tolerance:Preferred``."""
     value: str
     voltage_min: str | None = None
     class_preferred: List[str] = field(default_factory=list)
+    tolerance_preferred: List[str] = field(default_factory=list)
 
     @classmethod
     def _from_dict_impl(cls, data: Dict[str, Any]) -> "CapacitorIntent":
@@ -230,16 +232,22 @@ class CapacitorIntent(ElectricalIntent):
         if "Class:Preferred" in data:
             class_preferred = _parse_preferred(data["Class:Preferred"])
 
+        tolerance_preferred: List[str] = []
+        if "Tolerance:Preferred" in data:
+            tolerance_preferred = _parse_preferred(data["Tolerance:Preferred"])
+
         return cls(
             **cls._base_kwargs(data),
             value=value,
             voltage_min=voltage_min,
             class_preferred=class_preferred,
+            tolerance_preferred=tolerance_preferred,
         )
 
     def description(self) -> str:
+        tol = f" ±{self.tolerance_preferred[0]}" if self.tolerance_preferred else ""
         vm = f", min-V {self.voltage_min}" if self.voltage_min else ""
-        return f"{self.reference}: {self.value} capacitor{vm}"
+        return f"{self.reference}: {self.value}{tol} capacitor{vm}"
 
 
 @intent_subclass("diode")

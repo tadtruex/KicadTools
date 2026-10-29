@@ -249,6 +249,20 @@ class DigiKeyClient:
         return product.mpn if product else None
 
 
+def _quantity(product: dict) -> Optional[int]:
+    """DigiKey's stock for a v4 ``Product``: ``QuantityAvailable`` when given,
+    else the largest per-packaging quantity, else 0 when the product lists
+    packagings (DigiKey leaves the field out at zero stock), else ``None``."""
+    qty = product.get("QuantityAvailable")
+    if qty is not None:
+        return int(qty)
+    per_pack = [
+        int(v.get("QuantityAvailableforPackageType") or 0)
+        for v in (product.get("ProductVariations") or [])
+    ]
+    return max(per_pack) if per_pack else None
+
+
 def _parse_product(product: dict) -> DigiKeyProduct:
     """Build a :class:`DigiKeyProduct` from a v4 ``Product`` object."""
     parameters = {
@@ -268,7 +282,9 @@ def _parse_product(product: dict) -> DigiKeyProduct:
         digikey_pns=dk_pns,
         datasheet_url=product.get("DatasheetUrl"),
         product_url=product.get("ProductUrl"),
-        quantity_available=product.get("QuantityAvailable"),
+        # DigiKey omits QuantityAvailable when the product has none in stock;
+        # the per-packaging quantities are then present (and zero).
+        quantity_available=_quantity(product),
         # ProductStatus is an object like {"Id": 0, "Status": "Active"}.
         product_status=status.get("Status") if isinstance(status, dict) else status,
         description=desc.get("ProductDescription") if isinstance(desc, dict) else None,

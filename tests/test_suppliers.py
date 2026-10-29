@@ -324,3 +324,13 @@ def test_preferred_digikey_pn_picks_cut_tape():
         ["311-49.9KHRTR-ND", "311-49.9KHRCT-ND", "311-49.9KHRDKR-ND"]) == "311-49.9KHRCT-ND"
     assert suppliers.preferred_digikey_pn(["X-ND"]) == "X-ND"
     assert suppliers.preferred_digikey_pn([]) is None
+
+
+def test_digikey_quantity_missing_means_zero_when_packagings_listed():
+    from kicadtools.suppliers import _quantity
+    assert _quantity({"QuantityAvailable": 12}) == 12
+    assert _quantity({"ProductVariations": [
+        {"QuantityAvailableforPackageType": 0}, {"QuantityAvailableforPackageType": 0}]}) == 0
+    assert _quantity({"ProductVariations": [
+        {"QuantityAvailableforPackageType": 5}, {"QuantityAvailableforPackageType": 7}]}) == 7
+    assert _quantity({}) is None

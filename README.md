@@ -44,7 +44,7 @@ the first confident answer (see `src/kicadtools/classify.py`):
 3. **Reference designator** — the prefix letter(s): `R`, `C`, `D`, `L`, `J`, …
 
 LEDs get special handling because they're diodes: a part on a plain diode
-footprint is promoted to an LED when its text carries an LED signal — the word
+footprint is promoted to an LED when its text contains an LED signal — the word
 "LED", a wavelength (`630nm`), or, in that diode-footprint context, a colour.
 
 If none is confident, the part is left unclassified (`❌`) for now. A guessed
@@ -175,10 +175,12 @@ different one). `JLCPCB_SPEC.md` §3 has the derivation.
 
 ## BOM Cockpit (GUI)
 
-A PySide6 desktop app with two tabs. **Intents** reviews the intent-type
+A PySide6 desktop app with three tabs. **Intents** reviews the intent-type
 guesses and writes the accepted ones back into the schematic (so the next read
-has fewer guesses). **LCSC** resolves, checks stock for, and substitutes JLCPCB
-part numbers (see below). See `BOMCOCKPIT.md` for the full vision.
+has fewer guesses). **Parts** chooses a manufacturer part for each group of
+capacitors and records it in a local parts database. **LCSC** resolves, checks
+stock for, and substitutes JLCPCB part numbers (see below). See `BOMCOCKPIT.md`
+for the full vision.
 
 ```bash
 pip install -e ".[dev,gui]"
@@ -199,6 +201,171 @@ Intents tab:
 The write is a surgical text insertion, not a re-serialization: round-tripping
 the whole schematic through the s-expression library would collapse it onto one
 line. Rely on git as the backstop.
+
+### Parts tab
+
+The table has one row per capacitor requirement group: capacitors whose
+`Value`, `Footprint`, `Voltage:Min`, `Class:Preferred`, `Tolerance:Preferred`,
+`Package:Preferred` and existing `MPN`, `DigiKeyPN` and `LCSC` numbers are
+identical on the schematic, and (for symbols with no part number) whose
+Descriptions state the same values for the fields those properties leave
+open, share a row and one part choice, so
+symbols with different existing parts are separate rows. Columns: Value ·
+Package · Voltage · Dielectric · Tolerance · Qty · References · Current part ·
+Status · Chosen MPN. A requirement cell whose value came from a default, an
+edit, the existing part or the Description is marked `(default)` / `(edited)`
+/ `(part)` / `(description)`; a dash means no value. A library-style Value is
+shown with its capacitance (`C_4p7U (4.7uF)`). Current part is the `MPN`
+field, else the `DigiKeyPN` field, as written. Status is `queued` once a part
+has been accepted this session, `conflict` when two sources disagree (see
+below), `assigned` when every member already has `MPN`, `Manufacturer`,
+`DigiKeyPN`, `LCSC` and a `Footprint`, `not searchable` for a footprint with
+no chip size (radial and axial electrolytics), else `unassigned`.
+
+Each requirement field is taken from the first source that has a value:
+
+| Field | 1 | 2 | 3 | 4 | 5 |
+|-------|---|---|---|---|---|
+| Capacitance | `Value` | existing part | Description | — | — |
+| Package | the `Footprint`'s chip size | `Package:Preferred` | the Value's size suffix (`C_10U_805`) | existing part, then Description | `cap.package` (`0603`) |
+| Voltage:Min | `Voltage:Min` | existing part's rating | Description (the lowest of a range: `25V - 50V` is 25 V) | `cap.voltage_min` (no built-in value) | — |
+| Dielectric | `Class:Preferred` | existing part | Description | `cap.dielectric.small` ≤ 1 nF (`C0G, NP0`), `cap.dielectric.mid` (`X7R`), `cap.dielectric.bulk` ≥ 10 µF (`X7R, X5R`) | — |
+| Tolerance | the loosest `Tolerance:Preferred` | existing part | `cap.tolerance.class1` for C0G/NP0 only (`5%`), else `cap.tolerance.class2` (`10%`) | — | — |
+
+`Value` is read in plain form (`100nF`, `0.1uF`, `4.7n`, `1u`) and in
+library form: an optional `C_` prefix, the value with `p` as the decimal
+point before a unit letter (`C_4p7U` is 4.7 µF, `C_P1U` is 0.1 µF), and an
+optional size suffix (`C_22U_1210`). The Description is read for its first
+capacitance, its voltages, every dielectric code and a standalone chip size
+(`10uF, 25V, X5R, 805 package`); a generic Description such as `Unpolarized
+capacitor, small symbol` provides none. A dielectric from the existing part or
+the Description admits its upgrades as well: X5R, X6S and X7S also accept
+X7R, and C0G and NP0 accept each other.
+
+The Description is the last source before a default: it fills only the fields
+that no schematic property and no existing part states, and a symbol described
+completely by those gives a Description that is not used at all. A
+Description capacitance or package that disagrees with the value used is a
+warning (`Description says 0603; Footprint says 0402 (Description not used)`),
+shown in amber in the dialog and in the row's tooltip; it does not block a
+search. Library boilerplate and Descriptions copied from another symbol are
+common.
+
+The existing part is read when the Assign Part dialog opens (see below). Its
+evidence then stays on the row for the session, so the cells show `(part)`
+values after the dialog closes.
+
+**Several existing parts.** Part-number fields that resolve to different
+parts (an `MPN` field and a `DigiKeyPN` field that name different MPNs at
+DigiKey, or an `LCSC` number whose MPN differs from DigiKey's) give one
+current-part option each. An `LCSC` part is also looked up at DigiKey by its
+MPN, and a DigiKey part without an `LCSC` field is searched at JLCPCB by its
+MPN, so each option can be checked at both suppliers. An option fits when its
+capacitance and package agree with the `Value`, `Footprint`,
+`Package:Preferred` and the Value's size suffix, and with the first fitting
+option. Every fitting option is a `current` candidate. The requirement's part
+fields come from all fitting options, loosest wins: the lowest voltage
+rating, the widest tolerance and every dielectric. An option that does not fit
+is not used and adds a warning (`Footprint says 0402; current part
+CGA3E2X7R1E104K080AA (DigiKey) says 0603 (current part CGA3E2X7R1E104K080AA
+(DigiKey) not used)`); when none fits, the search runs from the schematic values alone.
+
+**Conflicts.** When two schematic sources (`Value`, `Footprint`,
+`Package:Preferred`, the Value's size suffix) state a capacitance that differs
+by more than 0.1 %, or different packages, the row's Status is `conflict` and
+the group cannot be searched or assigned. The dialog lists each conflict with
+both sources and both values, for example `Footprint says 1206; Value says
+0805`. Conflicts are fixed on the schematic.
+
+The voltage floor is never derived from net names: a group with no
+`Voltage:Min`, no existing part or Description stating a voltage, and no
+remembered `cap.voltage_min` can't be searched until one is entered.
+
+- Double-click an `unassigned` or `queued` row to open the **Assign Part**
+  dialog. The header shows the references, the quantity per board and the units
+  the build needs (quantity × **Boards** on the LCSC tab). Below it are the
+  Package, Voltage:Min, Dielectric and Tolerance fields, each labelled with its
+  source. A field stated on the schematic is read-only (change it on the
+  schematic, or with **Edit Electrical Parameters** on the Intents tab), and
+  Package is fixed when the symbol has a footprint. Editing a field reruns the
+  search about 400 ms after the last keystroke.
+- The header's Current part line lists what the existing-part lookup found.
+  Each distinct `MPN` and `DigiKeyPN` value is looked up at DigiKey by exact
+  match, which accepts either kind of number, so swapped fields resolve. The
+  LCSC number is the `LCSC` field, else the JLCPCB part whose MPN equals the
+  resolved MPN (orderable, then Basic, then more stock). The part's DigiKey
+  parameters (else its JLCPCB attributes) become the `(part)` evidence in the
+  table above, and the dialog's fields are rebuilt from it. A failed lookup is
+  a line in the header, and the requirement is then built without that
+  evidence.
+- When the existing part is Active at DigiKey, orderable at JLCPCB, meets the
+  requirement and the stock floor, it is the first candidate (source
+  `current`), it is selected, and the supplier keyword search does not run:
+  a part that meets the requirement is kept. Otherwise the reason it was
+  passed over is listed among the rejections (hover over the status line) and
+  the search proceeds with the requirement its evidence provided.
+- The other candidates come from the parts database: accepted parts that
+  meet the requirement, with JLCPCB stock and price and DigiKey stock fetched
+  fresh. When neither the existing part nor the database gives a candidate,
+  or on **Search suppliers**, JLCPCB is searched once per allowed dielectric
+  (`100nF 0603 X7R`), each hit's attributes are checked against the
+  requirement, and the best hits are confirmed at DigiKey: same MPN, an active
+  product, and parameters that also meet the requirement. The supplier search
+  needs `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET`; without them the
+  dialog lists the current part and the database matches only and says why.
+  Candidates are ranked with the current part first, then by recorded uses,
+  then JLCPCB Basic, then JLCPCB preferred, then stock at each supplier
+  covering the build, then price. The status line counts the candidates from
+  each source, the search hits checked, the hits rejected, and the hits past
+  the DigiKey lookup limit (10).
+- **Stock floor.** Every candidate (current part, database part or search hit)
+  needs a known stock of at least 1000, and at least the units the build
+  needs, at both JLCPCB and DigiKey (`capsearch.MIN_STOCK`). A part below that
+  is rejected with the reason, for example `JLCPCB stock 33, need at least
+  1000` or `DigiKey stock unknown`.
+- When no part meets a tolerance limit that came from a default, the search
+  runs again without it. An amber line under the status line names the limit
+  that was dropped, and on Accept the chosen part's own tolerance is written to
+  `Tolerance:Preferred`; the remembered `cap.tolerance.*` default is left as it
+  was. A tolerance stated on the schematic or edited in the dialog is always
+  applied.
+- Right-click a candidate and choose **Reject** to record it as rejected in the
+  parts database; it is excluded from every later search.
+- Select a candidate and press **Accept**. The part is recorded as accepted in
+  the parts database, with the group's references as its usage on this board,
+  and each defaulted or edited field is stored as the new default for its
+  setting key. A value from the existing part or the Description is written
+  to the symbols but never stored as a default. **File → Save** then writes,
+  on every symbol in the group:
+  `MPN`, `Manufacturer`, `DigiKeyPN` and `LCSC` under those canonical keys
+  (other spellings of the four keys are removed); `Voltage:Min`,
+  `Class:Preferred` and `Tolerance:Preferred` when the value came from a
+  default, an edit, the existing part or the Description (in the form `16V`,
+  `X7R, X5R`, `10%`); `Value` when the symbol has none and the capacitance
+  came from the existing part or the Description; `Package:Preferred` when
+  the package was edited and the symbol has no footprint; `Footprint`
+  (`Capacitor_SMD:C_0603_1608Metric` and the other KiCad standard chip sizes
+  0402–1210) when the symbol has none; and `Intent:Type` = `capacitor` when the
+  type was guessed. A value stated on the schematic is not overwritten. After
+  the write the group reads as `assigned`, and the stated values give the same
+  requirement on the next open. Accepting the current part writes its
+  canonical numbers under the canonical keys, which also corrects swapped
+  `MPN` / `DigiKeyPN` fields and fills an empty `LCSC`.
+
+#### Parts database
+
+The parts database is a SQLite file at `~/Code/Boards/parts.sqlite` (the same
+path relative to the home directory on every machine); set
+`KICADTOOLS_PARTS_DB` to use another file. It holds each accepted or rejected
+part with its capacitance, voltage rating, dielectric, tolerance, package,
+DigiKey and LCSC part numbers, and the board references that place it. Stock
+and price are not stored. The file is listed in `Boards/.gitignore`, so each
+machine has its own copy.
+
+The `settings` table holds the remembered defaults under the `cap.*` keys in
+the table above. A key absent from the table takes the built-in value shown in
+parentheses. Accepting a part overwrites the keys of the fields that came from
+a default or an edit, so the next group starts from the values last used.
 
 ### LCSC tab
 
@@ -273,6 +440,11 @@ Test schematics live in `tests/data/`.
 - `src/kicadtools/partrotation.py` — per-LCSC CPL rotation overrides stored in SQLite
 - `src/kicadtools/naturalsort.py` — natural-sort key (R2 before R10)
 - `src/kicadtools/substitute.py` — parametric substitute search: spec, matching rules, ranking, `Alternates` merge
+- `src/kicadtools/units.py` — parse and format resistance, capacitance, voltage, tolerance and power; package and dielectric codes
+- `src/kicadtools/partsdb.py` — the SQLite parts database: accepted/rejected parts, supplier PNs, usage, settings
+- `src/kicadtools/requirement.py` — capacitor requirements (value + source per field), defaults, grouping
+- `src/kicadtools/capsearch.py` — capacitor candidates: database first, then JLCPCB search confirmed at DigiKey
+- `src/kicadtools/assign.py` — the property write plan that assigns a chosen capacitor to a group
 - `src/kicadtools/cli.py` — command-line entry point (`kicadtools`)
 - `src/kicadtools/gui/` — the BOM Cockpit GUI (`kicadtools-cockpit`):
   - `model.py` — `IntentTableModel` + `NaturalSortProxyModel`
@@ -281,3 +453,5 @@ Test schematics live in `tests/data/`.
   - `lcsc.py` — LCSC tab: part-number table and a background worker that runs the resolver
   - `param_editor.py` — the "Edit Electrical Parameters" dialog
   - `substitute_dialog.py` — the "Find Parametrically Equivalent Substitute" dialog
+  - `parts.py` — Parts tab: requirement-group table model and the background candidate-search worker
+  - `assign_dialog.py` — the "Assign Part" dialog

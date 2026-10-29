@@ -54,7 +54,7 @@ def test_output_reparses_and_symbol_gains_the_property():
     tree = sexpdata.loads(out)  # still valid s-expression
     assert tree[0] == sexpdata.Symbol("kicad_sch")
 
-    # The U5 symbol block now carries the property.
+    # The U5 symbol block now holds the property.
     block_start = out.index(f'(uuid "{uuid}")')
     block = out[block_start : block_start + 4000]
     assert '(property "Intent:Type" "led"' in block
@@ -94,7 +94,7 @@ def test_sibling_dest_writes_beside_source(tmp_path):
     work = tmp_path / BOARD.name
     shutil.copy(BOARD, work)
     before = work.read_text(encoding="utf-8")
-    uuid = _guessed_uuid(BOARD, "U5")  # U5 lives in the root board
+    uuid = _guessed_uuid(BOARD, "U5")  # U5 is placed in the root board
     out_path = write_back(work, {uuid: "led"}, dest=sibling_dest())
     assert out_path.name == "MotorDriver.intents.kicad_sch"
     # Source is left byte-identical when writing to a sibling.
@@ -218,7 +218,7 @@ def test_missing_property_raises():
 
 
 def test_set_or_insert_updates_present_empty_property():
-    # The LCSC write-back's core wrinkle: a symbol already carrying an *empty*
+    # The LCSC write-back's core wrinkle: a symbol that already has an *empty*
     # LCSC property must be filled in place, not duplicated.
     text = _symbol(_prop("LCSC", ""))
     out = set_or_insert_property(text, UUID, "LCSC", "C541465")
@@ -272,3 +272,45 @@ def test_apply_key_edits_runs_a_mixed_plan():
     assert '(property "MPN" "M1"' in out
     assert "Manufacturer_PN" not in out
     assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
+
+
+def test_add_properties_none_removes_a_present_property():
+    text = _symbol(_prop("MPN", "M1"), _prop("Digikey PN", ""))
+    out = add_properties(text, {UUID: {"Digikey PN": None, "LCSC": "C1"}})
+    assert "Digikey PN" not in out
+    assert '(property "MPN" "M1"' in out
+    assert '(property "LCSC" "C1"' in out
+    diff = list(difflib.ndiff(text.splitlines(), out.splitlines()))
+    removed = [ln for ln in diff if ln.startswith("- ")]
+    assert removed and all(ln[2:] in text for ln in removed)
+    assert sexpdata.loads(out)[0] == sexpdata.Symbol("kicad_sch")
+
+
+def test_add_properties_none_is_a_noop_when_absent():
+    text = _symbol(_prop("MPN", "M1"))
+    assert add_properties(text, {UUID: {"Digikey PN": None}}) == text
+
+
+def test_write_properties_removes_with_none(tmp_path):
+    work = tmp_path / "one.kicad_sch"
+    work.write_text(_symbol(_prop("MPN", "M1"), _prop("LCSC", "")),
+                    encoding="utf-8")
+    write_properties(work, {UUID: {"LCSC": None, "MPN": "M2"}})
+    out = work.read_text(encoding="utf-8")
+    assert '(property "LCSC"' not in out
+    assert '(property "MPN" "M2"' in out
+
+
+def test_add_properties_none_on_unknown_uuid_raises():
+    text = _symbol(_prop("MPN", "M1"))
+    with pytest.raises(KeyError):
+        add_properties(text, {"no-such-uuid": {"MPN": None}})
+
+
+def test_add_properties_none_matches_the_exact_key_only():
+    # "LCSC" removal leaves "LCSC Part" and the lower-case "lcsc" in place.
+    text = _symbol(_prop("LCSC", "C1"), _prop("LCSC Part", "C2"), _prop("lcsc", ""))
+    out = add_properties(text, {UUID: {"LCSC": None}})
+    assert '(property "LCSC" ' not in out
+    assert '(property "LCSC Part" "C2"' in out
+    assert '(property "lcsc" ""' in out
