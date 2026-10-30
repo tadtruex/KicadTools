@@ -15,16 +15,16 @@ from kicadtools.requirement import (
     SCHEMATIC,
     UNSET,
     Sourced,
-    capacitor_defaults,
-    capacitor_requirement,
+    part_defaults,
+    part_requirement,
     dielectric_band,
-    group_capacitors,
+    group_parts,
     tolerance_class,
 )
 from kicadtools.resolve import PartRecord, iter_bom_part_records
 
 DATA = Path(__file__).parent / "data"
-DEFAULTS = capacitor_defaults({})
+DEFAULTS = part_defaults({})
 
 
 def _cap(value="100nF", **props):
@@ -36,7 +36,7 @@ def _cap(value="100nF", **props):
 
 
 def _req(value="100nF", footprint="", defaults=DEFAULTS, **props):
-    return capacitor_requirement(_cap(value, **props), footprint, defaults)
+    return part_requirement(_cap(value, **props), footprint, defaults)
 
 
 # --------------------------------------------------------------------------- #
@@ -44,12 +44,12 @@ def _req(value="100nF", footprint="", defaults=DEFAULTS, **props):
 # --------------------------------------------------------------------------- #
 
 def test_capacitor_defaults_overlay():
-    d = capacitor_defaults({"cap.package": "0402", "cap.voltage_min": "25V"})
+    d = part_defaults({"cap.package": "0402", "cap.voltage_min": "25V"})
     assert d["cap.package"] == "0402"
     assert d["cap.voltage_min"] == "25V"
     assert d["cap.dielectric.mid"] == "X7R"
     assert "cap.voltage_min" not in BUILTIN_DEFAULTS
-    assert capacitor_defaults({}) == BUILTIN_DEFAULTS
+    assert part_defaults({}) == BUILTIN_DEFAULTS
 
 
 @pytest.mark.parametrize("farads,band", [
@@ -86,27 +86,27 @@ def test_package_default():
 
 
 def test_package_default_from_setting():
-    r = _req(defaults=capacitor_defaults({"cap.package": "0805"}))
+    r = _req(defaults=part_defaults({"cap.package": "0805"}))
     assert (r.package.value, r.package.source) == ("0805", DEFAULT)
 
 
 def test_voltage_unset_without_setting():
     r = _req()
-    assert (r.voltage_min_v.value, r.voltage_min_v.source) == (None, UNSET)
+    assert (r.rating_min.value, r.rating_min.source) == (None, UNSET)
     assert not r.searchable
     assert "Voltage:Min" in r.problem()
 
 
 def test_voltage_default_from_setting():
-    r = _req(defaults=capacitor_defaults({"cap.voltage_min": "25V"}))
-    assert (r.voltage_min_v.value, r.voltage_min_v.source) == (25.0, DEFAULT)
+    r = _req(defaults=part_defaults({"cap.voltage_min": "25V"}))
+    assert (r.rating_min.value, r.rating_min.source) == (25.0, DEFAULT)
     assert r.searchable
     assert r.problem() == ""
 
 
 def test_empty_voltage_property_is_not_stated():
     r = _req(**{"Voltage:Min": ""})
-    assert r.voltage_min_v.source == UNSET
+    assert r.rating_min.source == UNSET
 
 
 @pytest.mark.parametrize("value,dielectrics,tol", [
@@ -125,7 +125,7 @@ def test_dielectric_and_tolerance_defaults(value, dielectrics, tol):
 
 
 def test_dielectric_and_tolerance_defaults_from_settings():
-    d = capacitor_defaults({"cap.dielectric.mid": "X5R / X7S",
+    d = part_defaults({"cap.dielectric.mid": "X5R / X7S",
                             "cap.tolerance.class2": "20%"})
     r = _req("100nF", defaults=d)
     assert r.dielectrics.value == ("X5R", "X7S")
@@ -145,7 +145,7 @@ def test_stated_class1_dielectric_takes_class1_tolerance():
 def test_capacitance_parsed():
     r = _req("4u7")
     assert r.value_text == "4u7"
-    assert r.capacitance_f == pytest.approx(4.7e-6)
+    assert r.nominal == pytest.approx(4.7e-6)
 
 
 def test_package_from_footprint():
@@ -161,9 +161,9 @@ def test_package_from_package_preferred():
 
 
 def test_voltage_from_schematic():
-    r = _req(defaults=capacitor_defaults({"cap.voltage_min": "25V"}),
+    r = _req(defaults=part_defaults({"cap.voltage_min": "25V"}),
              **{"Voltage:Min": "50"})
-    assert (r.voltage_min_v.value, r.voltage_min_v.source) == (50.0, SCHEMATIC)
+    assert (r.rating_min.value, r.rating_min.source) == (50.0, SCHEMATIC)
 
 
 def test_dielectrics_from_schematic_normalized():
@@ -182,7 +182,7 @@ def test_tolerance_from_schematic_takes_loosest():
 
 def test_unparseable_value_not_searchable():
     r = _req("DNP-cap", **{"Voltage:Min": "16V"})
-    assert r.capacitance_f is None
+    assert r.nominal is None
     assert not r.searchable
     assert "DNP-cap" in r.problem()
     assert (r.dielectrics.value, r.dielectrics.source) == ((), UNSET)
@@ -209,22 +209,22 @@ def test_footprint_without_chip_size_is_a_problem():
 
 def test_edited_replaces_and_tags():
     r = _req()
-    e = r.edited(package="0402", voltage_min_v=25, dielectrics=["x5r"],
+    e = r.edited(package="0402", rating_min=25, dielectrics=["x5r"],
                  tolerance_max_pct=20)
     assert (e.package.value, e.package.source) == ("0402", EDITED)
-    assert (e.voltage_min_v.value, e.voltage_min_v.source) == (25.0, EDITED)
+    assert (e.rating_min.value, e.rating_min.source) == (25.0, EDITED)
     assert (e.dielectrics.value, e.dielectrics.source) == (("X5R",), EDITED)
     assert (e.tolerance_max_pct.value, e.tolerance_max_pct.source) == (20.0, EDITED)
     assert e.searchable
     # the original is unchanged
-    assert r.voltage_min_v.source == UNSET
+    assert r.rating_min.source == UNSET
     assert r.package.source == DEFAULT
 
 
 def test_edited_none_leaves_fields():
     r = _req(**{"Voltage:Min": "16"})
     e = r.edited(tolerance_max_pct=5)
-    assert e.voltage_min_v == r.voltage_min_v
+    assert e.rating_min == r.rating_min
     assert e.package == r.package
     assert e.dielectrics == r.dielectrics
     assert e.tolerance_max_pct.source == EDITED
@@ -234,30 +234,33 @@ def test_edited_package_rejected_with_footprint():
     r = _req(footprint="Capacitor_SMD:C_0603_1608Metric")
     with pytest.raises(ValueError):
         r.edited(package="0402")
-    assert r.edited(voltage_min_v=10).voltage_min_v.value == 10.0
+    assert r.edited(rating_min=10).rating_min.value == 10.0
 
 
 # --------------------------------------------------------------------------- #
-# group_capacitors on real fixtures
+# group_parts on real fixtures
 # --------------------------------------------------------------------------- #
 
 def _groups(name, defaults=DEFAULTS):
     records = iter_bom_part_records(DATA / name)
-    return records, group_capacitors(records, defaults)
+    return records, group_parts(records, defaults)
 
 
 def _group_with(groups, ref):
     return next(g for g in groups if ref in g.references)
 
 
-def test_groups_contain_only_capacitors_motordriver():
+def test_capacitor_groups_contain_only_capacitors_motordriver():
     records, groups = _groups("MotorDriver.kicad_sch")
     caps = [r for r in records if isinstance(r.intent, CapacitorIntent)]
     assert len(caps) < len(records)  # the fixture has non-capacitors too
-    members = [m for g in groups for m in g.members]
+    cap_groups = [g for g in groups if g.requirement.kind == "capacitor"]
+    members = [m for g in cap_groups for m in g.members]
     assert all(isinstance(m.intent, CapacitorIntent) for m in members)
     assert sorted(m.reference for m in members) == sorted(r.reference for r in caps)
-    assert sum(g.quantity for g in groups) == len(caps)
+    assert sum(g.quantity for g in cap_groups) == len(caps)
+    # Every other group is a resistor group.
+    assert {g.requirement.kind for g in groups} == {"capacitor", "resistor"}
 
 
 def test_group_splits_on_stated_voltage_motordriver():
@@ -272,12 +275,12 @@ def test_group_splits_on_stated_voltage_motordriver():
     assert stated.references == ["C15", "C16", "C17", "C18", "C20"]
     assert unstated.references == ["C38"]
     assert described.references == ["C36", "C37"]
-    assert (stated.requirement.voltage_min_v.value,
-            stated.requirement.voltage_min_v.source) == (16.0, SCHEMATIC)
-    assert unstated.requirement.voltage_min_v.source == UNSET
+    assert (stated.requirement.rating_min.value,
+            stated.requirement.rating_min.source) == (16.0, SCHEMATIC)
+    assert unstated.requirement.rating_min.source == UNSET
     assert stated.requirement.package.value == "0402"
     d = described.requirement
-    assert (d.voltage_min_v.value, d.voltage_min_v.source) == (25.0, DESCRIPTION)
+    assert (d.rating_min.value, d.rating_min.source) == (25.0, DESCRIPTION)
     assert d.dielectrics == Sourced(("X7R",), DESCRIPTION)
     # the Description's "603" disagrees with the 0402 footprint: a warning
     assert d.conflicts == ()
@@ -296,7 +299,7 @@ def test_hierarchical_instances_share_uuid_motordriver():
     req = g.requirement
     assert req.dielectrics.value == ("X7R", "X5R")
     assert req.dielectrics.source == SCHEMATIC
-    assert req.voltage_min_v.value == 50.0
+    assert req.rating_min.value == 50.0
 
 
 def test_groups_ordered_and_references_natural_sorted_motordriver():
@@ -317,6 +320,7 @@ def test_radial_footprint_group_not_searchable_motordriver():
 
 def test_groups_ecg():
     _, groups = _groups("ECG.kicad_sch")
+    groups = [g for g in groups if g.requirement.kind == "capacitor"]
     by_value = {g.requirement.value_text: g for g in groups}
     assert set(by_value) == {"100nF", "1nF", "1u", "4.7n"}
     assert by_value["100nF"].references == ["C1", "C3", "C4", "C12", "C13", "C14", "C17"]
@@ -325,7 +329,7 @@ def test_groups_ecg():
     assert small.dielectrics.value == ("C0G", "NP0")
     assert small.tolerance_max_pct.value == 5.0
     assert by_value["4.7n"].requirement.dielectrics.value == ("X7R",)
-    assert by_value["1u"].requirement.capacitance_f == pytest.approx(1e-6)
+    assert by_value["1u"].requirement.nominal == pytest.approx(1e-6)
     assert all(g.requirement.package.value == "0603" for g in groups)
     assert all(not g.assigned for g in groups)
 
@@ -346,26 +350,27 @@ def _record(ref, **props):
                       ElectricalIntent.from_dict(data))
 
 
-def test_non_capacitor_and_intentless_records_skipped():
+def test_resistor_grouped_and_intentless_records_skipped():
     res_props = {"Reference": "R1", "dnp": False, "in_bom": True,
                  "Intent:Type": "resistor", "Value": "10k"}
     resistor = PartRecord("R1", res_props, Path("x"), "u",
                           ElectricalIntent.from_dict(res_props))
     assert isinstance(resistor.intent, ResistorIntent)
     bare = PartRecord("C9", {"Value": "1uF"}, Path("x"), "u2", None)
-    groups = group_capacitors([resistor, bare, _record("C1")], DEFAULTS)
-    assert [g.references for g in groups] == [["C1"]]
+    groups = group_parts([resistor, bare, _record("C1")], DEFAULTS)
+    assert [g.references for g in groups] == [["C1"], ["R1"]]
+    assert [g.requirement.kind for g in groups] == ["capacitor", "resistor"]
 
 
 def test_assigned_requires_every_field_on_every_member():
-    g = group_capacitors([_record("C1", **FULL), _record("C2", **FULL)], DEFAULTS)
+    g = group_parts([_record("C1", **FULL), _record("C2", **FULL)], DEFAULTS)
     assert len(g) == 1 and g[0].assigned
 
     # A missing MPN, DigiKey PN or LCSC changes the group key (revision 2),
     # so the partial record is its own group; Manufacturer is not in the key.
     for missing in FULL:
         partial = {k: v for k, v in FULL.items() if k != missing}
-        groups = group_capacitors(
+        groups = group_parts(
             [_record("C1", **FULL), _record("C2", **{**partial, "Footprint": FULL["Footprint"]})]
             if missing != "Footprint" else
             [_record("C1", **{**FULL, "Footprint": ""}), _record("C2", **{**FULL, "Footprint": ""})],
@@ -384,7 +389,7 @@ def test_assigned_reads_alias_spellings():
     props = {"Manufacturer_PN": "CL10B104KB8NNNC", "Mfr": "Samsung",
              "Digi-Key_PN": "1276-1000-1-ND", "JLCPCB": "C1591",
              "Footprint": FULL["Footprint"]}
-    g = group_capacitors([_record("C1", **props)], DEFAULTS)
+    g = group_parts([_record("C1", **props)], DEFAULTS)
     assert g[0].assigned
 
 
@@ -399,7 +404,7 @@ def test_group_key_splits_on_each_stated_property():
         _record("C7", Value="1uF"),
     ]
     same = _record("C10", Value=" 100nF ")
-    groups = group_capacitors([base, *variants, same], DEFAULTS)
+    groups = group_parts([base, *variants, same], DEFAULTS)
     assert len(groups) == 7
     assert groups[0].references == ["C1", "C10"]
     assert [g.references[0] for g in groups] == ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]
@@ -411,9 +416,9 @@ def test_group_key_splits_on_each_stated_property():
 
 def test_stated_unparseable_voltage_kept_as_schematic():
     # A stated value is never replaced by the remembered default.
-    r = _req(defaults=capacitor_defaults({"cap.voltage_min": "25V"}),
+    r = _req(defaults=part_defaults({"cap.voltage_min": "25V"}),
              **{"Voltage:Min": "tbd"})
-    assert (r.voltage_min_v.value, r.voltage_min_v.source) == (None, SCHEMATIC)
+    assert (r.rating_min.value, r.rating_min.source) == (None, SCHEMATIC)
     assert not r.searchable
     assert "Voltage:Min" in r.problem()
 
@@ -440,22 +445,22 @@ def test_tolerance_class_splits_combined_entry():
 
 def test_blank_settings_fall_back_to_builtin():
     d = {"cap.package": "  ", "cap.dielectric.mid": "", "cap.tolerance.class2": ""}
-    r = capacitor_requirement(_cap("100nF"), "", d)
+    r = part_requirement(_cap("100nF"), "", d)
     assert (r.package.value, r.package.source) == ("0603", DEFAULT)
     assert (r.dielectrics.value, r.dielectrics.source) == (("X7R",), DEFAULT)
     assert r.tolerance_max_pct.value == 10.0
     # a raw settings mapping without the built-ins gives the same result
-    assert capacitor_requirement(_cap("100nF"), "", {}).package.value == "0603"
+    assert part_requirement(_cap("100nF"), "", {}).package.value == "0603"
 
 
 def test_package_setting_normalized():
-    r = _req(defaults=capacitor_defaults({"cap.package": "C_0805_2012Metric"}))
+    r = _req(defaults=part_defaults({"cap.package": "C_0805_2012Metric"}))
     assert r.package.value == "0805"
 
 
 def test_micro_sign_values():
-    assert _req("4.7µF").capacitance_f == pytest.approx(4.7e-6)
-    assert _req("4µ7").capacitance_f == pytest.approx(4.7e-6)
+    assert _req("4.7µF").nominal == pytest.approx(4.7e-6)
+    assert _req("4µ7").nominal == pytest.approx(4.7e-6)
     assert _req("10μF").dielectrics.value == ("X7R", "X5R")
 
 
@@ -463,7 +468,7 @@ def test_zero_and_empty_value_not_searchable():
     z = _req("0", **{"Voltage:Min": "16V"})
     assert not z.searchable and z.dielectrics.source == UNSET
     e = _req("", **{"Voltage:Min": "16V"})
-    assert e.capacitance_f is None
+    assert e.nominal is None
     assert e.problem() == "no Value"
 
 
@@ -484,14 +489,14 @@ def test_edited_normalizes_package_and_dielectrics():
 def test_voltage_never_from_net_names():
     # Rail-like text elsewhere on the symbol does not provide a voltage floor.
     r = _req(**{"Net": "+3V3", "Description": "decoupling on 5V rail"})
-    assert r.voltage_min_v.source == UNSET
+    assert r.rating_min.source == UNSET
 
 
 def test_assigned_with_whitespace_only_fields_is_false():
     props = {**FULL, "LCSC": "   "}
-    assert not group_capacitors([_record("C1", **props)], DEFAULTS)[0].assigned
+    assert not group_parts([_record("C1", **props)], DEFAULTS)[0].assigned
     props = {**FULL, "Footprint": "  "}
-    assert not group_capacitors([_record("C1", **props)], DEFAULTS)[0].assigned
+    assert not group_parts([_record("C1", **props)], DEFAULTS)[0].assigned
 
 
 def test_hierarchical_shared_uuid_members_kept_separately():
@@ -503,14 +508,14 @@ def test_hierarchical_shared_uuid_members_kept_separately():
                    Path("sub.kicad_sch"), "same-uuid",
                    ElectricalIntent.from_dict({"Reference": "C2", "dnp": False, "in_bom": True,
                                                "Intent:Type": "capacitor", "Value": "1uF"}))
-    (g,) = group_capacitors([b, a], DEFAULTS)
+    (g,) = group_parts([b, a], DEFAULTS)
     assert g.references == ["C1", "C2"]
     assert g.quantity == 2
     assert {m.symbol_uuid for m in g.members} == {"same-uuid"}
 
 
 def test_group_order_natural_across_groups():
-    groups = group_capacitors(
+    groups = group_parts(
         [_record("C10"), _record("C2", Value="1uF"), _record("C1", Value="10nF")],
         DEFAULTS,
     )
@@ -528,19 +533,19 @@ def _ev(text):
 
 def _rq(value="100nF", footprint="", *, description=None, part=None,
         defaults=DEFAULTS, **props):
-    return capacitor_requirement(_cap(value, **props), footprint, defaults,
+    return part_requirement(_cap(value, **props), footprint, defaults,
                                  description=description, part=part)
 
 
 PART_10U = PartEvidence(label="current part 1276-3388-1-ND (DigiKey)",
-                        capacitance_f=10e-6, voltage_v=50.0,
+                        nominal=10e-6, rating=50.0,
                         dielectrics=("X5R",), tolerance_pct=10.0,
                         package="1210")
 
 
 def test_defaults_for_new_fields():
     r = _req()
-    assert r.capacitance_source == SCHEMATIC
+    assert r.nominal_source == SCHEMATIC
     assert r.conflicts == ()
 
 
@@ -554,8 +559,8 @@ def test_defaults_for_new_fields():
 ])
 def test_library_style_values(value, farads, package):
     r = _rq(value)
-    assert r.capacitance_f == pytest.approx(farads)
-    assert r.capacitance_source == SCHEMATIC
+    assert r.nominal == pytest.approx(farads)
+    assert r.nominal_source == SCHEMATIC
     if package:
         assert r.package == Sourced(package, SCHEMATIC)
     else:
@@ -574,22 +579,22 @@ def test_value_suffix_below_footprint_and_package_preferred():
 def test_hand_built_library_value_with_description():
     rec = _record("C1", Value="C_10U_805",
                   Description="10uF, 25V, X5R, 805 package")
-    (g,) = group_capacitors([rec], DEFAULTS)
+    (g,) = group_parts([rec], DEFAULTS)
     r = g.requirement
-    assert r.capacitance_f == pytest.approx(10e-6)
-    assert r.capacitance_source == SCHEMATIC
+    assert r.nominal == pytest.approx(10e-6)
+    assert r.nominal_source == SCHEMATIC
     assert r.package == Sourced("0805", SCHEMATIC)
-    assert r.voltage_min_v == Sourced(25.0, DESCRIPTION)
+    assert r.rating_min == Sourced(25.0, DESCRIPTION)
     assert r.dielectrics == Sourced(("X5R", "X7R"), DESCRIPTION)
     assert r.conflicts == () and r.searchable
 
 
 def test_description_only_fields():
     r = _rq("", description=_ev("22uF, X5R, 25V, 1210"))
-    assert r.capacitance_f == pytest.approx(22e-6)
-    assert r.capacitance_source == DESCRIPTION
+    assert r.nominal == pytest.approx(22e-6)
+    assert r.nominal_source == DESCRIPTION
     assert r.package == Sourced("1210", DESCRIPTION)
-    assert r.voltage_min_v == Sourced(25.0, DESCRIPTION)
+    assert r.rating_min == Sourced(25.0, DESCRIPTION)
     assert r.dielectrics == Sourced(("X5R", "X7R"), DESCRIPTION)
     assert r.tolerance_max_pct == Sourced(10.0, DEFAULT)
     assert r.searchable
@@ -597,7 +602,7 @@ def test_description_only_fields():
 
 def test_description_voltage_range_takes_lowest():
     r = _rq("1uF", description=_ev("1uF, 25V - 50V"))
-    assert r.voltage_min_v == Sourced(25.0, DESCRIPTION)
+    assert r.rating_min == Sourced(25.0, DESCRIPTION)
     assert r.dielectrics.source == DEFAULT
 
 
@@ -610,10 +615,10 @@ def test_generic_description_is_no_evidence():
 
 def test_part_only_fields():
     r = _rq("", part=PART_10U)
-    assert r.capacitance_f == pytest.approx(10e-6)
-    assert r.capacitance_source == PART
+    assert r.nominal == pytest.approx(10e-6)
+    assert r.nominal_source == PART
     assert r.package == Sourced("1210", PART)
-    assert r.voltage_min_v == Sourced(50.0, PART)
+    assert r.rating_min == Sourced(50.0, PART)
     assert r.dielectrics == Sourced(("X5R", "X7R"), PART)
     assert r.tolerance_max_pct == Sourced(10.0, PART)
     assert r.searchable
@@ -626,22 +631,22 @@ def test_part_package_normalized():
 
 def test_empty_value_without_evidence_is_unset():
     r = _rq("")
-    assert r.capacitance_f is None and r.capacitance_source == UNSET
+    assert r.nominal is None and r.nominal_source == UNSET
     assert r.problem() == "no Value"
 
 
 def test_value_beats_part_beats_description_for_capacitance():
-    desc = DescriptionEvidence(capacitance_f=10e-6)
-    part = PartEvidence(label="p", capacitance_f=10e-6)
-    assert _rq("10uF", description=desc, part=part).capacitance_source == SCHEMATIC
-    assert _rq("", description=desc, part=part).capacitance_source == PART
-    assert _rq("", description=desc).capacitance_source == DESCRIPTION
+    desc = DescriptionEvidence(nominal=10e-6)
+    part = PartEvidence(label="p", nominal=10e-6)
+    assert _rq("10uF", description=desc, part=part).nominal_source == SCHEMATIC
+    assert _rq("", description=desc, part=part).nominal_source == PART
+    assert _rq("", description=desc).nominal_source == DESCRIPTION
 
 
 def test_part_beats_description_for_voltage_dielectric_tolerance():
     desc = _ev("10uF, 25V, X6S, 1210")
     r = _rq("10uF", description=desc, part=PART_10U)
-    assert r.voltage_min_v == Sourced(50.0, PART)
+    assert r.rating_min == Sourced(50.0, PART)
     assert r.dielectrics == Sourced(("X5R", "X7R"), PART)
     assert r.tolerance_max_pct == Sourced(10.0, PART)
     # part beats description for package
@@ -654,7 +659,7 @@ def test_schematic_beats_part_and_description():
             **{"Voltage:Min": "35V", "Class:Preferred": "X7S",
                "Tolerance:Preferred": "20%"})
     assert r.package == Sourced("1210", SCHEMATIC)
-    assert r.voltage_min_v == Sourced(35.0, SCHEMATIC)
+    assert r.rating_min == Sourced(35.0, SCHEMATIC)
     assert r.dielectrics == Sourced(("X7S",), SCHEMATIC)
     assert r.tolerance_max_pct == Sourced(20.0, SCHEMATIC)
 
@@ -667,10 +672,10 @@ def test_package_preferred_beats_value_suffix_and_evidence():
 
 
 def test_remembered_voltage_below_evidence():
-    d = capacitor_defaults({"cap.voltage_min": "16V"})
-    assert _rq(defaults=d, description=_ev("0.1uF, 25V")).voltage_min_v == \
+    d = part_defaults({"cap.voltage_min": "16V"})
+    assert _rq(defaults=d, description=_ev("0.1uF, 25V")).rating_min == \
         Sourced(25.0, DESCRIPTION)
-    assert _rq(defaults=d).voltage_min_v == Sourced(16.0, DEFAULT)
+    assert _rq(defaults=d).rating_min == Sourced(16.0, DEFAULT)
 
 
 @pytest.mark.parametrize("code,expected", [
@@ -701,7 +706,7 @@ def test_class1_from_part_takes_class1_tolerance_default():
 
 
 def test_band_default_uses_capacitance_from_description():
-    r = _rq("", description=DescriptionEvidence(capacitance_f=22e-6))
+    r = _rq("", description=DescriptionEvidence(nominal=22e-6))
     assert r.dielectrics == Sourced(("X7R", "X5R"), DEFAULT)
 
 
@@ -709,30 +714,30 @@ def test_band_default_uses_capacitance_from_description():
 
 def test_description_disagreeing_with_value_is_a_warning():
     r = _rq("10nF", description=_ev("10uF, 50V, X7R, 1210 package"))
-    assert r.capacitance_source == SCHEMATIC
-    assert r.capacitance_f == pytest.approx(10e-9)
+    assert r.nominal_source == SCHEMATIC
+    assert r.nominal == pytest.approx(10e-9)
     assert r.conflicts == ()
     assert r.warnings == ("Description says 10uF; Value says 10nF (Description not used)",)
     # the Description still fills the open fields
     assert r.package == Sourced("1210", DESCRIPTION)
-    assert r.voltage_min_v == Sourced(50.0, DESCRIPTION)
+    assert r.rating_min == Sourced(50.0, DESCRIPTION)
 
 
 def test_description_fully_covered_by_part_is_not_used():
     desc = _ev("0.1uF, 25V, X7R 603")
-    part = PartEvidence(label="p", capacitance_f=100e-9, voltage_v=16.0,
+    part = PartEvidence(label="p", nominal=100e-9, rating=16.0,
                         dielectrics=("X5R",), tolerance_pct=10.0, package="0402")
     r = _rq("0.1uF", "Capacitor_SMD:C_0402_1005Metric", description=desc, part=part)
     assert r.conflicts == ()
     assert r.warnings == ("Description says 0603; Footprint says 0402 (Description not used)",)
-    assert DESCRIPTION not in (r.package.source, r.voltage_min_v.source,
-                               r.dielectrics.source, r.capacitance_source)
+    assert DESCRIPTION not in (r.package.source, r.rating_min.source,
+                               r.dielectrics.source, r.nominal_source)
 
 
 def test_capacitance_conflict_value_vs_part_and_description_vs_part():
     part = PartEvidence(label="current part 1276-3388-1-ND (DigiKey)",
-                        capacitance_f=10e-6)
-    r = _rq("10nF", description=DescriptionEvidence(capacitance_f=22e-6),
+                        nominal=10e-6)
+    r = _rq("10nF", description=DescriptionEvidence(nominal=22e-6),
             part=part)
     assert r.conflicts == (
         "Value says 10nF; current part 1276-3388-1-ND (DigiKey) says 10uF",
@@ -746,9 +751,9 @@ def test_capacitance_conflict_value_vs_part_and_description_vs_part():
 def test_capacitance_within_tolerance_is_not_a_conflict():
     # "0.1uF" and "100nF" parse with float error
     r = _rq("0.1uF", description=_ev("100nF"),
-            part=PartEvidence(label="p", capacitance_f=1.0005e-7))
+            part=PartEvidence(label="p", nominal=1.0005e-7))
     assert r.conflicts == ()
-    r = _rq("0.1uF", part=PartEvidence(label="p", capacitance_f=1.002e-7))
+    r = _rq("0.1uF", part=PartEvidence(label="p", nominal=1.002e-7))
     assert len(r.conflicts) == 1
 
 
@@ -779,7 +784,7 @@ def test_unparseable_stated_values_are_not_conflicts():
             part=PartEvidence(label="p", package="0805"))
     assert r.conflicts == () and r.package == Sourced(None, SCHEMATIC)
     r = _rq("tbd", description=_ev("10uF"))
-    assert (r.capacitance_f, r.capacitance_source) == (None, SCHEMATIC)
+    assert (r.nominal, r.nominal_source) == (None, SCHEMATIC)
     assert r.conflicts == ()
     assert r.problem() == "Value 'tbd' is not a capacitance"
     r = _rq(**{"Package:Preferred": "big"}, description=_ev("0.1uF 0603"))
@@ -799,7 +804,7 @@ def test_member_existing_swapped_and_aliased_fields_as_written():
     rec = _record("C9", Value="10nF", MPN="1276-3388-1-ND",
                   **{"Digikey PN": "CL32B106KBJNNWE", "JLCPCB": "C13585",
                      "Mfr": ""})
-    (g,) = group_capacitors([rec], DEFAULTS)
+    (g,) = group_parts([rec], DEFAULTS)
     assert g.members[0].existing == ExistingPart(
         mpn="1276-3388-1-ND", digikey_pn="CL32B106KBJNNWE", lcsc="C13585",
         manufacturer=None)
@@ -808,17 +813,17 @@ def test_member_existing_swapped_and_aliased_fields_as_written():
 
 
 def test_member_existing_empty():
-    (g,) = group_capacitors([_record("C1", MPN="  ", LCSC="")], DEFAULTS)
+    (g,) = group_parts([_record("C1", MPN="  ", LCSC="")], DEFAULTS)
     assert g.existing == ExistingPart()
     assert g.existing.empty
 
 
 def test_member_and_group_description():
-    (g,) = group_capacitors(
+    (g,) = group_parts(
         [_record("C1", Value="4.7uF", Description="4.7uF, 16V, X6S 603")],
         DEFAULTS)
     assert g.description == DescriptionEvidence(
-        capacitance_f=pytest.approx(4.7e-6), voltage_v=16.0,
+        nominal=pytest.approx(4.7e-6), rating=16.0,
         dielectrics=("X6S",), package="0603")
     assert g.requirement.dielectrics == Sourced(("X6S", "X7R"), DESCRIPTION)
 
@@ -826,36 +831,36 @@ def test_member_and_group_description():
 def test_requirement_with_part():
     rec = _record("C9", Value="10nF", Description="10uF, 50V, X7R, 1210 package",
                   MPN="1276-3388-1-ND")
-    (g,) = group_capacitors([rec], DEFAULTS)
+    (g,) = group_parts([rec], DEFAULTS)
     assert g.requirement.conflicts == ()
     assert g.requirement.warnings == (
         "Description says 10uF; Value says 10nF (Description not used)",)
     part = PartEvidence(label="current part 1276-3388-1-ND (DigiKey)",
-                        capacitance_f=10e-6, voltage_v=50.0,
+                        nominal=10e-6, rating=50.0,
                         dielectrics=("X7R",), package="1210")
     r = g.requirement_with_part(part, DEFAULTS)
     assert r.conflicts == (
         "Value says 10nF; current part 1276-3388-1-ND (DigiKey) says 10uF",
     )
-    assert r.voltage_min_v == Sourced(50.0, PART)
+    assert r.rating_min == Sourced(50.0, PART)
     assert r.package == Sourced("1210", PART)
     # None part: same as the grouped requirement; new defaults apply
     assert g.requirement_with_part(None, DEFAULTS) == g.requirement
-    d = capacitor_defaults({"cap.voltage_min": "16V"})
-    plain = group_capacitors([_record("C1")], DEFAULTS)[0]
-    assert plain.requirement_with_part(None, d).voltage_min_v == Sourced(16.0, DEFAULT)
+    d = part_defaults({"cap.voltage_min": "16V"})
+    plain = group_parts([_record("C1")], DEFAULTS)[0]
+    assert plain.requirement_with_part(None, d).rating_min == Sourced(16.0, DEFAULT)
 
 
 def test_requirement_with_part_uses_footprint():
     rec = _record("C1", Footprint="Capacitor_SMD:C_0603_1608Metric")
-    (g,) = group_capacitors([rec], DEFAULTS)
+    (g,) = group_parts([rec], DEFAULTS)
     r = g.requirement_with_part(PartEvidence(label="p", package="0402"), DEFAULTS)
     assert r.footprint == "Capacitor_SMD:C_0603_1608Metric"
     assert r.conflicts == ("Footprint says 0603; p says 0402",)
 
 
 def test_group_key_splits_on_existing_part_numbers_and_description():
-    groups = group_capacitors([
+    groups = group_parts([
         _record("C1"),
         _record("C2", MPN="CL10B104KB8NNNC"),
         _record("C3", MPN="cl10b104kb8nnnc"),          # same, case folded
@@ -879,7 +884,7 @@ def test_group_key_splits_on_existing_part_numbers_and_description():
 
 def test_group_key_ignores_description_fields_stated_elsewhere():
     fp = "Capacitor_SMD:C_0402_1005Metric"
-    groups = group_capacitors([
+    groups = group_parts([
         _record("C1", Footprint=fp, **{"Voltage:Min": "16V", "Class:Preferred": "X7R"}),
         _record("C2", Footprint=fp, Description="0.1uF, 25V, X7R 603",
                 **{"Voltage:Min": "16V", "Class:Preferred": "X7R"}),
@@ -889,7 +894,7 @@ def test_group_key_ignores_description_fields_stated_elsewhere():
 
 def test_group_key_ignores_description_when_part_number_present():
     # MotorDriver C30 / C34: same DigiKey and LCSC numbers, different Descriptions
-    groups = group_capacitors([
+    groups = group_parts([
         _record("C30", Value="1uF", DigiKeyPN="1276-1445-1-ND", LCSC="C52923",
                 Description="1uF, 25V - 50V"),
         _record("C34", Value="1uF", DigiKeyPN="1276-1445-1-ND", LCSC="C52923",
@@ -904,7 +909,7 @@ def test_ecg_existing_part_and_generic_description():
     _, groups = _groups("ECG.kicad_sch")
     for g in groups:
         assert g.requirement.conflicts == ()
-        assert g.requirement.capacitance_source == SCHEMATIC
+        assert g.requirement.nominal_source == SCHEMATIC
 
 
 # ---- Review: shorthand sizes and the real board values -------------------- #
@@ -924,13 +929,13 @@ def test_three_digit_package_preferred_normalized_and_compared():
 def test_three_digit_package_from_part_setting_and_edit():
     r = _rq("100nF", part=PartEvidence(label="p", package="805"))
     assert r.package == Sourced("0805", PART)
-    r = _rq("100nF", defaults=capacitor_defaults({"cap.package": "402"}))
+    r = _rq("100nF", defaults=part_defaults({"cap.package": "402"}))
     assert r.package == Sourced("0402", DEFAULT)
     assert _rq("100nF").edited(package="805").package == Sourced("0805", EDITED)
 
 
 def test_same_capacitance_in_other_units_is_not_a_conflict():
-    part = PartEvidence(label="p", capacitance_f=100e-9, package="0603")
+    part = PartEvidence(label="p", nominal=100e-9, package="0603")
     r = _rq("0.1uF", description=_ev("100nF, 25V, X7R, 0603"), part=part)
     assert r.conflicts == ()
     r = _rq("C_P1U", description=_ev("0.1uF, 25V, X7R 603"), part=part)
@@ -973,15 +978,15 @@ def test_same_capacitance_in_other_units_is_not_a_conflict():
 def test_real_board_values_and_descriptions(value, desc, farads, pkg, volts,
                                             diel, conflicts):
     r = _rq(value, description=_ev(desc))
-    assert r.capacitance_f == pytest.approx(farads)
-    assert r.capacitance_source == SCHEMATIC
-    assert (r.package, r.voltage_min_v, r.dielectrics) == (pkg, volts, diel)
+    assert r.nominal == pytest.approx(farads)
+    assert r.nominal_source == SCHEMATIC
+    assert (r.package, r.rating_min, r.dielectrics) == (pkg, volts, diel)
     assert r.conflicts == conflicts
 
 
 def test_buckconverter_c9_value_part_and_description_conflicts():
     part = PartEvidence(label="current part 1276-3388-1-ND (DigiKey)",
-                        capacitance_f=10e-6, voltage_v=50.0,
+                        nominal=10e-6, rating=50.0,
                         dielectrics=("X7R",), tolerance_pct=10.0,
                         package="1210 (3225 Metric)")
     r = _rq("10nF", description=_ev("10uF, 50V, X7R, 1210 package"), part=part)
@@ -992,17 +997,17 @@ def test_buckconverter_c9_value_part_and_description_conflicts():
         "Description says 10uF; Value says 10nF (Description not used)",)
     assert r.problem() == r.conflicts[0]
     # a stated Value is never replaced by the evidence
-    assert (r.capacitance_f, r.capacitance_source) == (10e-9, SCHEMATIC)
+    assert (r.nominal, r.nominal_source) == (10e-9, SCHEMATIC)
 
 
 def test_stated_schematic_values_never_replaced_by_evidence():
-    part = PartEvidence(label="p", capacitance_f=1e-6, voltage_v=100.0,
+    part = PartEvidence(label="p", nominal=1e-6, rating=100.0,
                         dielectrics=("C0G",), tolerance_pct=1.0, package="0805")
     r = _rq("C_1U_805", **{"Voltage:Min": "tbd", "Class:Preferred": "X7R",
                            "Tolerance:Preferred": "±0.25pF"},
             description=_ev("1uF, 50V, X5R, 805"), part=part)
     assert r.conflicts == ()
     assert r.package == Sourced("0805", SCHEMATIC)
-    assert r.voltage_min_v == Sourced(None, SCHEMATIC)
+    assert r.rating_min == Sourced(None, SCHEMATIC)
     assert r.dielectrics == Sourced(("X7R",), SCHEMATIC)
     assert r.tolerance_max_pct == Sourced(None, SCHEMATIC)

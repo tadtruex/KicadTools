@@ -25,15 +25,15 @@ from typing import List, Optional
 import pytest
 
 from kicadtools.assign import assignment_plan
-from kicadtools.capsearch import DATABASE, SEARCH, find_candidates
+from kicadtools.partsearch import DATABASE, SEARCH, find_candidates
 from kicadtools.partnum import extract_part_numbers
 from kicadtools.partsdb import PartsDb
 from kicadtools.requirement import (
     DEFAULT,
     EDITED,
     SCHEMATIC,
-    capacitor_defaults,
-    group_capacitors,
+    part_defaults,
+    group_parts,
 )
 from kicadtools.resolve import iter_bom_part_records
 from kicadtools.suppliers import DigiKeyProduct, JlcPart
@@ -90,8 +90,8 @@ class FakeSuppliers:
         self.searches.append(keyword)
         return [_jlc_part()]
 
-    def jlc_mlcc(self, value: str, package: str) -> List[JlcPart]:
-        """The filtered MLCC search: recorded like a keyword search."""
+    def jlc_filtered(self, value: str, package: str, category=None) -> List[JlcPart]:
+        """The filtered category search: recorded like a keyword search."""
         return self.jlc_search(f"{value} {package}")
 
     def jlc_part(self, code: str) -> Optional[JlcPart]:
@@ -108,7 +108,7 @@ class FakeSuppliers:
 
 def _find(req, db, fake, needed):
     return find_candidates(
-        req, db=db, jlc_mlcc=fake.jlc_mlcc, jlc_part=fake.jlc_part,
+        req, db=db, jlc_filtered=fake.jlc_filtered, jlc_part=fake.jlc_part,
         digikey=fake, needed=needed,
     )
 
@@ -125,20 +125,20 @@ def test_capacitor_flow_end_to_end(tmp_path):
     board = tmp_path / "ECG.kicad_sch"
     shutil.copy(DATA / "ECG.kicad_sch", board)
     db = PartsDb(":memory:", now=lambda: "2026-01-01T00:00:00+00:00")
-    defaults = capacitor_defaults(db.settings())
+    defaults = part_defaults(db.settings())
 
     # ---- group and complete the requirement --------------------------------
-    group = _group_for(group_capacitors(iter_bom_part_records(board), defaults),
+    group = _group_for(group_parts(iter_bom_part_records(board), defaults),
                        "100nF")
     assert not group.assigned
-    assert group.requirement.voltage_min_v.value is None
+    assert group.requirement.rating_min.value is None
     assert not group.requirement.searchable
-    req = group.requirement.edited(voltage_min_v=16.0)
+    req = group.requirement.edited(rating_min=16.0)
     assert req.searchable
     assert req.package.value == "0603" and req.package.source == SCHEMATIC
     assert req.dielectrics.value == ("X7R",) and req.dielectrics.source == DEFAULT
     assert req.tolerance_max_pct.value == 10.0
-    assert req.voltage_min_v.source == EDITED
+    assert req.rating_min.source == EDITED
 
     # ---- first search: empty database, so the suppliers are searched ------
     fake = FakeSuppliers()
@@ -155,7 +155,7 @@ def test_capacitor_flow_end_to_end(tmp_path):
     # ---- accept into the database -------------------------------------------
     choice = cand.choice()
     assert choice.digikey_packaging == "cut tape"
-    part_id = db.accept_capacitor(choice)
+    part_id = db.accept_part(choice)
     db.record_usage(part_id, "ECG/ECG.kicad_sch", group.references)
     for key, value in parts_gui.requirement_settings(req).items():
         db.set_setting(key, value)
@@ -167,8 +167,8 @@ def test_capacitor_flow_end_to_end(tmp_path):
     for src, uuid_to_props in plan.items():
         write_properties(src, uuid_to_props)
 
-    defaults = capacitor_defaults(db.settings())
-    groups = group_capacitors(iter_bom_part_records(board), defaults)
+    defaults = part_defaults(db.settings())
+    groups = group_parts(iter_bom_part_records(board), defaults)
     reloaded = _group_for(groups, "100nF")
     assert reloaded.references == group.references
     assert reloaded.assigned
@@ -186,12 +186,12 @@ def test_capacitor_flow_end_to_end(tmp_path):
     # The written values parse back to the same requirement, now stated on the
     # schematic.
     again = reloaded.requirement
-    assert again.capacitance_f == pytest.approx(req.capacitance_f)
+    assert again.nominal == pytest.approx(req.nominal)
     assert again.package.value == req.package.value
-    assert again.voltage_min_v.value == pytest.approx(16.0)
+    assert again.rating_min.value == pytest.approx(16.0)
     assert again.dielectrics.value == req.dielectrics.value
     assert again.tolerance_max_pct.value == pytest.approx(10.0)
-    for f in (again.package, again.voltage_min_v, again.dielectrics,
+    for f in (again.package, again.rating_min, again.dielectrics,
               again.tolerance_max_pct):
         assert f.source == SCHEMATIC
 
@@ -213,8 +213,8 @@ def test_capacitor_flow_end_to_end(tmp_path):
 
     # ---- remembered settings become the other groups' defaults -------------
     other = _group_for(groups, "1u")
-    assert other.requirement.voltage_min_v.value == pytest.approx(16.0)
-    assert other.requirement.voltage_min_v.source == DEFAULT
+    assert other.requirement.rating_min.value == pytest.approx(16.0)
+    assert other.requirement.rating_min.source == DEFAULT
     assert other.requirement.searchable
     db.close()
 
@@ -288,8 +288,8 @@ def _existing_part_board(tmp_path) -> Path:
     informative Description, MPN and DigiKey PN fields, an empty LCSC field."""
     board = tmp_path / "ECG.kicad_sch"
     shutil.copy(DATA / "ECG.kicad_sch", board)
-    defaults = capacitor_defaults({})
-    c15 = [m for g in group_capacitors(iter_bom_part_records(board), defaults)
+    defaults = part_defaults({})
+    c15 = [m for g in group_parts(iter_bom_part_records(board), defaults)
            for m in g.members if m.reference == "C15"]
     assert len(c15) == 1
     write_properties(board, {c15[0].symbol_uuid: {
@@ -307,7 +307,7 @@ def test_capacitor_flow_existing_part(tmp_path):
     pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
-    from kicadtools.capsearch import CURRENT, assess
+    from kicadtools.partsearch import CURRENT, assess
     from kicadtools.gui.assign_dialog import AssignDialog
     from kicadtools.gui.parts import requirement_settings
     from kicadtools.requirement import DESCRIPTION, PART
@@ -315,21 +315,21 @@ def test_capacitor_flow_existing_part(tmp_path):
     _app = QApplication.instance() or QApplication([])  # noqa: F841
     board = _existing_part_board(tmp_path)
     db = PartsDb(":memory:", now=lambda: "2026-01-01T00:00:00+00:00")
-    defaults = capacitor_defaults(db.settings())
+    defaults = part_defaults(db.settings())
 
     # ---- the requirement before any lookup: Value, footprint, Description --
-    group = _group_for(group_capacitors(iter_bom_part_records(board), defaults),
+    group = _group_for(group_parts(iter_bom_part_records(board), defaults),
                        "C_10U_805")
     assert group.references == ["C15"]
     assert not group.assigned
     assert (group.existing.mpn, group.existing.digikey_pn, group.existing.lcsc) == (
         TY_MPN, TY_DK, None)
     first = group.requirement
-    assert first.capacitance_f == pytest.approx(10e-6)
-    assert first.capacitance_source == SCHEMATIC
+    assert first.nominal == pytest.approx(10e-6)
+    assert first.nominal_source == SCHEMATIC
     assert first.package.value == "0805" and first.package.source == SCHEMATIC
-    assert first.voltage_min_v.value == pytest.approx(25.0)
-    assert first.voltage_min_v.source == DESCRIPTION
+    assert first.rating_min.value == pytest.approx(25.0)
+    assert first.rating_min.source == DESCRIPTION
     assert first.dielectrics.value == ("X5R", "X7R")
     assert first.dielectrics.source == DESCRIPTION
     assert first.conflicts == ()
@@ -337,7 +337,7 @@ def test_capacitor_flow_existing_part(tmp_path):
 
     # ---- assess: the current part first, no keyword search ----------------
     fake = FakeTaiyoSuppliers()
-    result = assess(group, defaults, db=db, jlc_search=fake.jlc_search, jlc_mlcc=fake.jlc_mlcc,
+    result = assess(group, defaults, db=db, jlc_search=fake.jlc_search, jlc_filtered=fake.jlc_filtered,
                     jlc_part=fake.jlc_part, digikey=fake, needed=group.quantity)
     assert result.problem == ""
     assert fake.searches == [TY_MPN]            # the exact-MPN lookup only
@@ -347,8 +347,8 @@ def test_capacitor_flow_existing_part(tmp_path):
     assert lookup is not None and len(lookup.options) == 1
     assert lookup.evidence.label == f"current part {TY_DK} (DigiKey)"
     req = result.requirement
-    assert req.voltage_min_v.value == pytest.approx(25.0)
-    assert req.voltage_min_v.source == PART
+    assert req.rating_min.value == pytest.approx(25.0)
+    assert req.rating_min.source == PART
     assert req.dielectrics.value == ("X5R", "X7R") and req.dielectrics.source == PART
     assert req.tolerance_max_pct.value == pytest.approx(10.0)
     assert req.tolerance_max_pct.source == PART
@@ -377,10 +377,10 @@ def test_capacitor_flow_existing_part(tmp_path):
     # ---- accept into the database -------------------------------------------
     choice = chosen.choice()
     assert choice.digikey_packaging == "cut tape"
-    part_id = db.accept_capacitor(choice)
+    part_id = db.accept_part(choice)
     db.record_usage(part_id, "ECG/ECG.kicad_sch", group.references)
-    hits = db.find_capacitors(capacitance_f=10e-6, package="0805",
-                              voltage_min_v=25.0, dielectrics=("X5R",),
+    hits = db.find_parts(kind="capacitor", nominal=10e-6, package="0805",
+                              rating_min=25.0, dielectrics=("X5R",),
                               tolerance_max_pct=10.0)
     assert [(h.mpn, h.lcsc, h.digikey_pn) for h in hits] == [(TY_MPN, TY_LCSC, TY_DK)]
     assert db.settings() == {}
@@ -389,8 +389,8 @@ def test_capacitor_flow_existing_part(tmp_path):
     plan = assignment_plan(group, final_req, chosen)
     for src, uuid_to_props in plan.items():
         write_properties(src, uuid_to_props)
-    groups = group_capacitors(iter_bom_part_records(board),
-                              capacitor_defaults(db.settings()))
+    groups = group_parts(iter_bom_part_records(board),
+                              part_defaults(db.settings()))
     reloaded = _group_for(groups, "C_10U_805")
     assert reloaded.references == ["C15"]
     assert reloaded.assigned
@@ -407,14 +407,14 @@ def test_capacitor_flow_existing_part(tmp_path):
 
     again = reloaded.requirement
     assert again.conflicts == ()
-    for f in (again.package, again.voltage_min_v, again.dielectrics,
+    for f in (again.package, again.rating_min, again.dielectrics,
               again.tolerance_max_pct):
         assert f.source == SCHEMATIC
-    assert again.voltage_min_v.value == pytest.approx(25.0)
+    assert again.rating_min.value == pytest.approx(25.0)
 
     # ---- second assess: the current part again, now also the database part -
     fake2 = FakeTaiyoSuppliers()
-    result2 = assess(reloaded, defaults, db=db, jlc_search=fake2.jlc_search, jlc_mlcc=fake2.jlc_mlcc,
+    result2 = assess(reloaded, defaults, db=db, jlc_search=fake2.jlc_search, jlc_filtered=fake2.jlc_filtered,
                      jlc_part=fake2.jlc_part, digikey=fake2,
                      needed=reloaded.quantity)
     assert fake2.searches == []                 # the LCSC field is read instead
@@ -429,7 +429,7 @@ def test_capacitor_flow_existing_part(tmp_path):
 def test_capacitor_flow_existing_part_below_stock_floor(tmp_path):
     """The same symbol with only 300 at JLCPCB: the current part is passed
     over with the stock-floor reason, and the keyword search runs."""
-    from kicadtools.capsearch import CURRENT_LABEL, assess
+    from kicadtools.partsearch import CURRENT_LABEL, assess
 
     class LowStock(FakeTaiyoSuppliers):
         def jlc_search(self, keyword: str) -> List[JlcPart]:
@@ -442,11 +442,11 @@ def test_capacitor_flow_existing_part_below_stock_floor(tmp_path):
 
     board = _existing_part_board(tmp_path)
     db = PartsDb(":memory:", now=lambda: "2026-01-01T00:00:00+00:00")
-    defaults = capacitor_defaults(db.settings())
-    group = _group_for(group_capacitors(iter_bom_part_records(board), defaults),
+    defaults = part_defaults(db.settings())
+    group = _group_for(group_parts(iter_bom_part_records(board), defaults),
                        "C_10U_805")
     fake = LowStock()
-    result = assess(group, defaults, db=db, jlc_search=fake.jlc_search, jlc_mlcc=fake.jlc_mlcc,
+    result = assess(group, defaults, db=db, jlc_search=fake.jlc_search, jlc_filtered=fake.jlc_filtered,
                     jlc_part=fake.jlc_part, digikey=fake, needed=group.quantity)
     assert result.candidates == []
     assert (CURRENT_LABEL, "JLCPCB stock 300, need at least 1000") in result.rejected

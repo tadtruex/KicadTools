@@ -16,7 +16,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -417,22 +417,19 @@ def jlcpcb_search(keyword: str, *, pages: int = 3, page_size: int = 100) -> List
     return parts
 
 
-# JLCPCB's category names for surface-mount ceramic capacitors.
-JLC_MLCC_CATEGORY = ("Capacitors", "Multilayer Ceramic Capacitors MLCC - SMD/SMT")
-
-
-def jlcpcb_mlcc_search(value: str, package: str, *, max_pages: int = 10,
-                       page_size: int = 100) -> List[JlcPart]:
-    """The in-stock JLCPCB surface-mount ceramic capacitors whose catalog text
-    matches *value* (``"4.7uF"``) in *package* (``"0603"``), every page up to
-    *max_pages*. The value is the only keyword: JLCPCB ranks a longer text
-    (``"4.7uF 0603 X7R"``) by loose relevance, and most hits are then other
-    values. Category, package and stock are request filters, as on the JLCPCB
-    parts page."""
+def jlcpcb_category_search(value: str, package: str, category: Tuple[str, str], *,
+                           max_pages: int = 10, page_size: int = 100) -> List[JlcPart]:
+    """The in-stock JLCPCB parts in *category* (``(firstSortName,
+    secondSortName)``, as :attr:`kicadtools.parttypes.PartType.jlc_category`
+    gives it) whose catalog text matches *value* (``"4.7uF"``, ``"10kΩ"``) in
+    *package* (``"0603"``), every page up to *max_pages*. The value is the
+    only keyword: JLCPCB ranks a longer text (``"4.7uF 0603 X7R"``) by loose
+    relevance, and most hits are then other values. Category, package and
+    stock are request filters, as on the JLCPCB parts page."""
     filters = {
         "stockFlag": True,
-        "firstSortName": JLC_MLCC_CATEGORY[0],
-        "secondSortName": JLC_MLCC_CATEGORY[1],
+        "firstSortName": category[0],
+        "secondSortName": category[1],
         "componentSpecificationList": [package],
     }
     parts: List[JlcPart] = []

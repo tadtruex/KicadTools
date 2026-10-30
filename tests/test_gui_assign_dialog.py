@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from kicadtools.capsearch import Candidate, SearchResult  # noqa: E402
+from kicadtools.partsearch import Candidate, SearchResult  # noqa: E402
 from kicadtools.gui.assign_dialog import (  # noqa: E402
     CANDIDATE_COLUMNS,
     candidate_cells,
@@ -21,14 +21,15 @@ from kicadtools.gui.assign_dialog import (  # noqa: E402
     stock_shortfall,
     symbol_count,
 )
-from kicadtools.partsdb import CapacitorParams  # noqa: E402
+from kicadtools.partsdb import PartParams  # noqa: E402
+from kicadtools.parttypes import CAPACITOR  # noqa: E402
 from kicadtools.requirement import (  # noqa: E402
     ANY,
     DEFAULT,
     EDITED,
     SCHEMATIC,
     UNSET,
-    CapacitorRequirement,
+    PartRequirement,
     Member,
     RequirementGroup,
     Sourced,
@@ -36,12 +37,12 @@ from kicadtools.requirement import (  # noqa: E402
 
 
 def _req(*, footprint="", package=("0603", DEFAULT), volts=(None, UNSET),
-         diel=(("X7R",), DEFAULT), tol=(10.0, DEFAULT)) -> CapacitorRequirement:
-    return CapacitorRequirement(
+         diel=(("X7R",), DEFAULT), tol=(10.0, DEFAULT)) -> PartRequirement:
+    return PartRequirement(kind="capacitor",
         value_text="100nF",
-        capacitance_f=100e-9,
+        nominal=100e-9,
         package=Sourced(*package),
-        voltage_min_v=Sourced(*volts),
+        rating_min=Sourced(*volts),
         dielectrics=Sourced(*diel),
         tolerance_max_pct=Sourced(*tol),
         footprint=footprint,
@@ -54,9 +55,9 @@ def _group(req=None, refs=("C1", "C2", "C10")) -> RequirementGroup:
 
 
 def _cand(**kw) -> Candidate:
-    base = dict(
+    base = dict(kind="capacitor",
         mpn="CL10B104KB8NNNC", manufacturer="Samsung", package="0603",
-        params=CapacitorParams(100e-9, 50.0, "X7R", 10.0),
+        params=PartParams(100e-9, 50.0, "X7R", 10.0),
         lcsc="C1591", jlc_library="basic", jlc_preferred=True,
         jlc_stock=100_000, jlc_price=0.0021,
         digikey_pn="1276-1000-1-ND", digikey_stock=50_000, source="search",
@@ -75,11 +76,11 @@ def test_field_label_per_source():
 
 
 def test_field_text():
-    assert field_text(Sourced(16.0, DEFAULT), "voltage") == "16V"
-    assert field_text(Sourced(None, UNSET), "voltage") == ""
-    assert field_text(Sourced(("X7R", "X5R"), DEFAULT), "dielectric") == "X7R, X5R"
-    assert field_text(Sourced(5.0, DEFAULT), "tolerance") == "5%"
-    assert field_text(Sourced("0805", SCHEMATIC), "package") == "0805"
+    assert field_text(Sourced(16.0, DEFAULT), "rating", CAPACITOR) == "16V"
+    assert field_text(Sourced(None, UNSET), "rating", CAPACITOR) == ""
+    assert field_text(Sourced(("X7R", "X5R"), DEFAULT), "dielectric", CAPACITOR) == "X7R, X5R"
+    assert field_text(Sourced(5.0, DEFAULT), "tolerance", CAPACITOR) == "5%"
+    assert field_text(Sourced("0805", SCHEMATIC), "package", CAPACITOR) == "0805"
 
 
 # ---- parse_field_values ----------------------------------------------------
@@ -91,9 +92,9 @@ def test_parse_requires_voltage_when_unset():
 
 def test_parse_only_changed_fields():
     out = parse_field_values("0603", "16", "X7R", "10%", original=_req())
-    assert out == {"voltage_min_v": 16.0}
+    assert out == {"rating_min": 16.0}
     out = parse_field_values("0805", "16V", "x7r, X5R", "20", original=_req())
-    assert out == {"package": "0805", "voltage_min_v": 16.0,
+    assert out == {"package": "0805", "rating_min": 16.0,
                    "dielectrics": ("X7R", "X5R"), "tolerance_max_pct": 20.0}
 
 
@@ -105,18 +106,18 @@ def test_parse_unchanged_default_voltage_kept():
 def test_parse_blank_or_any_clears_a_field():
     orig = _req(volts=(25.0, DEFAULT))
     assert parse_field_values("0603", "", "X7R", "10%", original=orig) == {
-        "clear": ("voltage_min_v",)}
+        "clear": ("rating_min",)}
     assert parse_field_values("0603", "25V", "any", "", original=orig) == {
         "clear": ("dielectrics", "tolerance_max_pct")}
-    cleared = orig.edited(clear=("voltage_min_v",))
-    assert cleared.voltage_min_v == Sourced(None, ANY) and cleared.searchable
+    cleared = orig.edited(clear=("rating_min",))
+    assert cleared.rating_min == Sourced(None, ANY) and cleared.searchable
     # already cleared: blank changes nothing
     assert parse_field_values("0603", "", "X7R", "10%", original=cleared) == {}
     # no value to begin with: blank is an error, "any" clears
     unset = _req(volts=(None, UNSET))
     assert "Voltage:Min" in parse_field_values("0603", "", "X7R", "10%", original=unset)
     assert parse_field_values("0603", "Any", "X7R", "10%", original=unset) == {
-        "clear": ("voltage_min_v",)}
+        "clear": ("rating_min",)}
 
 
 def test_parse_errors():
@@ -128,7 +129,7 @@ def test_parse_errors():
 def test_parse_ignores_package_with_footprint():
     orig = _req(footprint="Capacitor_SMD:C_0603_1608Metric", package=("0603", SCHEMATIC))
     out = parse_field_values("0805", "16", "X7R", "10%", original=orig)
-    assert out == {"voltage_min_v": 16.0}
+    assert out == {"rating_min": 16.0}
     orig.edited(**out)  # does not raise: package is not passed
 
 
@@ -146,8 +147,8 @@ def test_candidate_cells():
     assert row["DigiKey PN"] == "1276-1000-1-ND"
     assert row["DigiKey stock"] == "50,000"
     assert row["Unit price"] == "$0.0021"
-    assert row["Capacitance"] == "100nF"
-    assert row["Voltage"] == "50V"
+    assert row["Value"] == "100nF"
+    assert row["Rating"] == "50V"
     assert row["Dielectric"] == "X7R"
     assert row["Tolerance"] == "10%"
 
@@ -156,7 +157,7 @@ def test_candidate_cells_unknowns():
     cand = _cand(source="database", usage_count=3, jlc_stock=None, digikey_pn=None,
                  digikey_stock=None, jlc_price=float("inf"), jlc_library="extended",
                  jlc_preferred=False,
-                 params=CapacitorParams(100e-9, 50.0, "X7R", None))
+                 params=PartParams(100e-9, 50.0, "X7R", None))
     row = dict(zip(CANDIDATE_COLUMNS, candidate_cells(cand)))
     assert row["Source"] == "database (3 uses)"
     assert row["JLC library"] == "Extended"
@@ -208,15 +209,15 @@ def test_dialog_waits_for_voltage_then_requests(app):
     assert requests == []
     assert dialog.current_requirement() is None
 
-    dialog._fields["voltage"].setText("16V")
+    dialog._fields["rating"].setText("16V")
     assert dialog.request_search(True) is True
     req, sup = requests[-1]
     assert sup is True
-    assert req.voltage_min_v == Sourced(16.0, EDITED)
+    assert req.rating_min == Sourced(16.0, EDITED)
     assert req.dielectrics.source == DEFAULT
     assert dialog.request_id == 1
     dialog._refresh_notes()
-    assert dialog._notes["voltage"].text() == "edited — written to 3 symbols"
+    assert dialog._notes["rating"].text() == "edited — written to 3 symbols"
     assert dialog._notes["dielectric"].text() == "default — written to 3 symbols"
 
 
@@ -273,7 +274,7 @@ def test_parse_dielectric_errors():
 def test_parse_float_tolerance_compared_with_tolerance():
     orig = _req(tol=(0.1 + 0.2, DEFAULT))       # 0.30000000000000004
     assert parse_field_values("0603", "16", "X7R", "0.3%", original=orig) == {
-        "voltage_min_v": 16.0
+        "rating_min": 16.0
     }
 
 
@@ -289,12 +290,12 @@ def test_dialog_stated_fields_read_only(app):
 
     req = _req(volts=(50.0, SCHEMATIC), diel=(("C0G",), SCHEMATIC))
     dialog = AssignDialog(_group(req), req, 1, None)
-    assert dialog._fields["voltage"].isReadOnly()
+    assert dialog._fields["rating"].isReadOnly()
     assert dialog._fields["dielectric"].isReadOnly()
     assert not dialog._fields["tolerance"].isReadOnly()
     assert not dialog._fields["package"].isReadOnly()
     # Text forced into a read-only field is ignored.
-    dialog._fields["voltage"].setText("6.3V")
+    dialog._fields["rating"].setText("6.3V")
     assert dialog.current_requirement() == req
 
 
@@ -308,7 +309,7 @@ def test_dialog_accept_blocked_after_field_edit(app):
 
     # An edit whose search has not finished: the shown part was checked for
     # 16 V, not 100 V, so it cannot be accepted.
-    dialog._fields["voltage"].setText("100V")
+    dialog._fields["rating"].setText("100V")
     dialog._field_edited("100V")
     assert dialog.chosen() is None
     assert not dialog._accept_btn.isEnabled()
@@ -316,12 +317,12 @@ def test_dialog_accept_blocked_after_field_edit(app):
     assert dialog.result() != dialog.DialogCode.Accepted
 
     # A field that does not parse also blocks Accept.
-    dialog._fields["voltage"].setText("lots")
+    dialog._fields["rating"].setText("lots")
     dialog._field_edited("lots")
     assert dialog.chosen() is None
 
     # Back to the searched requirement: Accept is available again.
-    dialog._fields["voltage"].setText("16V")
+    dialog._fields["rating"].setText("16V")
     dialog._field_edited("16V")
     assert dialog.chosen() is not None
     dialog.done(0)
@@ -334,12 +335,12 @@ def test_dialog_new_result_after_edit_enables_accept(app):
     dialog = AssignDialog(_group(), _req(volts=(16.0, DEFAULT)), 1, None)
     dialog.request_search()
     dialog.show_result(SearchResult([_cand()]), dialog.request_id)
-    dialog._fields["voltage"].setText("25V")
+    dialog._fields["rating"].setText("25V")
     dialog._field_edited("25V")
     assert dialog.request_search()
     dialog.show_result(SearchResult([_cand(mpn="NEW")]), dialog.request_id)
     assert dialog.chosen().mpn == "NEW"
-    assert dialog.current_requirement().voltage_min_v == Sourced(25.0, EDITED)
+    assert dialog.current_requirement().rating_min == Sourced(25.0, EDITED)
 
 
 def test_dialog_candidate_without_plan_cannot_be_accepted(app):
@@ -393,7 +394,7 @@ def test_dialog_debounce_reruns_last_search_kind(app):
 
 from dataclasses import replace as _replace  # noqa: E402
 
-from kicadtools.capsearch import CURRENT, CurrentOption, ExistingLookup  # noqa: E402
+from kicadtools.partsearch import CURRENT, CurrentOption, ExistingLookup  # noqa: E402
 from kicadtools.evidence import ExistingPart  # noqa: E402
 from kicadtools.gui.assign_dialog import (  # noqa: E402
     conflict_text,
@@ -411,9 +412,9 @@ def _group_with_part(req=None, props=_DK) -> RequirementGroup:
     return RequirementGroup(req or _req(), members)
 
 
-def _merged(**kw) -> CapacitorRequirement:
+def _merged(**kw) -> PartRequirement:
     """The requirement assess returns once the current part is known."""
-    base = dict(voltage_min_v=Sourced(50.0, PART),
+    base = dict(rating_min=Sourced(50.0, PART),
                 dielectrics=Sourced(("X7R",), PART),
                 tolerance_max_pct=Sourced(10.0, PART))
     base.update(kw)
@@ -456,8 +457,8 @@ def test_conflict_text_and_value_header():
     assert conflict_text(warned) == warned.warnings[0]
     assert "Conflict" not in conflict_text(warned)
     assert value_header(_req()) == "100nF"
-    assert value_header(_replace(_req(), value_text="", capacitance_f=1e-6,
-                                 capacitance_source=DESCRIPTION)) == "1uF (from description)"
+    assert value_header(_replace(_req(), value_text="", nominal=1e-6,
+                                 nominal_source=DESCRIPTION)) == "1uF (from description)"
 
 
 def test_dialog_current_part_row(app):
@@ -501,8 +502,8 @@ def test_dialog_adopts_merged_requirement(app):
     dialog.show_result(SearchResult([other, current], requirement=_merged(),
                                     existing=lookup), dialog.request_id)
     assert dialog.original == _merged()
-    assert dialog._fields["voltage"].text() == "50V"
-    assert dialog._notes["voltage"].text() == "from current part — written to 2 symbols"
+    assert dialog._fields["rating"].text() == "50V"
+    assert dialog._notes["rating"].text() == "from current part — written to 2 symbols"
     assert dialog._notes["package"].text() == "default — written to 2 symbols"
     # The current part is selected and can be accepted against the merged requirement.
     assert dialog.chosen().mpn == "CURRENT"
@@ -516,7 +517,7 @@ def test_dialog_keeps_user_edit_over_result_requirement(app):
 
     dialog = AssignDialog(_group_with_part(), _req(), 1, None)
     assert dialog.request_search()
-    dialog._fields["voltage"].setText("16V")
+    dialog._fields["rating"].setText("16V")
     dialog._field_edited("16V")
     dialog._debounce.stop()
     requests = []
@@ -524,13 +525,13 @@ def test_dialog_keeps_user_edit_over_result_requirement(app):
     dialog.show_result(SearchResult([_cand()], requirement=_merged()), dialog.request_id)
     # The merged requirement is the new base; the typed voltage is kept over it.
     assert dialog.original == _merged()
-    assert dialog._fields["voltage"].text() == "16V"
-    assert dialog.current_requirement() == _merged().edited(voltage_min_v=16.0)
+    assert dialog._fields["rating"].text() == "16V"
+    assert dialog.current_requirement() == _merged().edited(rating_min=16.0)
     assert dialog._notes["dielectric"].text() == "from current part — written to 2 symbols"
     # The shown candidates belong to the merged requirement, not the edit, so
     # the edited one is requested at once.
     assert dialog.chosen() is None
-    assert requests[-1] == _merged().edited(voltage_min_v=16.0)
+    assert requests[-1] == _merged().edited(rating_min=16.0)
 
 
 def test_dialog_shows_conflicts_and_cannot_search(app):
@@ -567,7 +568,7 @@ def test_dialog_opened_on_conflict_row_shows_it(app):
 
 def test_parse_package_accepts_three_digit_size():
     assert parse_field_values("805", "16", "X7R", "10%", original=_req()) == {
-        "package": "0805", "voltage_min_v": 16.0}
+        "package": "0805", "rating_min": 16.0}
 
 
 def test_dialog_merges_lookup_from_edited_request(app):
@@ -576,11 +577,11 @@ def test_dialog_merges_lookup_from_edited_request(app):
     the base from the lookup's evidence and conflicts and keeps the edit."""
     from kicadtools.evidence import PartEvidence
     from kicadtools.intent import CapacitorIntent
-    from kicadtools.requirement import capacitor_defaults, capacitor_requirement
+    from kicadtools.requirement import part_defaults, part_requirement
 
-    defaults = capacitor_defaults({"cap.voltage_min": "16V"})
+    defaults = part_defaults({"cap.voltage_min": "16V"})
     intent = CapacitorIntent(reference="C1", dnp=False, in_bom=True, value="100nF")
-    base = capacitor_requirement(intent, "", defaults)
+    base = part_requirement(intent, "", defaults)
     members = [Member("C1", Path("b.kicad_sch"), "u-C1", dict(_DK), intent)]
     group = RequirementGroup(base, members)
     dialog = AssignDialog_(group, base, defaults)
@@ -591,20 +592,20 @@ def test_dialog_merges_lookup_from_edited_request(app):
     dialog._field_edited("5%")
     assert dialog.request_search()                       # edited, not merged
     edited = requests[-1]
-    assert edited.voltage_min_v == Sourced(16.0, DEFAULT)
+    assert edited.rating_min == Sourced(16.0, DEFAULT)
 
     evidence = PartEvidence(label="current part 1276-1000-1-ND (DigiKey)",
-                            capacitance_f=100e-9, voltage_v=50.0,
+                            nominal=100e-9, rating=50.0,
                             dielectrics=("X7R",), tolerance_pct=10.0, package="0603")
     lookup = ExistingLookup(options=[CurrentOption(("DigiKeyPN",), evidence)],
                             notes=["found"])
     # The None request's result is stale; its lookup is still used.
     dialog.show_result(SearchResult([_cand(mpn="OLD")], existing=lookup), 1)
     assert dialog.existing_lookup is lookup
-    assert dialog.original.voltage_min_v == Sourced(50.0, PART)
+    assert dialog.original.rating_min == Sourced(50.0, PART)
     assert dialog._fields["tolerance"].text() == "5%"
     assert dialog.current_requirement().tolerance_max_pct == Sourced(5.0, EDITED)
-    assert dialog.current_requirement().voltage_min_v == Sourced(50.0, PART)
+    assert dialog.current_requirement().rating_min == Sourced(50.0, PART)
     # The merged, edited requirement is requested again.
     assert requests[-1] == dialog.current_requirement()
     assert dialog.request_id == 3
@@ -618,19 +619,19 @@ def test_dialog_merges_lookup_from_edited_request(app):
 def test_dialog_lookup_warning_from_edited_request_does_not_block(app):
     from kicadtools.evidence import PartEvidence
     from kicadtools.intent import CapacitorIntent
-    from kicadtools.requirement import capacitor_defaults, capacitor_requirement
+    from kicadtools.requirement import part_defaults, part_requirement
 
-    defaults = capacitor_defaults({"cap.voltage_min": "16V"})
+    defaults = part_defaults({"cap.voltage_min": "16V"})
     intent = CapacitorIntent(reference="C1", dnp=False, in_bom=True, value="100nF")
-    base = capacitor_requirement(intent, "", defaults)
+    base = part_requirement(intent, "", defaults)
     group = RequirementGroup(base, [Member("C1", Path("b.kicad_sch"), "u-C1",
                                            dict(_DK), intent)])
     dialog = AssignDialog_(group, base, defaults)
-    dialog._fields["voltage"].setText("25V")
+    dialog._fields["rating"].setText("25V")
     dialog._field_edited("25V")
     assert dialog.request_search()                    # edited from the start
     # the existing part is 10 uF; the Value says 100nF: not used, a warning
-    stale = PartEvidence(label="current part Y (DigiKey)", capacitance_f=10e-6)
+    stale = PartEvidence(label="current part Y (DigiKey)", nominal=10e-6)
     lookup = ExistingLookup(options=[CurrentOption(("DigiKeyPN",), stale)])
     sent = dialog.current_requirement()
     dialog.show_result(SearchResult([_cand()], requirement=sent, existing=lookup),
@@ -641,7 +642,7 @@ def test_dialog_lookup_warning_from_edited_request_does_not_block(app):
     assert dialog.original.warnings == (line,)
     assert line in dialog._conflicts.text()
     assert dialog._search_btn.isEnabled()
-    assert dialog._fields["voltage"].text() == "25V"
+    assert dialog._fields["rating"].text() == "25V"
 
 
 def test_dialog_reopened_with_recorded_lookup(app):
@@ -661,7 +662,7 @@ def test_dialog_reopened_queued_row_keeps_its_edit(app):
     """A queued row's requirement holds an edit; the first request sends None
     and its result (the group's base) does not discard the edit."""
     from kicadtools.gui.assign_dialog import AssignDialog
-    queued = _merged().edited(voltage_min_v=100.0)
+    queued = _merged().edited(rating_min=100.0)
     dialog = AssignDialog(_group_with_part(), queued, 1, None)
     requests = []
     dialog.search_requested.connect(lambda req, sup: requests.append(req))
@@ -684,11 +685,11 @@ def AssignDialog_(group, req, defaults):
 def test_facet_rows_cleared_fields_or_all_when_nothing_found():
     from kicadtools.gui.assign_dialog import facet_rows
 
-    facets = {"voltage": [("16V", 3)], "dielectric": [("X5R", 5), ("X7R", 1)],
+    facets = {"rating": [("16V", 3)], "dielectric": [("X5R", 5), ("X7R", 1)],
               "tolerance": [("10%", 6)]}
     req = _req(volts=(16.0, DEFAULT))
     assert facet_rows(SearchResult([], facets=facets), req) == [
-        ("voltage", [("16V", 3)]), ("dielectric", [("X5R", 5), ("X7R", 1)]),
+        ("rating", [("16V", 3)]), ("dielectric", [("X5R", 5), ("X7R", 1)]),
         ("tolerance", [("10%", 6)])]
     assert facet_rows(SearchResult([_cand()], facets=facets), req) == []
     cleared = req.edited(clear=("dielectrics",))
@@ -703,7 +704,7 @@ def test_dialog_values_popup_fills_the_field(app):
     req = _req(volts=(16.0, DEFAULT)).edited(clear=("dielectrics",))
     dialog = AssignDialog(_group(req), req, 1, None)
     assert not dialog._values_btn.isEnabled()
-    facets = {"voltage": [], "dielectric": [("X5R", 5)], "tolerance": []}
+    facets = {"rating": [], "dielectric": [("X5R", 5)], "tolerance": []}
     dialog.show_result(SearchResult([], requirement=req, facets=facets, pool_size=9))
     assert dialog._values_btn.isEnabled()
     popup = dialog._facet_popup

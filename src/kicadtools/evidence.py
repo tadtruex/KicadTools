@@ -1,9 +1,13 @@
 """
-What a capacitor's existing part numbers and description say about it.
+What a part's existing part numbers and description say about it.
 
 Shared by :mod:`kicadtools.requirement` (which merges evidence into a
-requirement, pure) and :mod:`kicadtools.capsearch` (which builds
+requirement, pure) and :mod:`kicadtools.partsearch` (which builds
 :class:`PartEvidence` from DigiKey / JLCPCB lookups). No I/O here.
+
+``nominal`` is the part's value in SI base units (farads for a capacitor, ohms
+for a resistor) and ``rating`` its rating (volts for a capacitor, watts for a
+resistor); see :mod:`kicadtools.parttypes`.
 """
 from __future__ import annotations
 
@@ -33,8 +37,8 @@ class PartEvidence:
     ``label`` names where they came from, for display
     (``"current part 445-9118-1-ND (DigiKey)"``)."""
     label: str
-    capacitance_f: Optional[float] = None
-    voltage_v: Optional[float] = None
+    nominal: Optional[float] = None
+    rating: Optional[float] = None
     dielectrics: Tuple[str, ...] = ()
     tolerance_pct: Optional[float] = None
     package: Optional[str] = None
@@ -42,9 +46,11 @@ class PartEvidence:
 
 @dataclass(frozen=True)
 class DescriptionEvidence:
-    """What a free-text Description states (``"10uF, 25V, X5R, 805 package"``).
-    Every field is ``None`` / empty when the text does not state it."""
-    capacitance_f: Optional[float] = None
-    voltage_v: Optional[float] = None
+    """What a free-text Description states (``"10uF, 25V, X5R, 805 package"``,
+    ``"10K, 603, 1%"``). Every field is ``None`` / empty when the text does
+    not state it."""
+    nominal: Optional[float] = None
+    rating: Optional[float] = None
     dielectrics: Tuple[str, ...] = ()
     package: Optional[str] = None
+    tolerance_pct: Optional[float] = None

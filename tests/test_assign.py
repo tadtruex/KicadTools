@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 import sexpdata
 
-from kicadtools.assign import FOOTPRINTS, assignment_plan
+from kicadtools.assign import assignment_plan
+from kicadtools.parttypes import CAPACITOR
+
+FOOTPRINTS = CAPACITOR.footprints
 from kicadtools.intent import CapacitorIntent
 from kicadtools.evidence import PartEvidence
 from kicadtools.requirement import (
@@ -17,13 +20,13 @@ from kicadtools.requirement import (
     RELAXED,
     SCHEMATIC,
     UNSET,
-    CapacitorRequirement,
+    PartRequirement,
     Member,
     RequirementGroup,
     Sourced,
-    capacitor_defaults,
-    capacitor_requirement,
-    group_capacitors,
+    part_defaults,
+    part_requirement,
+    group_parts,
 )
 from kicadtools.resolve import iter_bom_part_records
 from kicadtools.writer import _find_node_end, write_properties
@@ -46,11 +49,11 @@ def _req(*, package=Sourced("0603", SCHEMATIC),
          dielectrics=Sourced(("X7R",), SCHEMATIC),
          tolerance=Sourced(10.0, SCHEMATIC),
          footprint="Capacitor_SMD:C_0603_1608Metric"):
-    return CapacitorRequirement(
+    return PartRequirement(kind="capacitor",
         value_text="100nF",
-        capacitance_f=100e-9,
+        nominal=100e-9,
         package=package,
-        voltage_min_v=voltage,
+        rating_min=voltage,
         dielectrics=dielectrics,
         tolerance_max_pct=tolerance,
         footprint=footprint,
@@ -97,7 +100,7 @@ def test_default_fields_are_written_in_terse_form():
 
 def test_edited_fields_are_written():
     req = _req(footprint="", package=Sourced("0603", DEFAULT)).edited(
-        voltage_min_v=6.3, dielectrics=["C0G"], tolerance_max_pct=5.0,
+        rating_min=6.3, dielectrics=["C0G"], tolerance_max_pct=5.0,
     )
     props = _plan([_member(Footprint="")], req)[SRC]["u1"]
     assert props["Voltage:Min"] == "6.3V"
@@ -302,10 +305,10 @@ def test_end_to_end_on_ecg(tmp_path):
     shutil.copy(ECG, board)
     orig = board.read_text(encoding="utf-8")
 
-    defaults = capacitor_defaults({"cap.voltage_min": "16V"})
-    group = _group(group_capacitors(iter_bom_part_records(board), defaults), "C16")
+    defaults = part_defaults({"cap.voltage_min": "16V"})
+    group = _group(group_parts(iter_bom_part_records(board), defaults), "C16")
     req = group.requirement
-    assert req.voltage_min_v == Sourced(16.0, DEFAULT)
+    assert req.rating_min == Sourced(16.0, DEFAULT)
     assert not group.assigned
 
     cand = SimpleNamespace(mpn="CL10B472KB8NNNC",
@@ -321,11 +324,11 @@ def test_end_to_end_on_ecg(tmp_path):
     tree = sexpdata.loads(out)
     assert tree[0] == sexpdata.Symbol("kicad_sch")
 
-    after = _group(group_capacitors(iter_bom_part_records(board), {}), "C16")
+    after = _group(group_parts(iter_bom_part_records(board), {}), "C16")
     assert after.references == group.references
     assert after.assigned
     r = after.requirement
-    assert r.voltage_min_v == Sourced(16.0, SCHEMATIC)
+    assert r.rating_min == Sourced(16.0, SCHEMATIC)
     assert r.dielectrics == Sourced(("X7R",), SCHEMATIC)
     assert r.tolerance_max_pct == Sourced(10.0, SCHEMATIC)
     assert r.package == Sourced("0603", SCHEMATIC)
@@ -374,16 +377,16 @@ def test_requirement_from_description_and_part_is_written():
     # tolerance (part outranks description for both).
     m = _member(Value="10uF", Description="10uF, 25V, X5R, 805 package",
                 Footprint="Capacitor_SMD:C_0805_2012Metric")
-    group = group_capacitors([SimpleNamespace(
+    group = group_parts([SimpleNamespace(
         reference=m.reference, source_file=m.source_file,
         symbol_uuid=m.symbol_uuid, props=m.props,
         intent=CapacitorIntent(reference="C1", value="10uF", dnp=False,
                                in_bom=True))], {})[0]
     part = PartEvidence(label="current part 587-2985-1-ND (DigiKey)",
-                        capacitance_f=10e-6, dielectrics=("X5R",),
+                        nominal=10e-6, dielectrics=("X5R",),
                         tolerance_pct=10.0, package="0805")
     req = group.requirement_with_part(part, {})
-    assert req.voltage_min_v == Sourced(25.0, DESCRIPTION)
+    assert req.rating_min == Sourced(25.0, DESCRIPTION)
     assert req.dielectrics.source == PART
     assert req.tolerance_max_pct == Sourced(10.0, PART)
     props = assignment_plan(group, req, CAND)[SRC]["u1"]
@@ -418,9 +421,9 @@ def test_current_part_fixes_swapped_part_number_fields():
 def test_value_size_suffix_without_footprint_fills_the_footprint():
     intent = CapacitorIntent(reference="C1", value="C_10U_805", dnp=False,
                              in_bom=True)
-    req = capacitor_requirement(intent, "", {})
+    req = part_requirement(intent, "", {})
     assert req.package == Sourced("0805", SCHEMATIC)
-    assert req.capacitance_f == pytest.approx(10e-6)
+    assert req.nominal == pytest.approx(10e-6)
     m = _member(Value="C_10U_805", Footprint="")
     props = assignment_plan(RequirementGroup(req, [m]), req, CAND)[SRC]["u1"]
     assert props["Footprint"] == "Capacitor_SMD:C_0805_2012Metric"
@@ -429,10 +432,10 @@ def test_value_size_suffix_without_footprint_fills_the_footprint():
 
 def test_conflicting_requirement_is_refused():
     # BuckConverter: Value 10nF against a 10 uF existing part.
-    req = CapacitorRequirement(
-        value_text="10nF", capacitance_f=10e-9,
+    req = PartRequirement(kind="capacitor",
+        value_text="10nF", nominal=10e-9,
         package=Sourced("1210", SCHEMATIC),
-        voltage_min_v=Sourced(50.0, PART),
+        rating_min=Sourced(50.0, PART),
         dielectrics=Sourced(("X7R",), PART),
         tolerance_max_pct=Sourced(10.0, PART),
         footprint="Capacitor_SMD:C_1210_3225Metric",
@@ -445,14 +448,14 @@ def test_conflicting_requirement_is_refused():
 
 @pytest.mark.parametrize("source", [PART, DESCRIPTION])
 def test_capacitance_from_part_or_description_fills_an_empty_value(source):
-    req = CapacitorRequirement(
-        value_text="", capacitance_f=4.7e-6,
+    req = PartRequirement(kind="capacitor",
+        value_text="", nominal=4.7e-6,
         package=Sourced("0603", SCHEMATIC),
-        voltage_min_v=Sourced(16.0, SCHEMATIC),
+        rating_min=Sourced(16.0, SCHEMATIC),
         dielectrics=Sourced(("X7R",), SCHEMATIC),
         tolerance_max_pct=Sourced(10.0, SCHEMATIC),
         footprint="Capacitor_SMD:C_0603_1608Metric",
-        capacitance_source=source,
+        nominal_source=source,
     )
     props = _plan([_member(Value="")], req)[SRC]["u1"]
     assert props["Value"] == "4.7uF"
@@ -460,14 +463,14 @@ def test_capacitance_from_part_or_description_fills_an_empty_value(source):
 
 def test_stated_value_is_never_replaced():
     # A capacitance tagged from the part never overwrites a Value on the symbol.
-    req = CapacitorRequirement(
-        value_text="", capacitance_f=4.7e-6,
+    req = PartRequirement(kind="capacitor",
+        value_text="", nominal=4.7e-6,
         package=Sourced("0603", SCHEMATIC),
-        voltage_min_v=Sourced(16.0, SCHEMATIC),
+        rating_min=Sourced(16.0, SCHEMATIC),
         dielectrics=Sourced(("X7R",), SCHEMATIC),
         tolerance_max_pct=Sourced(10.0, SCHEMATIC),
         footprint="Capacitor_SMD:C_0603_1608Metric",
-        capacitance_source=PART,
+        nominal_source=PART,
     )
     props = _plan([_member(Value="C_4p7U")], req)[SRC]["u1"]
     assert "Value" not in props
@@ -502,8 +505,8 @@ def test_real_symbols_keep_stated_fields(value, description, footprint, volts):
         reference="C1", source_file=SRC, symbol_uuid="u1", props=props,
         intent=CapacitorIntent(reference="C1", value=value, dnp=False,
                                in_bom=True))
-    defaults = capacitor_defaults({"cap.voltage_min": "16V"})
-    group = group_capacitors([rec], defaults)[0]
+    defaults = part_defaults({"cap.voltage_min": "16V"})
+    group = group_parts([rec], defaults)[0]
     req = group.requirement
     assert req.searchable, req.problem()
     out = assignment_plan(group, req, CAND)[SRC]["u1"]

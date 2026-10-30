@@ -1,6 +1,9 @@
 """
-Candidate parts for a capacitor requirement: the symbol's existing part, the
-parts database, then a JLCPCB keyword search confirmed at DigiKey.
+Candidate parts for a capacitor or resistor requirement: the symbol's existing
+part, the parts database, then a filtered JLCPCB search confirmed at DigiKey.
+What differs between the part types (supplier parameter names, the JLCPCB
+category, value and rating formats) comes from
+:mod:`kicadtools.parttypes`.
 
 :func:`read_existing` looks up the part numbers a symbol already holds
 (:class:`~kicadtools.evidence.ExistingPart`) at DigiKey and JLCPCB. Fields
@@ -13,7 +16,7 @@ builds the requirement from the first of them; :func:`assess` runs both and
 calls :func:`find_candidates`.
 
 :func:`find_candidates` lists the parts that meet one
-:class:`~kicadtools.requirement.CapacitorRequirement` and can be ordered at both
+:class:`~kicadtools.requirement.PartRequirement` and can be ordered at both
 suppliers:
 
 0. **Current parts** — the existing parts that fit the schematic, when given.
@@ -29,12 +32,13 @@ suppliers:
    are set. Source ``database``; always listed.
 2. **Supplier search** — when neither the current part nor the database gives
    a candidate, or when *search_suppliers* is true. One filtered JLCPCB search
-   (*jlc_mlcc*): the capacitance as the keyword (``"4.7uF"``), the MLCC
-   category, the package and in-stock as filters, every page. Hits from a
-   manufacturer not in *manufacturers* are dropped. Each remaining hit is
-   checked against its catalog attributes: capacitance equal within 0.1 %,
-   voltage rating at or above the floor, dielectric in the allowed set,
-   tolerance at or below the maximum, and the same chip package. A field
+   (*jlc_filtered*): the value as the keyword (``"4.7uF"``, ``"10kΩ"``), the
+   part type's category, the package and in-stock as filters, every page.
+   Hits from a manufacturer not in *manufacturers* are dropped. Each remaining
+   hit is checked against its catalog attributes: value equal within 0.1 %,
+   rating (voltage, power) at or above the floor, dielectric in the allowed
+   set (capacitors), tolerance at or below the maximum, and the same chip
+   package. A field
    cleared in the dialog (source ``any``) is not checked. A hit lacking a
    constrained attribute is rejected, since an unknown rating is not an
    acceptable one. Hits that are rejected in the database, or already listed,
@@ -42,7 +46,7 @@ suppliers:
    *limit* are confirmed; a candidate is kept only when DigiKey lists the same
    MPN, as an active product, with parameters that also meet the
    requirement. Source ``search``. :attr:`SearchResult.facets` counts the
-   hits per voltage, dielectric and tolerance (see :func:`facets`).
+   hits per rating, dielectric and tolerance (see :func:`facets`).
 3. **Stock floor** — every candidate, from any source, needs a known stock of
    at least :data:`MIN_STOCK` and at least the build quantity at JLCPCB and at
    DigiKey. A search hit's JLCPCB stock is checked before its DigiKey lookup,
@@ -56,8 +60,8 @@ Every part dropped in steps 0 to 3 is recorded with its reason in
 
 Pure apart from the injected callables: *jlc_search* (keyword ->
 :class:`~kicadtools.suppliers.JlcPart` hits, for existing-part MPNs),
-*jlc_mlcc* (capacitance text and package -> the filtered MLCC hits, as
-:func:`kicadtools.suppliers.jlcpcb_mlcc_search`), *jlc_part* (LCSC code -> one
+*jlc_filtered* (value text, package and JLCPCB category -> the filtered hits,
+as :func:`kicadtools.suppliers.jlcpcb_category_search`), *jlc_part* (LCSC code -> one
 ``JlcPart`` or ``None``) and *digikey* (``configured`` plus
 ``product_for(pn) -> DigiKeyProduct | None``, as on
 :class:`~kicadtools.suppliers.DigiKeyClient`).
@@ -70,13 +74,14 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from kicadtools.evidence import ExistingPart, PartEvidence
-from kicadtools.partsdb import CapacitorChoice, CapacitorParams, DbCapacitor, PartsDb
+from kicadtools.partsdb import DbPart, PartChoice, PartParams, PartsDb
+from kicadtools.parttypes import DK_PACKAGE, PartType, SupplierNames
 from kicadtools.requirement import (
     ANY,
     DEFAULT,
     PART,
     RELAXED,
-    CapacitorRequirement,
+    PartRequirement,
     RequirementGroup,
     Sourced,
 )
@@ -88,20 +93,16 @@ from kicadtools.suppliers import (
 )
 from kicadtools.units import (
     dielectric_tokens,
-    fmt_farads,
     fmt_percent,
-    fmt_volts,
     package_code,
-    parse_capacitance,
     parse_percent,
-    parse_volts,
 )
 
 DATABASE = "database"
 SEARCH = "search"
 CURRENT = "current"
 
-# Generic parts (every capacitor, for now) need at least this many in stock at
+# Generic parts (every capacitor and resistor) need at least this many in stock at
 # JLCPCB and at DigiKey, and at least the build quantity.
 MIN_STOCK = 1000
 
@@ -112,23 +113,10 @@ MAX_LOOKUP_FACTOR = 3
 # The rejection label of the symbol's existing part.
 CURRENT_LABEL = "current part"
 
-# Relative band within which two capacitances are equal (0.1 %), and the slack
+# Relative band within which two values are equal (0.1 %), and the slack
 # on a floor or ceiling that absorbs float error in parsed values.
-_CAP_REL_TOL = 1e-3
+_VALUE_REL_TOL = 1e-3
 _LIMIT_EPS = 1e-6
-
-# JLCPCB attribute names (attribute_name_en) for the constrained parameters.
-JLC_CAPACITANCE = "Capacitance"
-JLC_VOLTAGE = "Voltage Rating"
-JLC_DIELECTRIC = "Temperature Coefficient"
-JLC_TOLERANCE = "Tolerance"
-
-# DigiKey parameter names (ParameterText) for the same parameters.
-DK_CAPACITANCE = "Capacitance"
-DK_VOLTAGE = "Voltage - Rated"
-DK_DIELECTRIC = "Temperature Coefficient"
-DK_TOLERANCE = "Tolerance"
-DK_PACKAGE = "Package / Case"
 
 # JLCPCB library codes as recorded in the parts database.
 _JLC_LIBRARY = {"base": "basic", "basic": "basic",
@@ -147,11 +135,12 @@ class Candidate:
     """One part that meets a requirement, with its supplier numbers, stock and
     price. ``jlc_price`` is the lowest-tier JLCPCB unit price in USD, ``inf``
     when unknown; ``jlc_stock`` and ``digikey_stock`` are ``None`` when not
-    looked up."""
+    looked up. ``kind`` is the part type (``"capacitor"``, ``"resistor"``)."""
+    kind: str
     mpn: str
     manufacturer: str
     package: str
-    params: CapacitorParams
+    params: PartParams
     lcsc: Optional[str]
     jlc_library: Optional[str]          # "basic" | "extended"
     jlc_preferred: bool
@@ -169,9 +158,9 @@ class Candidate:
     # read_existing on the current part only.
     unavailable_reason: str = ""
 
-    def choice(self) -> CapacitorChoice:
-        """This candidate as a :class:`~kicadtools.partsdb.CapacitorChoice` for
-        :meth:`PartsDb.accept_capacitor` / :meth:`PartsDb.reject_capacitor`.
+    def choice(self) -> PartChoice:
+        """This candidate as a :class:`~kicadtools.partsdb.PartChoice` for
+        :meth:`PartsDb.accept_part` / :meth:`PartsDb.reject_part`.
         The DigiKey packaging is ``"cut tape"`` when the PN is a cut-tape one
         (``…-1-ND`` / ``…CT-ND``)."""
         packaging = (
@@ -179,7 +168,8 @@ class Candidate:
             if self.digikey_pn and _CUT_TAPE_RE.search(self.digikey_pn)
             else None
         )
-        return CapacitorChoice(
+        return PartChoice(
+            kind=self.kind,
             mpn=self.mpn,
             manufacturer=self.manufacturer,
             package=self.package,
@@ -214,7 +204,7 @@ class SearchResult:
     dropped_by_limit: int = 0
     problem: str = ""
     relaxed_tolerance_pct: Optional[float] = None
-    requirement: Optional[CapacitorRequirement] = None
+    requirement: Optional[PartRequirement] = None
     existing: Optional["ExistingLookup"] = None
     # Field -> [(value, count)] over the JLCPCB pool; see :func:`facets`.
     facets: Dict[str, List[Tuple[str, int]]] = field(default_factory=dict)
@@ -254,87 +244,77 @@ def rank_key(c: Candidate, needed: int) -> tuple:
 # --------------------------------------------------------------------------- #
 
 def _check_params(
-    req: CapacitorRequirement,
+    req: PartRequirement,
     supplier: str,
     get: Callable[[str], Optional[str]],
-    names: Tuple[str, str, str, str],
-) -> Tuple[Optional[CapacitorParams], str]:
-    """Parse and check capacitance, voltage, dielectric and tolerance read
-    through *get* under the supplier's parameter *names* (in that order).
-    Returns the parsed parameters and ``""`` when every check passes, else
-    ``None`` and the reason. Voltage, dielectric and tolerance are checked
-    only when the requirement constrains them; capacitance always."""
-    cap_name, volt_name, diel_name, tol_name = names
-    want_c = float(req.capacitance_f)
-    want_v = req.voltage_min_v.value
+    names: SupplierNames,
+) -> Tuple[Optional[PartParams], str]:
+    """Parse and check value, rating, dielectric (capacitors) and tolerance
+    read through *get* under the supplier's parameter *names*. Returns the
+    parsed parameters and ``""`` when every check passes, else ``None`` and
+    the reason. Rating, dielectric and tolerance are checked only when the
+    requirement constrains them; the value always."""
+    t = req.ptype
+    want = float(req.nominal)
+    want_r = req.rating_min.value
     allowed: Tuple[str, ...] = tuple(
-        t for d in (req.dielectrics.value or ()) for t in dielectric_tokens(d)
+        code for d in (req.dielectrics.value or ()) for code in dielectric_tokens(d)
     )
     max_tol: Optional[float] = req.tolerance_max_pct.value
 
-    raw = get(cap_name)
+    raw = get(names.nominal)
     if raw is None:
-        return None, f"{supplier} lists no {cap_name}"
-    c = parse_capacitance(raw)
-    if c is None:
-        return None, f"{supplier} {cap_name} '{raw}' does not parse"
-    if abs(c - want_c) > _CAP_REL_TOL * max(abs(c), abs(want_c)):
+        return None, f"{supplier} lists no {names.nominal}"
+    n = t.parse_nominal(raw)
+    if n is None:
+        return None, f"{supplier} {names.nominal} '{raw}' does not parse"
+    if abs(n - want) > _VALUE_REL_TOL * max(abs(n), abs(want)):
         return None, (
-            f"{supplier} capacitance {fmt_farads(c)}, need {fmt_farads(want_c)}"
+            f"{supplier} {t.nominal_title.lower()} {t.fmt_nominal(n)}, "
+            f"need {t.fmt_nominal(want)}"
         )
 
-    raw = get(volt_name)
-    v = parse_volts(raw)
-    if want_v is None:
+    raw = get(names.rating)
+    r = t.parse_rating(raw)
+    if want_r is None:
         pass
     elif raw is None:
-        return None, f"{supplier} lists no {volt_name}"
-    elif v is None:
-        return None, f"{supplier} {volt_name} '{raw}' does not parse"
-    elif v < float(want_v) * (1 - _LIMIT_EPS):
+        return None, f"{supplier} lists no {names.rating}"
+    elif r is None:
+        return None, f"{supplier} {names.rating} '{raw}' does not parse"
+    elif r < float(want_r) * (1 - _LIMIT_EPS):
         return None, (
-            f"{supplier} rating {fmt_volts(v)}, need at least {fmt_volts(float(want_v))}"
+            f"{supplier} rating {t.fmt_rating(r)}, "
+            f"need at least {t.fmt_rating(float(want_r))}"
         )
 
-    raw = get(diel_name)
-    codes = dielectric_tokens(raw)
-    if allowed:
-        if raw is None or not codes:
-            return None, f"{supplier} lists no {diel_name}"
-        if not set(codes).intersection(allowed):
-            return None, (
-                f"{supplier} dielectric {', '.join(codes)} is not one of "
-                f"{', '.join(allowed)}"
-            )
+    codes: Tuple[str, ...] = ()
+    if names.dielectric:
+        raw = get(names.dielectric)
+        codes = dielectric_tokens(raw)
+        if allowed:
+            if raw is None or not codes:
+                return None, f"{supplier} lists no {names.dielectric}"
+            if not set(codes).intersection(allowed):
+                return None, (
+                    f"{supplier} dielectric {', '.join(codes)} is not one of "
+                    f"{', '.join(allowed)}"
+                )
 
-    raw = get(tol_name)
-    tol = _parse_tolerance(raw, c)
+    raw = get(names.tolerance)
+    tol = t.parse_tolerance(raw, n)
     if max_tol is not None:
         if raw is None:
-            return None, f"{supplier} lists no {tol_name}"
+            return None, f"{supplier} lists no {names.tolerance}"
         if tol is None:
-            return None, f"{supplier} {tol_name} '{raw}' does not parse"
+            return None, f"{supplier} {names.tolerance} '{raw}' does not parse"
         if tol > max_tol * (1 + _LIMIT_EPS):
             return None, (
                 f"{supplier} tolerance {fmt_percent(tol)}, need at most "
                 f"{fmt_percent(max_tol)}"
             )
 
-    return CapacitorParams(c, v, ", ".join(codes), tol), ""
-
-
-def _parse_tolerance(raw: Optional[str], capacitance_f: float) -> Optional[float]:
-    """Percent from a supplier tolerance. Small capacitors are specified with
-    an absolute tolerance (``"±0.25pF"``); that is converted to percent of
-    *capacitance_f*, so ±0.25 pF on 10 pF is 2.5 %. ``None`` when *raw* does
-    not parse."""
-    tol = parse_percent(raw)
-    if tol is not None or raw is None or "%" in raw:
-        return tol
-    absolute = parse_capacitance(str(raw).replace("±", "").replace("+/-", ""))
-    if absolute is None or capacitance_f <= 0:
-        return None
-    return round(absolute / capacitance_f * 100.0, 6)
+    return PartParams(n, r, ", ".join(codes), tol), ""
 
 
 def _stock_reason(supplier: str, stock: Optional[int], needed: int) -> str:
@@ -371,10 +351,11 @@ def _label(lcsc: str, mpn: str) -> str:
 # Database candidates.
 # --------------------------------------------------------------------------- #
 
-def _from_database(hit: DbCapacitor, jlc_part, digikey) -> Candidate:
+def _from_database(hit: DbPart, jlc_part, digikey) -> Candidate:
     """A database part as a :class:`Candidate`, with JLCPCB stock and price
     from *jlc_part* and DigiKey stock from *digikey* when configured."""
     cand = Candidate(
+        kind=hit.kind,
         mpn=hit.mpn,
         manufacturer=hit.manufacturer,
         package=hit.package,
@@ -417,7 +398,7 @@ def _fold(text: str) -> str:
 
 
 def parse_manufacturers(text: Optional[str]) -> Tuple[str, ...]:
-    """The comma-separated manufacturer list of the ``cap.manufacturers``
+    """The comma-separated manufacturer list of a ``<prefix>.manufacturers``
     setting, blanks dropped."""
     return tuple(m.strip() for m in (text or "").split(",") if m.strip())
 
@@ -435,35 +416,42 @@ def manufacturer_allowed(name: str, allowed: Sequence[str]) -> bool:
 
 # The fields facets() counts, with the requirement field each one clears.
 FACET_FIELDS = (
-    ("voltage", "voltage_min_v"),
+    ("rating", "rating_min"),
     ("dielectric", "dielectrics"),
     ("tolerance", "tolerance_max_pct"),
 )
 
 
-def facets(req: CapacitorRequirement,
+def facet_fields(ptype: PartType) -> Tuple[Tuple[str, str], ...]:
+    """The :data:`FACET_FIELDS` that apply to *ptype*: every one for a
+    capacitor, rating and tolerance for a resistor."""
+    return tuple(f for f in FACET_FIELDS
+                 if f[0] != "dielectric" or ptype.has_dielectric)
+
+
+def facets(req: PartRequirement,
            pool: Sequence[JlcPart]) -> Dict[str, List[Tuple[str, int]]]:
-    """For each of voltage, dielectric and tolerance, the values the *pool*
-    parts have and how many have each, counting only parts that meet *req* on
-    the other fields (the field itself is treated as cleared). Voltages and
-    tolerances are listed in ascending order, dielectrics by count. The pool
-    is the JLCPCB search hits of the right capacitance, package and listed
-    manufacturer, orderable and above the stock floor; DigiKey is not
+    """For each of rating, dielectric (capacitors) and tolerance, the values
+    the *pool* parts have and how many have each, counting only parts that
+    meet *req* on the other fields (the field itself is treated as cleared).
+    Ratings and tolerances are listed in ascending order, dielectrics by
+    count. The pool is the JLCPCB search hits of the right value, package and
+    listed manufacturer, orderable and above the stock floor; DigiKey is not
     consulted."""
-    names = (JLC_CAPACITANCE, JLC_VOLTAGE, JLC_DIELECTRIC, JLC_TOLERANCE)
+    t = req.ptype
     out: Dict[str, List[Tuple[str, int]]] = {}
-    for key, req_field in FACET_FIELDS:
+    for key, req_field in facet_fields(t):
         sub = req.edited(clear=(req_field,))
         counts: Dict[str, int] = {}
         order: Dict[str, float] = {}
         for part in pool:
-            params, _ = _check_params(sub, "JLCPCB", part.attributes.get, names)
+            params, _ = _check_params(sub, "JLCPCB", part.attributes.get, t.jlc)
             if params is None:
                 continue
-            if key == "voltage":
-                if params.voltage_v is None:
+            if key == "rating":
+                if params.rating is None:
                     continue
-                label, rank = fmt_volts(params.voltage_v), params.voltage_v
+                label, rank = t.fmt_rating(params.rating), params.rating
             elif key == "dielectric":
                 label, rank = params.dielectric or "(none listed)", 0.0
             else:
@@ -480,7 +468,7 @@ def facets(req: CapacitorRequirement,
     return out
 
 
-def _jlc_check(req: CapacitorRequirement, part: JlcPart) -> Tuple[Optional[Candidate], str]:
+def _jlc_check(req: PartRequirement, part: JlcPart) -> Tuple[Optional[Candidate], str]:
     """*part* as a :class:`Candidate` (no DigiKey data yet) and ``""`` when it
     is orderable and its JLCPCB attributes meet *req*, else ``None`` and the
     reason."""
@@ -494,13 +482,11 @@ def _jlc_check(req: CapacitorRequirement, part: JlcPart) -> Tuple[Optional[Candi
         return None, (
             f"JLCPCB package '{part.package}', need {req.package.value}"
         )
-    params, why = _check_params(
-        req, "JLCPCB", part.attributes.get,
-        (JLC_CAPACITANCE, JLC_VOLTAGE, JLC_DIELECTRIC, JLC_TOLERANCE),
-    )
+    params, why = _check_params(req, "JLCPCB", part.attributes.get, req.ptype.jlc)
     if params is None:
         return None, why
     return Candidate(
+        kind=req.kind,
         mpn=part.mpn.strip(),
         manufacturer=part.manufacturer.strip(),
         package=pkg,
@@ -517,7 +503,7 @@ def _jlc_check(req: CapacitorRequirement, part: JlcPart) -> Tuple[Optional[Candi
     ), ""
 
 
-def _digikey_check(req: CapacitorRequirement, cand: Candidate,
+def _digikey_check(req: PartRequirement, cand: Candidate,
                    product: Optional[DigiKeyProduct]) -> str:
     """``""`` when *product* confirms *cand* (same MPN, active, parameters
     meeting *req*, a DigiKey PN), after filling in the DigiKey PN, stock and
@@ -529,10 +515,7 @@ def _digikey_check(req: CapacitorRequirement, cand: Candidate,
     status = (product.product_status or "").strip()
     if status.lower() != "active":
         return f"DigiKey status '{status or 'unknown'}'"
-    params, why = _check_params(
-        req, "DigiKey", product.param,
-        (DK_CAPACITANCE, DK_VOLTAGE, DK_DIELECTRIC, DK_TOLERANCE),
-    )
+    params, why = _check_params(req, "DigiKey", product.param, req.ptype.digikey)
     if params is None:
         return why
     raw_pkg = product.param(DK_PACKAGE)
@@ -552,10 +535,10 @@ def _digikey_check(req: CapacitorRequirement, cand: Candidate,
 
 
 def find_candidates(
-    req: CapacitorRequirement,
+    req: PartRequirement,
     *,
     db: PartsDb,
-    jlc_mlcc: Callable[[str, str], Sequence[JlcPart]],
+    jlc_filtered: Callable[[str, str, Tuple[str, str]], Sequence[JlcPart]],
     jlc_part: Callable[[str], Optional[JlcPart]],
     digikey,
     needed: int,
@@ -585,7 +568,7 @@ def find_candidates(
     write for the chosen part."""
     # The second pass reuses the first pass's supplier answers: tolerance is
     # not part of the search, so the same hits and MPNs come back.
-    kwargs = dict(db=db, jlc_mlcc=_memo(jlc_mlcc), jlc_part=_memo(jlc_part),
+    kwargs = dict(db=db, jlc_filtered=_memo(jlc_filtered), jlc_part=_memo(jlc_part),
                   digikey=_MemoDigiKey(digikey), needed=needed, limit=limit,
                   search_suppliers=search_suppliers, currents=tuple(currents),
                   manufacturers=tuple(manufacturers))
@@ -603,7 +586,7 @@ def _memo(fn: Callable):
     """*fn* with its results kept per arguments for the length of one search."""
     seen: Dict[Tuple[str, ...], object] = {}
 
-    def call(*args: str):
+    def call(*args):
         if args not in seen:
             seen[args] = fn(*args)
         return seen[args]
@@ -620,8 +603,8 @@ class _MemoDigiKey:
 
 
 def requirement_for(
-    req: CapacitorRequirement, result: SearchResult, cand: Candidate
-) -> CapacitorRequirement:
+    req: PartRequirement, result: SearchResult, cand: Candidate
+) -> PartRequirement:
     """The requirement to write to the symbols when *cand* is chosen from
     *result*. A field cleared in the dialog (source ``any``), and the
     tolerance when its limit was dropped, takes the part's own value (source
@@ -630,8 +613,8 @@ def requirement_for(
     changes: Dict[str, Sourced] = {}
     if result.relaxed_tolerance_pct is not None or req.tolerance_max_pct.source == ANY:
         changes["tolerance_max_pct"] = Sourced(cand.params.tolerance_pct, RELAXED)
-    if req.voltage_min_v.source == ANY:
-        changes["voltage_min_v"] = Sourced(cand.params.voltage_v, RELAXED)
+    if req.rating_min.source == ANY:
+        changes["rating_min"] = Sourced(cand.params.rating, RELAXED)
     if req.dielectrics.source == ANY:
         codes = dielectric_tokens(cand.params.dielectric)
         changes["dielectrics"] = Sourced(tuple(codes), RELAXED)
@@ -639,10 +622,10 @@ def requirement_for(
 
 
 def _find(
-    req: CapacitorRequirement,
+    req: PartRequirement,
     *,
     db: PartsDb,
-    jlc_mlcc: Callable[[str, str], Sequence[JlcPart]],
+    jlc_filtered: Callable[[str, str, Tuple[str, str]], Sequence[JlcPart]],
     jlc_part: Callable[[str], Optional[JlcPart]],
     digikey,
     needed: int,
@@ -668,10 +651,11 @@ def _find(
         else:
             candidates.append(cand)
 
-    hits = db.find_capacitors(
-        capacitance_f=float(req.capacitance_f),
+    hits = db.find_parts(
+        kind=req.kind,
+        nominal=float(req.nominal),
         package=req.package.value,
-        voltage_min_v=req.voltage_min_v.value,
+        rating_min=req.rating_min.value,
         dielectrics=tuple(req.dielectrics.value or ()),
         tolerance_max_pct=req.tolerance_max_pct.value,
     )
@@ -707,8 +691,10 @@ def _find(
     seen_lcsc: Set[str] = set()
     passed: List[Candidate] = []
     pool: List[JlcPart] = []
-    open_req = req.edited(clear=[name for _, name in FACET_FIELDS])
-    for part in jlc_mlcc(fmt_farads(float(req.capacitance_f)), req.package.value):
+    t = req.ptype
+    open_req = req.edited(clear=[name for _, name in facet_fields(t)])
+    for part in jlc_filtered(t.search_text(float(req.nominal)), req.package.value,
+                             t.jlc_category):
         code = (part.lcsc or "").strip().upper()
         key = code or f"mpn:{_norm_mpn(part.mpn)}"
         if key in seen_lcsc:
@@ -777,7 +763,7 @@ def _find(
 # The symbol's existing part.
 # --------------------------------------------------------------------------- #
 
-def _current_check(req: CapacitorRequirement, cand: Candidate, db: PartsDb,
+def _current_check(req: PartRequirement, cand: Candidate, db: PartsDb,
                    needed: int) -> str:
     """``""`` when the current part *cand* can be ordered, meets *req* and the
     stock floor and is not rejected in the parts database, else the reason.
@@ -788,17 +774,16 @@ def _current_check(req: CapacitorRequirement, cand: Candidate, db: PartsDb,
     if cand.package != req.package.value:
         return f"DigiKey package '{cand.package or 'unknown'}', need {req.package.value}"
     p = cand.params
+    t = req.ptype
+    names = t.digikey
     shown = {
-        DK_CAPACITANCE: fmt_farads(p.capacitance_f) if p.capacitance_f else None,
-        DK_VOLTAGE: fmt_volts(p.voltage_v) if p.voltage_v is not None else None,
-        DK_DIELECTRIC: p.dielectric or None,
-        DK_TOLERANCE: (fmt_percent(p.tolerance_pct)
-                       if p.tolerance_pct is not None else None),
+        names.nominal: t.fmt_nominal(p.nominal) if p.nominal else None,
+        names.rating: t.fmt_rating(p.rating) if p.rating is not None else None,
+        names.dielectric: p.dielectric or None,
+        names.tolerance: (fmt_percent(p.tolerance_pct)
+                          if p.tolerance_pct is not None else None),
     }
-    params, why = _check_params(
-        req, "DigiKey", shown.get,
-        (DK_CAPACITANCE, DK_VOLTAGE, DK_DIELECTRIC, DK_TOLERANCE),
-    )
+    params, why = _check_params(req, "DigiKey", shown.get, names)
     if params is None:
         return why
     if db.is_rejected(cand.manufacturer, cand.mpn):
@@ -850,20 +835,18 @@ def _try(fn: Callable, arg: str, notes: List[str], what: str) -> Tuple[object, b
         return None, False
 
 
-def _evidence(label: str, get: Callable[[str], Optional[str]],
-              names: Tuple[str, str, str, str],
-              raw_package: Optional[str]) -> PartEvidence:
+def _evidence(ptype: PartType, label: str, get: Callable[[str], Optional[str]],
+              names: SupplierNames, raw_package: Optional[str]) -> PartEvidence:
     """:class:`PartEvidence` from supplier parameters read through *get*
-    under *names* (capacitance, voltage, dielectric, tolerance)."""
-    cap_name, volt_name, diel_name, tol_name = names
-    c = parse_capacitance(get(cap_name))
-    tol_raw = get(tol_name)
-    tol = _parse_tolerance(tol_raw, c) if c else parse_percent(tol_raw)
+    under *names*."""
+    n = ptype.parse_nominal(get(names.nominal))
+    tol_raw = get(names.tolerance)
+    tol = ptype.parse_tolerance(tol_raw, n) if n else parse_percent(tol_raw)
     return PartEvidence(
         label=label,
-        capacitance_f=c,
-        voltage_v=parse_volts(get(volt_name)),
-        dielectrics=dielectric_tokens(get(diel_name)),
+        nominal=n,
+        rating=ptype.parse_rating(get(names.rating)),
+        dielectrics=dielectric_tokens(get(names.dielectric)) if names.dielectric else (),
         tolerance_pct=tol,
         package=package_code(raw_package),
     )
@@ -924,6 +907,7 @@ class _Found:
 
 def read_existing(
     existing: ExistingPart,
+    ptype: PartType,
     *,
     jlc_part: Callable[[str], Optional[JlcPart]],
     jlc_search: Callable[[str], Sequence[JlcPart]],
@@ -1046,26 +1030,25 @@ def read_existing(
                 out.notes.append(f"{name} {text}: no exact match at JLCPCB")
 
     for f in parts:
-        out.options.append(_option(f, existing, out.notes))
+        out.options.append(_option(ptype, f, existing, out.notes))
     return out
 
 
-def _option(f: _Found, existing: ExistingPart, notes: List[str]) -> CurrentOption:
+def _option(ptype: PartType, f: _Found, existing: ExistingPart,
+            notes: List[str]) -> CurrentOption:
     """The :class:`CurrentOption` for one collected part; a note when it is
     not a candidate because one supplier does not list it."""
     product, part = f.product, f.part
     if product is not None:
         ev = _evidence(
+            ptype,
             f"current part {_label_digikey_pn(product, existing, f.dk_text)} (DigiKey)",
-            product.param,
-            (DK_CAPACITANCE, DK_VOLTAGE, DK_DIELECTRIC, DK_TOLERANCE),
-            product.param(DK_PACKAGE),
+            product.param, ptype.digikey, product.param(DK_PACKAGE),
         )
     else:
         ev = _evidence(
-            f"current part {part.lcsc or f.lcsc} (JLCPCB)", part.attributes.get,
-            (JLC_CAPACITANCE, JLC_VOLTAGE, JLC_DIELECTRIC, JLC_TOLERANCE),
-            part.package,
+            ptype, f"current part {part.lcsc or f.lcsc} (JLCPCB)",
+            part.attributes.get, ptype.jlc, part.package,
         )
     option = CurrentOption(tuple(f.fields), ev)
     if product is None or part is None:
@@ -1080,11 +1063,12 @@ def _option(f: _Found, existing: ExistingPart, notes: List[str]) -> CurrentOptio
         unavailable = f"not orderable at JLCPCB ({part.no_buy_reason or 'out of stock'})"
     mpn = (product.mpn or "").strip()
     option.candidate = Candidate(
+        kind=ptype.name,
         mpn=mpn or part.mpn.strip(),
         manufacturer=part.manufacturer.strip() or (existing.manufacturer or "").strip(),
         package=ev.package or package_code(part.package) or "",
-        params=CapacitorParams(ev.capacitance_f, ev.voltage_v,
-                               ", ".join(ev.dielectrics), ev.tolerance_pct),
+        params=PartParams(ev.nominal, ev.rating,
+                          ", ".join(ev.dielectrics), ev.tolerance_pct),
         lcsc=part.lcsc or f.lcsc or None,
         jlc_library=_jlc_library(part.library),
         jlc_preferred=part.preferred,
@@ -1100,30 +1084,31 @@ def _option(f: _Found, existing: ExistingPart, notes: List[str]) -> CurrentOptio
     return option
 
 
-def _disagreement(ref: PartEvidence, ev: PartEvidence) -> List[str]:
-    """Lines for a capacitance (more than 0.1 % apart) or package that *ev*
-    states differently from *ref*."""
+def _disagreement(ptype: PartType, ref: PartEvidence, ev: PartEvidence) -> List[str]:
+    """Lines for a value (more than 0.1 % apart) or package that *ev* states
+    differently from *ref*."""
     out: List[str] = []
-    a, b = ref.capacitance_f, ev.capacitance_f
-    if a and b and abs(a - b) > _CAP_REL_TOL * max(a, b):
-        out.append(f"{ref.label} says {fmt_farads(a)}; {ev.label} says {fmt_farads(b)}")
+    a, b = ref.nominal, ev.nominal
+    if a and b and abs(a - b) > _VALUE_REL_TOL * max(a, b):
+        out.append(f"{ref.label} says {ptype.fmt_nominal(a)}; "
+                   f"{ev.label} says {ptype.fmt_nominal(b)}")
     if ref.package and ev.package and ref.package != ev.package:
         out.append(f"{ref.label} says {ref.package}; {ev.label} says {ev.package}")
     return out
 
 
 def _loosest(options: Sequence[CurrentOption]) -> PartEvidence:
-    """The first option's evidence with the lowest voltage rating, the widest
+    """The first option's evidence with the lowest rating, the widest
     tolerance and every dielectric of *options*, so each option meets the
     requirement built from it on those fields."""
     first = options[0].evidence
     evs = [o.evidence for o in options]
-    volts = [e.voltage_v for e in evs if e.voltage_v is not None]
+    ratings = [e.rating for e in evs if e.rating is not None]
     tols = [e.tolerance_pct for e in evs if e.tolerance_pct is not None]
     diels: List[str] = []
     for e in evs:
         diels += [d for d in e.dielectrics if d not in diels]
-    return replace(first, voltage_v=min(volts) if volts else None,
+    return replace(first, rating=min(ratings) if ratings else None,
                    tolerance_pct=max(tols) if tols else None,
                    dielectrics=tuple(diels))
 
@@ -1131,14 +1116,14 @@ def _loosest(options: Sequence[CurrentOption]) -> PartEvidence:
 def requirement_from_lookup(
     group: RequirementGroup, lookup: Optional[ExistingLookup],
     defaults: Mapping[str, str],
-) -> Tuple[CapacitorRequirement, List[Candidate]]:
+) -> Tuple[PartRequirement, List[Candidate]]:
     """The group's requirement built from the existing parts that fit the
     schematic, and those parts' candidates.
 
-    An option fits when its capacitance and package agree with every
+    An option fits when its value and package agree with every
     schematic source (Value, Footprint, ``Package:Preferred``, the Value's
     size suffix) and with the first fitting option. The requirement's part
-    evidence is the first fitting option's, with the lowest voltage, widest
+    evidence is the first fitting option's, with the lowest rating, widest
     tolerance and every dielectric of all fitting options
     (:func:`_loosest`). Each option that does not fit adds a
     warning naming the disagreement, ending ``(not used)``; when none fits,
@@ -1152,7 +1137,7 @@ def requirement_from_lookup(
         req = group.requirement_with_part(opt.evidence, defaults)
         lines = [c for c in req.conflicts if c not in base.conflicts]
         if not lines and used:
-            lines = _disagreement(used[0].evidence, opt.evidence)
+            lines = _disagreement(group.ptype, used[0].evidence, opt.evidence)
         if lines:
             warnings += [f"{line} ({opt.evidence.label} not used)" for line in lines]
         else:
@@ -1168,13 +1153,13 @@ def assess(
     *,
     db: PartsDb,
     jlc_search: Callable[[str], Sequence[JlcPart]],
-    jlc_mlcc: Callable[[str, str], Sequence[JlcPart]],
+    jlc_filtered: Callable[[str, str, Tuple[str, str]], Sequence[JlcPart]],
     jlc_part: Callable[[str], Optional[JlcPart]],
     digikey,
     needed: int,
     limit: int = 10,
     search_suppliers: bool = False,
-    requirement: Optional[CapacitorRequirement] = None,
+    requirement: Optional[PartRequirement] = None,
     existing: Optional[ExistingLookup] = None,
 ) -> SearchResult:
     """The candidates for *group*, starting from its existing part.
@@ -1191,7 +1176,7 @@ def assess(
     if lookup is None:
         lookup = ExistingLookup()
         if not group.existing.empty:
-            lookup = read_existing(group.existing, jlc_part=jlc_part,
+            lookup = read_existing(group.existing, group.ptype, jlc_part=jlc_part,
                                    jlc_search=jlc_search, digikey=digikey)
     fitted, currents = requirement_from_lookup(group, lookup, defaults)
     req = requirement if requirement is not None else fitted
@@ -1199,10 +1184,11 @@ def assess(
         return SearchResult([], problem=req.problem(), requirement=req,
                             existing=lookup)
     result = find_candidates(
-        req, db=db, jlc_mlcc=jlc_mlcc, jlc_part=jlc_part, digikey=digikey,
+        req, db=db, jlc_filtered=jlc_filtered, jlc_part=jlc_part, digikey=digikey,
         needed=needed, limit=limit, search_suppliers=search_suppliers,
         currents=currents,
-        manufacturers=parse_manufacturers(defaults.get("cap.manufacturers")),
+        manufacturers=parse_manufacturers(
+            defaults.get(req.ptype.key("manufacturers"))),
     )
     result.requirement = req
     result.existing = lookup

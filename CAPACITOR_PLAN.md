@@ -8,8 +8,8 @@ parts are recorded in a local SQLite database that later runs search first.
 Target workflow: **Schematic Capture → Cockpit → PCB with footprints for
 everything.**
 
-Scope is capacitors only. Resistors and other types follow the same shape once
-this one is working.
+Scope was capacitors first; resistors were added in revision 4 on the same
+code path. Inductors and other types follow the same shape.
 
 ## Decisions already made
 
@@ -113,6 +113,11 @@ Stock and price are not stored here. They stay in the existing 12-hour
 `jlc_part` cache in `~/.kicadtools/lcsc_cache.sqlite`.
 
 ## Build steps
+
+The names in steps 0–6 are as first built. Revision 4 renamed them for the
+shared capacitor/resistor path (`capsearch` → `partsearch`,
+`CapacitorRequirement` → `PartRequirement`, `find_capacitors` →
+`find_parts`, `FOOTPRINTS` → `PartType.footprints`); see Revision 4.
 
 Each step is independently testable; steps 0–4 need no Qt.
 
@@ -368,7 +373,7 @@ stale `MPN`) are each a current-part option:
 
 ### Stock floor
 
-Generic parts (every capacitor, for now) need at least **1000** in stock at
+Generic parts (every capacitor and resistor) need at least **1000** in stock at
 JLCPCB and at DigiKey, and at least the build quantity. Parts below that are
 not candidates; the rejection reason says so. `MIN_STOCK = 1000`.
 
@@ -401,6 +406,41 @@ meeting 16 V (Murata GRM188Z71C475KE21D, DigiKey stock 37, rejected by the
 floor); the popup lists X5R 28, X6S 6, X7S 3, X7R 1. With Dielectric cleared,
 X5R parts from Taiyo Yuden, Samsung, Murata and Yageo are confirmed.
 
+## Revision 4: resistors (2026-10-30)
+
+Resistors use the capacitor code path. Decisions:
+
+- **One code path.** `parttypes.py` holds what differs between the types
+  (`PartType`: value and rating parsers and formats, the rating property,
+  dielectric or none, the JLCPCB category and attribute names, the DigiKey
+  parameter names, footprints, settings prefix). `capsearch.py` became
+  `partsearch.py`; `CapacitorRequirement` became `PartRequirement` with a
+  `kind`; `capacitance_f` / `voltage_min_v` became `nominal` / `rating_min`.
+  The parts database gained a `resistor` table (resistance, power,
+  tolerance) beside `capacitor`; `accept_part` / `find_parts` take the type.
+- **Power floor** (`Power:Min`): stated, else the existing part's rating,
+  else the Description's, else the remembered `res.power_min`, else `any` —
+  no limit, and the chosen part's rating is written (for example `100mW`).
+- **Tolerance:** default `res.tolerance` = 1 %. Every resistor Description on
+  the boards states 1 %; resistor Descriptions are read for tolerance and
+  wattage as well as value and package.
+- **Manufacturers** (`res.manufacturers`): Yageo, Vishay, Panasonic, Viking,
+  Stackpole, KOA, Rohm, Walsin, TE Connectivity, Bourns, Susumu. Chosen from
+  the JLCPCB makers with at least 1000 in stock across eight common 0603
+  values, keeping those DigiKey also sells. UNI-ROYAL (most JLCPCB Basic
+  resistors), Fenghua, FOJAN, HKR and RESI are left out: DigiKey does not
+  sell them.
+- **JLCPCB search:** category `Resistors` / `Chip Resistor - Surface Mount`,
+  keyword `10kΩ`. For 10 kΩ 0603: 254 hits, all 10 kΩ.
+- **Parts tab:** capacitors and resistors in one table; the Voltage column
+  became Rating (volts or watts); Dielectric is empty for a resistor.
+
+Live check (scripted, 24 resistor groups on BarrelJackAdapter, ECG,
+MotorDriver and BuckConverter): every group has at least one candidate. 14
+keep their current part. 10 are searched: the current part does not fit the
+schematic (MotorDriver R3/R6 `102K` with a 100 kΩ part, R17 0603 footprint
+with an 0402 part), or it fails the requirement or the stock floor.
+
 ## TBD (after the main loop is working)
 
 Decisions from the review of the first build (2026-10-29):
@@ -411,7 +451,7 @@ Decisions from the review of the first build (2026-10-29):
 2. **More package options.** A footprint without a chip-size code (radial and
    axial electrolytics, e.g. MotorDriver's 47 µF `CP_Radial_D6.3mm_P2.50mm`)
    reads as not searchable. Add those packages to the requirement, the search
-   and the `FOOTPRINTS` table. Until then they show "not searchable".
+   and the part type's footprint table (`PartType.footprints`). Until then they show "not searchable".
 3. **Manufacturer near-match.** Search candidates are recorded under JLCPCB's
    manufacturer name (`SAMSUNG`), and rejections match on manufacturer + MPN.
    Add near-match logic backed by a manufacturer synonym table in the parts
@@ -440,10 +480,21 @@ Decisions from the review of the first build (2026-10-29):
      confirm only the hit the user picks);
    - scraping the DigiKey product page instead of the API. Check DigiKey's
      terms of use and bot protection before relying on it.
+8. **Zero-ohm resistors** (2026-10-30): a Value of `0` reads as "not a
+   resistance", since a value of zero cannot be matched within 0.1 %. Jumpers
+   need an exact-zero match and no tolerance.
+9. **Resistor composition and TCR** (2026-10-30): thick or thin film and the
+   temperature coefficient are not part of the requirement; a precision
+   divider that needs thin film states it on the schematic today only by
+   MPN.
+10. **Manufacturer lists in the Cockpit** (2026-10-30): `cap.manufacturers`
+    and `res.manufacturers` are settings with built-in values; there is no
+    editor for them yet, so a change means editing the `settings` table in
+    `parts.sqlite`.
 
 Done in the same review: when no part meets a **default** tolerance limit, the
 search drops the limit, the dialog shows an amber note naming it, and the
-chosen part's own tolerance is written (`capsearch.requirement_for`, source
+chosen part's own tolerance is written (`partsearch.requirement_for`, source
 `relaxed`). A stated or edited tolerance is never dropped.
 
 ## Not in this plan
@@ -452,10 +503,13 @@ These overlap with the new path and should be retired or migrated in a follow-up
 plan, so the code has one way to do each thing:
 
 - `substitute.py`'s `SearchSpec` and the LCSC tab's substitute dialog, for
-  capacitors — replaced by `CapacitorRequirement` + the assign dialog.
+  capacitors and resistors — replaced by `PartRequirement` + the assign
+  dialog.
 - The `Alternates` property written by the substitute flow.
 - `partrotation.py`'s `part_rotation` table — candidate to move into
   `supplier_pn` (LCSC rows). Gitignoring `parts.sqlite` keeps it machine-local.
-- The LCSC tab's Resolve for capacitors, which the Parts tab supersedes.
-- Resistors, inductors, and other types.
-- Seeding the database from capacitors already assigned on existing boards.
+- The LCSC tab's Resolve for capacitors and resistors, which the Parts tab
+  supersedes.
+- Inductors and other types (resistors: revision 4).
+- Seeding the database from capacitors and resistors already assigned on
+  existing boards.

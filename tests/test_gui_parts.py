@@ -13,7 +13,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt  # noqa: E402
 
 from kicadtools.assign import assignment_plan  # noqa: E402
-from kicadtools.capsearch import Candidate  # noqa: E402
+from kicadtools.partsearch import Candidate  # noqa: E402
 from kicadtools.gui.parts import (  # noqa: E402
     COL_DIELECTRIC,
     COL_MPN,
@@ -23,7 +23,7 @@ from kicadtools.gui.parts import (  # noqa: E402
     COL_STATUS,
     COL_TOLERANCE,
     COL_VALUE,
-    COL_VOLTAGE,
+    COL_RATING,
     DASH,
     PARTS_COLUMNS,
     STATUS_ASSIGNED,
@@ -35,7 +35,8 @@ from kicadtools.gui.parts import (  # noqa: E402
     requirement_settings,
     sourced_cell,
 )
-from kicadtools.partsdb import CapacitorParams  # noqa: E402
+from kicadtools.partsdb import PartParams  # noqa: E402
+from kicadtools.parttypes import CAPACITOR  # noqa: E402
 from kicadtools.requirement import (  # noqa: E402
     DEFAULT,
     EDITED,
@@ -43,8 +44,8 @@ from kicadtools.requirement import (  # noqa: E402
     SCHEMATIC,
     UNSET,
     Sourced,
-    capacitor_defaults,
-    group_capacitors,
+    part_defaults,
+    group_parts,
 )
 from kicadtools.resolve import iter_bom_part_records  # noqa: E402
 
@@ -52,14 +53,16 @@ DATA = Path(__file__).parent / "data"
 ECG = DATA / "ECG.kicad_sch"
 
 
-def _groups(path=ECG, settings=None):
-    return group_capacitors(iter_bom_part_records(path), capacitor_defaults(settings or {}))
+def _groups(path=ECG, settings=None, kind="capacitor"):
+    """The board's groups of one part type (``None``: every type)."""
+    groups = group_parts(iter_bom_part_records(path), part_defaults(settings or {}))
+    return [g for g in groups if kind is None or g.requirement.kind == kind]
 
 
 def _cand(**kw) -> Candidate:
-    base = dict(
+    base = dict(kind="capacitor",
         mpn="CL10B104KB8NNNC", manufacturer="Samsung", package="0603",
-        params=CapacitorParams(100e-9, 50.0, "X7R", 10.0),
+        params=PartParams(100e-9, 50.0, "X7R", 10.0),
         lcsc="C1591", jlc_library="basic", jlc_preferred=True,
         jlc_stock=100_000, jlc_price=0.002,
         digikey_pn="1276-1000-1-ND", digikey_stock=50_000, source="search",
@@ -81,13 +84,13 @@ def _cell(model, row, col):
 # ---- cell text ------------------------------------------------------------
 
 def test_sourced_cell_markers():
-    assert sourced_cell(Sourced("0603", SCHEMATIC), "package") == "0603"
-    assert sourced_cell(Sourced(16.0, DEFAULT), "voltage") == "16V (default)"
-    assert sourced_cell(Sourced(("X7R", "X5R"), EDITED), "dielectric") == "X7R, X5R (edited)"
-    assert sourced_cell(Sourced(10.0, DEFAULT), "tolerance") == "10% (default)"
-    assert sourced_cell(Sourced(None, UNSET), "voltage") == DASH
-    assert sourced_cell(Sourced((), UNSET), "dielectric") == DASH
-    assert sourced_cell(Sourced(None, SCHEMATIC), "voltage") == "unreadable"
+    assert sourced_cell(Sourced("0603", SCHEMATIC), "package", CAPACITOR) == "0603"
+    assert sourced_cell(Sourced(16.0, DEFAULT), "rating", CAPACITOR) == "16V (default)"
+    assert sourced_cell(Sourced(("X7R", "X5R"), EDITED), "dielectric", CAPACITOR) == "X7R, X5R (edited)"
+    assert sourced_cell(Sourced(10.0, DEFAULT), "tolerance", CAPACITOR) == "10% (default)"
+    assert sourced_cell(Sourced(None, UNSET), "rating", CAPACITOR) == DASH
+    assert sourced_cell(Sourced((), UNSET), "dielectric", CAPACITOR) == DASH
+    assert sourced_cell(Sourced(None, SCHEMATIC), "rating", CAPACITOR) == "unreadable"
 
 
 def test_columns_and_first_row():
@@ -98,7 +101,7 @@ def test_columns_and_first_row():
     assert model.rowCount() == 4
     assert _cell(model, 0, COL_VALUE) == "100nF"
     assert _cell(model, 0, COL_PACKAGE) == "0603"            # from the footprint
-    assert _cell(model, 0, COL_VOLTAGE) == DASH              # unset
+    assert _cell(model, 0, COL_RATING) == DASH              # unset
     assert _cell(model, 0, COL_DIELECTRIC) == "X7R (default)"
     assert _cell(model, 0, COL_TOLERANCE) == "10% (default)"
     assert _cell(model, 0, COL_QTY) == "7"
@@ -113,7 +116,7 @@ def test_columns_and_first_row():
 def test_remembered_voltage_shows_default_marker():
     model = PartsTableModel()
     model.load(_groups(settings={"cap.voltage_min": "25V"}))
-    assert _cell(model, 0, COL_VOLTAGE) == "25V (default)"
+    assert _cell(model, 0, COL_RATING) == "25V (default)"
 
 
 def test_unassigned_rows_tinted():
@@ -126,13 +129,13 @@ def test_unassigned_rows_tinted():
 def test_queue_changes_status_and_requirement():
     model = _model_with_ecg()
     group = model.group_at(0)
-    req = group.requirement.edited(voltage_min_v=16.0)
+    req = group.requirement.edited(rating_min=16.0)
     cand = _cand()
     model.queue(0, req, cand, assignment_plan(group, req, cand))
     assert model.status(0) == STATUS_QUEUED
     assert _cell(model, 0, COL_STATUS) == STATUS_QUEUED
     assert _cell(model, 0, COL_MPN) == "CL10B104KB8NNNC"
-    assert _cell(model, 0, COL_VOLTAGE) == "16V (edited)"
+    assert _cell(model, 0, COL_RATING) == "16V (edited)"
     assert model.data(model.index(0, 0), Qt.BackgroundRole) is None
     assert model.status(1) == STATUS_UNASSIGNED
     assert model.summary() == {STATUS_ASSIGNED: 0, STATUS_QUEUED: 1, STATUS_UNASSIGNED: 3,
@@ -142,7 +145,7 @@ def test_queue_changes_status_and_requirement():
 def test_accepted_edits_shape_keeps_none_values():
     model = _model_with_ecg()
     group = model.group_at(0)
-    req = group.requirement.edited(voltage_min_v=16.0)
+    req = group.requirement.edited(rating_min=16.0)
     cand = _cand()
     plan = assignment_plan(group, req, cand)
     # A removal, as for an alias spelling of a part-number field.
@@ -169,7 +172,7 @@ def test_accepted_edits_merge_rows():
     model = _model_with_ecg()
     for row in (0, 1):
         group = model.group_at(row)
-        req = group.requirement.edited(voltage_min_v=50.0)
+        req = group.requirement.edited(rating_min=50.0)
         cand = _cand(mpn=f"MPN{row}")
         model.queue(row, req, cand, assignment_plan(group, req, cand))
     edits = model.accepted_edits()
@@ -179,7 +182,7 @@ def test_accepted_edits_merge_rows():
 def test_load_clears_queue():
     model = _model_with_ecg()
     group = model.group_at(0)
-    req = group.requirement.edited(voltage_min_v=16.0)
+    req = group.requirement.edited(rating_min=16.0)
     model.queue(0, req, _cand(), assignment_plan(group, req, _cand()))
     model.load(_groups())
     assert model.status(0) == STATUS_UNASSIGNED
@@ -198,7 +201,7 @@ def test_merge_plans_later_wins():
 
 def test_requirement_settings_only_default_and_edited():
     group = _groups()[0]       # 100 nF, footprint (package from schematic)
-    req = group.requirement.edited(voltage_min_v=16.0)
+    req = group.requirement.edited(rating_min=16.0)
     assert requirement_settings(req) == {
         "cap.voltage_min": "16V",
         "cap.dielectric.mid": "X7R",
@@ -213,7 +216,7 @@ def test_requirement_settings_only_default_and_edited():
 
 def test_requirement_settings_ignore_a_relaxed_tolerance():
     from dataclasses import replace
-    req = _groups()[0].requirement.edited(voltage_min_v=16.0)
+    req = _groups()[0].requirement.edited(rating_min=16.0)
     req = replace(req, tolerance_max_pct=Sourced(20.0, RELAXED))
     assert "cap.tolerance.class2" not in requirement_settings(req)
 
@@ -253,11 +256,12 @@ def window(tmp_path, monkeypatch):
 def test_main_window_parts_tab_round_trip(window, tmp_path):
     win, board = window
     model = win.parts_model
-    assert model.rowCount() == 4
-    assert "4 capacitor groups, 4 unassigned" in win.statusBar().currentMessage()
+    # ECG: 4 capacitor groups and 9 resistor groups.
+    assert model.rowCount() == 13
+    assert "13 part groups, 13 unassigned" in win.statusBar().currentMessage()
 
     group = model.group_at(0)
-    req = group.requirement.edited(voltage_min_v=16.0)
+    req = group.requirement.edited(rating_min=16.0)
     cand = _cand()
     win._accept_candidate(0, group, req, cand)
     assert model.status(0) == STATUS_QUEUED
@@ -270,13 +274,13 @@ def test_main_window_parts_tab_round_trip(window, tmp_path):
 
     assert model.status(0) == STATUS_ASSIGNED
     assert _cell(model, 0, COL_MPN) == "CL10B104KB8NNNC"
-    assert _cell(model, 0, COL_VOLTAGE) == "16V"          # now stated on the schematic
+    assert _cell(model, 0, COL_RATING) == "16V"          # now stated on the schematic
     assert not win.isWindowModified()
     assert model.status(1) == STATUS_UNASSIGNED
     assert (tmp_path / "parts.sqlite").exists()
     # The usage rows name the board by its absolute path (outside ~/Code/Boards).
-    hits = win._parts_db.find_capacitors(
-        capacitance_f=100e-9, package="0603", voltage_min_v=16.0,
+    hits = win._parts_db.find_parts(kind="capacitor",
+        nominal=100e-9, package="0603", rating_min=16.0,
         dielectrics=("X7R",), tolerance_max_pct=10.0,
     )
     assert [h.mpn for h in hits] == ["CL10B104KB8NNNC"]
@@ -290,36 +294,36 @@ import time  # noqa: E402
 
 from PySide6.QtCore import QObject, QThread, Signal  # noqa: E402
 
-from kicadtools.capsearch import SearchResult  # noqa: E402
+from kicadtools.partsearch import SearchResult  # noqa: E402
 from kicadtools.requirement import (  # noqa: E402
-    CapacitorRequirement,
+    PartRequirement,
     Member,
     RequirementGroup,
 )
 
 
 def test_sourced_cell_package_from_non_chip_footprint():
-    assert sourced_cell(Sourced(None, SCHEMATIC), "package") == "not a chip size"
+    assert sourced_cell(Sourced(None, SCHEMATIC), "package", CAPACITOR) == "not a chip size"
 
 
 def test_set_defaults_refreshes_unqueued_rows_only():
     model = _model_with_ecg()
     group = model.group_at(0)
-    req = group.requirement.edited(voltage_min_v=16.0)
+    req = group.requirement.edited(rating_min=16.0)
     model.queue(0, req, _cand(), assignment_plan(group, req, _cand()))
-    model.set_defaults(capacitor_defaults({"cap.voltage_min": "25V",
+    model.set_defaults(part_defaults({"cap.voltage_min": "25V",
                                            "cap.dielectric.small": "C0G"}))
-    assert _cell(model, 0, COL_VOLTAGE) == "16V (edited)"      # queued: as accepted
-    assert _cell(model, 1, COL_VOLTAGE) == "25V (default)"
+    assert _cell(model, 0, COL_RATING) == "16V (edited)"      # queued: as accepted
+    assert _cell(model, 1, COL_RATING) == "25V (default)"
     assert _cell(model, 1, COL_DIELECTRIC) == "C0G (default)"
-    assert model.group_at(1).requirement.voltage_min_v == Sourced(25.0, DEFAULT)
+    assert model.group_at(1).requirement.rating_min == Sourced(25.0, DEFAULT)
 
 
 def test_shared_uuid_gives_one_plan_entry():
     """A subsheet symbol instantiated twice: two references, one uuid."""
-    req = CapacitorRequirement(
-        value_text="100nF", capacitance_f=100e-9,
-        package=Sourced("0603", DEFAULT), voltage_min_v=Sourced(16.0, EDITED),
+    req = PartRequirement(kind="capacitor",
+        value_text="100nF", nominal=100e-9,
+        package=Sourced("0603", DEFAULT), rating_min=Sourced(16.0, EDITED),
         dielectrics=Sourced(("X7R",), DEFAULT), tolerance_max_pct=Sourced(10.0, DEFAULT),
     )
     src = Path("sub.kicad_sch")
@@ -356,7 +360,7 @@ class _GatedWorker(QObject):
     def run(self):
         type(self).run_threads.append(threading.get_ident())
         type(self).gate.wait(5)
-        v = self.req.voltage_min_v.value
+        v = self.req.rating_min.value
         mpn = f"V{v:g}" if v is not None else "Vnone"
         self.found.emit(SearchResult([_cand(mpn=mpn)]))
         QThread.currentThread().quit()
@@ -391,7 +395,7 @@ def test_window_search_off_gui_thread_busy_and_stale(window, gated):
     win, _board = window
     infos = gated
     group = win.parts_model.group_at(0)
-    dialog = AssignDialog(group, group.requirement.edited(voltage_min_v=16.0), 1, win)
+    dialog = AssignDialog(group, group.requirement.edited(rating_min=16.0), 1, win)
     win._assign_dialog = dialog
     dialog.search_requested.connect(win._request_candidates)
 
@@ -403,7 +407,7 @@ def test_window_search_off_gui_thread_busy_and_stale(window, gated):
     assert len(infos) == 2
 
     # A second request while the first runs is kept; the first's outcome is stale.
-    dialog._fields["voltage"].setText("25V")
+    dialog._fields["rating"].setText("25V")
     assert dialog.request_search()
     assert win._search_next is not None
     _GatedWorker.gate.set()
@@ -412,7 +416,7 @@ def test_window_search_off_gui_thread_busy_and_stale(window, gated):
     assert len(_GatedWorker.run_threads) == 2
     # The first request sends no requirement; both name the dialog's group.
     assert _GatedWorker.inits[0]["requirement"] is None
-    assert _GatedWorker.inits[1]["requirement"].voltage_min_v.value == 25.0
+    assert _GatedWorker.inits[1]["requirement"].rating_min.value == 25.0
     assert all(i["group"] is group for i in _GatedWorker.inits)
     assert threading.get_ident() not in _GatedWorker.run_threads
 
@@ -422,7 +426,7 @@ def test_window_drops_result_for_closed_dialog(window, gated):
 
     win, _board = window
     group = win.parts_model.group_at(0)
-    dialog = AssignDialog(group, group.requirement.edited(voltage_min_v=16.0), 1, win)
+    dialog = AssignDialog(group, group.requirement.edited(rating_min=16.0), 1, win)
     win._assign_dialog = dialog
     dialog.search_requested.connect(win._request_candidates)
     assert dialog.request_search()
@@ -443,7 +447,7 @@ def test_window_assign_group_end_to_end(window, gated, monkeypatch):
     _GatedWorker.gate.set()
 
     def fake_exec(dialog):
-        dialog._fields["voltage"].setText("16V")
+        dialog._fields["rating"].setText("16V")
         dialog.request_search(False)
         deadline = time.monotonic() + 10
         while dialog.chosen() is None and time.monotonic() < deadline:
@@ -458,7 +462,7 @@ def test_window_assign_group_end_to_end(window, gated, monkeypatch):
     assert win.parts_model.status(0) == STATUS_QUEUED
     assert _cell(win.parts_model, 0, COL_MPN) == "V16"
     assert win._parts_db.get_setting("cap.voltage_min") == "16V"
-    assert _cell(win.parts_model, 1, COL_VOLTAGE) == "16V (default)"
+    assert _cell(win.parts_model, 1, COL_RATING) == "16V (default)"
     edits = win._merged_edits()
     props = next(iter(edits[board_path(win)].values()))
     assert props["Voltage:Min"] == "16V"
@@ -480,7 +484,7 @@ def test_footprint_without_chip_size_reads_not_searchable():
     from kicadtools.gui.parts import STATUS_NOT_SEARCHABLE, PartsTableModel
     records = iter_bom_part_records(Path(__file__).parent / "data" / "MotorDriver.kicad_sch")
     model = PartsTableModel()
-    model.load(group_capacitors(records, capacitor_defaults({"cap.voltage_min": "16V"})))
+    model.load(group_parts(records, part_defaults({"cap.voltage_min": "16V"})))
     radial = [r for r in range(model.rowCount())
               if "CP_Radial" in model.group_at(r).requirement.footprint]
     assert radial
@@ -492,7 +496,7 @@ def test_footprint_without_chip_size_reads_not_searchable():
 
 from dataclasses import replace as _replace  # noqa: E402
 
-from kicadtools.capsearch import CurrentOption, ExistingLookup  # noqa: E402
+from kicadtools.partsearch import CurrentOption, ExistingLookup  # noqa: E402
 from kicadtools.evidence import PartEvidence  # noqa: E402
 from kicadtools.gui.parts import (  # noqa: E402
     COL_CURRENT,
@@ -504,14 +508,14 @@ from kicadtools.gui.parts import (  # noqa: E402
 from kicadtools.requirement import DESCRIPTION, PART  # noqa: E402
 
 
-def _rev2_req(**kw) -> CapacitorRequirement:
-    base = dict(
-        value_text="100nF", capacitance_f=100e-9,
-        package=Sourced("0603", DEFAULT), voltage_min_v=Sourced(16.0, DEFAULT),
+def _rev2_req(**kw) -> PartRequirement:
+    base = dict(kind="capacitor",
+        value_text="100nF", nominal=100e-9,
+        package=Sourced("0603", DEFAULT), rating_min=Sourced(16.0, DEFAULT),
         dielectrics=Sourced(("X7R",), DEFAULT), tolerance_max_pct=Sourced(10.0, DEFAULT),
     )
     base.update(kw)
-    return CapacitorRequirement(**base)
+    return PartRequirement(**base)
 
 
 def _rev2_group(req, props=None) -> RequirementGroup:
@@ -520,17 +524,17 @@ def _rev2_group(req, props=None) -> RequirementGroup:
 
 
 def test_sourced_cell_part_and_description_markers():
-    assert sourced_cell(Sourced(25.0, PART), "voltage") == "25V (part)"
-    assert sourced_cell(Sourced(("X5R", "X7R"), DESCRIPTION), "dielectric") == \
+    assert sourced_cell(Sourced(25.0, PART), "rating", CAPACITOR) == "25V (part)"
+    assert sourced_cell(Sourced(("X5R", "X7R"), DESCRIPTION), "dielectric", CAPACITOR) == \
         "X5R, X7R (description)"
-    assert sourced_cell(Sourced("0805", DESCRIPTION), "package") == "0805 (description)"
+    assert sourced_cell(Sourced("0805", DESCRIPTION), "package", CAPACITOR) == "0805 (description)"
 
 
 def test_value_cell_from_description():
     assert value_cell(_rev2_req()) == "100nF"
-    req = _rev2_req(value_text="", capacitance_f=10e-6, capacitance_source=DESCRIPTION)
+    req = _rev2_req(value_text="", nominal=10e-6, nominal_source=DESCRIPTION)
     assert value_cell(req) == "10uF (description)"
-    assert value_cell(_rev2_req(value_text="", capacitance_f=None)) == DASH
+    assert value_cell(_rev2_req(value_text="", nominal=None)) == DASH
 
 
 def test_current_part_column():
@@ -577,18 +581,18 @@ def test_conflict_status_tooltip_and_summary():
 
 def test_set_defaults_keeps_description_evidence(tmp_path):
     from kicadtools.intent import CapacitorIntent
-    from kicadtools.requirement import capacitor_requirement
+    from kicadtools.requirement import part_requirement
     from kicadtools.units import parse_cap_description
 
     intent = CapacitorIntent(reference="C1", dnp=False, in_bom=True, value="10uF")
     props = {"Value": "10uF", "Description": "10uF, 25V, X5R, 805 package"}
-    req = capacitor_requirement(intent, "", capacitor_defaults({}),
+    req = part_requirement(intent, "", part_defaults({}),
                                 description=parse_cap_description(props["Description"]))
     group = RequirementGroup(req, [Member("C1", Path("b.kicad_sch"), "u-1", props, intent)])
     model = PartsTableModel([group])
-    model.set_defaults(capacitor_defaults({"cap.voltage_min": "50V"}))
+    model.set_defaults(part_defaults({"cap.voltage_min": "50V"}))
     r = model.group_at(0).requirement
-    assert r.voltage_min_v == Sourced(25.0, DESCRIPTION)
+    assert r.rating_min == Sourced(25.0, DESCRIPTION)
     assert r.package == Sourced("0805", DESCRIPTION)
     assert _cell(model, 0, COL_PACKAGE) == "0805 (description)"
 
@@ -596,7 +600,7 @@ def test_set_defaults_keeps_description_evidence(tmp_path):
 def test_requirement_settings_ignore_part_and_description():
     req = _rev2_req(
         package=Sourced("0805", DESCRIPTION),
-        voltage_min_v=Sourced(25.0, PART),
+        rating_min=Sourced(25.0, PART),
         dielectrics=Sourced(("X5R", "X7R"), PART),
         tolerance_max_pct=Sourced(10.0, PART),
     )
@@ -619,7 +623,7 @@ def test_worker_calls_assess(tmp_path, monkeypatch):
 
     monkeypatch.setattr(parts, "assess", fake_assess)
     group = _rev2_group(_rev2_req())
-    req = _rev2_req(voltage_min_v=Sourced(50.0, EDITED))
+    req = _rev2_req(rating_min=Sourced(50.0, EDITED))
     worker = CandidateWorker(group=group, defaults={"cap.package": "0805"},
                              requirement=req, needed=30,
                              db_path=tmp_path / "parts.sqlite",
@@ -671,12 +675,12 @@ def test_window_passes_existing_lookup_to_later_requests(window, gated):
     dialog.search_requested.connect(win._request_candidates)
     lookup = ExistingLookup(notes=["1276-1000-1-ND at DigiKey"])
     dialog.show_result(SearchResult([], existing=lookup), None)
-    dialog._fields["voltage"].setText("25V")
+    dialog._fields["rating"].setText("25V")
     assert dialog.request_search()
     _GatedWorker.gate.set()
     _wait_idle(win)
     assert _GatedWorker.inits[-1]["existing"] is lookup
-    assert _GatedWorker.inits[-1]["requirement"].voltage_min_v.value == 25.0
+    assert _GatedWorker.inits[-1]["requirement"].rating_min.value == 25.0
 
 
 def test_window_status_bar_counts_conflicts(window):
@@ -704,11 +708,11 @@ def test_conflict_outranks_assigned():
 
 def test_value_cell_library_style_shows_capacitance():
     from kicadtools.intent import CapacitorIntent
-    from kicadtools.requirement import capacitor_requirement
+    from kicadtools.requirement import part_requirement
 
     def cell(value):
         intent = CapacitorIntent(reference="C1", dnp=False, in_bom=True, value=value)
-        return value_cell(capacitor_requirement(intent, "", capacitor_defaults({})))
+        return value_cell(part_requirement(intent, "", part_defaults({})))
 
     assert cell("C_4p7U") == "C_4p7U (4.7uF)"
     assert cell("C_P1U") == "C_P1U (100nF)"
@@ -719,11 +723,11 @@ def test_value_cell_library_style_shows_capacitance():
 
 def _ecg_part_group():
     from kicadtools.intent import CapacitorIntent
-    from kicadtools.requirement import capacitor_requirement
+    from kicadtools.requirement import part_requirement
 
     intent = CapacitorIntent(reference="C1", dnp=False, in_bom=True, value="100nF")
     props = {"Value": "100nF", "DigiKeyPN": "1276-1000-1-ND"}
-    req = capacitor_requirement(intent, "", capacitor_defaults({}))
+    req = part_requirement(intent, "", part_defaults({}))
     return RequirementGroup(req, [Member("C1", Path("b.kicad_sch"), "u-1", props, intent)])
 
 
@@ -731,25 +735,25 @@ def test_record_lookup_keeps_evidence_and_warnings_through_set_defaults():
     model = PartsTableModel([_ecg_part_group()])
     assert model.lookup_at(0) is None
     evidence = PartEvidence(label="current part 1276-1000-1-ND (DigiKey)",
-                            capacitance_f=100e-9, voltage_v=50.0,
+                            nominal=100e-9, rating=50.0,
                             dielectrics=("X7R",), tolerance_pct=10.0, package="0603")
     lookup = ExistingLookup(options=[CurrentOption(("DigiKeyPN",), evidence)])
-    model.record_lookup(0, lookup, capacitor_defaults({}))
+    model.record_lookup(0, lookup, part_defaults({}))
     assert model.lookup_at(0) is lookup
-    assert _cell(model, 0, COL_VOLTAGE) == "50V (part)"
+    assert _cell(model, 0, COL_RATING) == "50V (part)"
     # A later settings change keeps the part's evidence.
-    model.set_defaults(capacitor_defaults({"cap.voltage_min": "16V"}))
-    assert _cell(model, 0, COL_VOLTAGE) == "50V (part)"
+    model.set_defaults(part_defaults({"cap.voltage_min": "16V"}))
+    assert _cell(model, 0, COL_RATING) == "50V (part)"
 
     # a second part of another capacitance is not used: a warning, no conflict
-    other = PartEvidence(label="current part B (DigiKey)", capacitance_f=10e-6)
+    other = PartEvidence(label="current part B (DigiKey)", nominal=10e-6)
     model.record_lookup(0, ExistingLookup(options=[
         CurrentOption(("DigiKeyPN",), evidence), CurrentOption(("MPN",), other)]),
-        capacitor_defaults({}))
-    model.set_defaults(capacitor_defaults({}))
+        part_defaults({}))
+    model.set_defaults(part_defaults({}))
     assert model.status(0) == STATUS_UNASSIGNED
     assert len(model.group_at(0).requirement.warnings) == 1
-    assert _cell(model, 0, COL_VOLTAGE) == "50V (part)"
+    assert _cell(model, 0, COL_RATING) == "50V (part)"
     # A reload clears recorded lookups.
     model.load([_ecg_part_group()])
     assert model.lookup_at(0) is None

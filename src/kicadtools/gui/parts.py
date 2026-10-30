@@ -1,9 +1,10 @@
 """
-Parts tab: one row per capacitor requirement group, plus the background worker
-that searches for candidate parts for one group.
+Parts tab: one row per capacitor or resistor requirement group, plus the
+background worker that searches for candidate parts for one group.
 
-Each row shows the group's requirement (Value, Package, Voltage, Dielectric,
-Tolerance), its quantity and references, the part number already on the
+Each row shows the group's requirement (Value, Package, Rating — the voltage
+floor of a capacitor, the power floor of a resistor —, Dielectric for a
+capacitor, Tolerance), its quantity and references, the part number already on the
 schematic, its status and the chosen MPN. A requirement cell whose value came
 from a default, an edit, the existing part or the Description is marked
 ``(default)`` / ``(edited)`` / ``(part)`` / ``(description)``; a field with no
@@ -11,7 +12,7 @@ value shows a dash.
 
 Status is ``queued`` once a candidate has been accepted for the group this
 session (the write plan is held in the model until File > Save), ``conflict``
-when two sources state different capacitances or packages or the part-number
+when two sources state different values or packages or the part-number
 fields name different parts, ``assigned`` when every member already has its
 four part numbers and a footprint on the schematic, ``not searchable`` for a
 footprint with no chip size, else ``unassigned``. A conflict ranks above
@@ -26,7 +27,7 @@ and warnings after the dialog closes, :meth:`PartsTableModel.set_defaults`
 keeps them, and a reopened dialog reuses the lookup.
 
 :class:`CandidateWorker` opens its own parts-database and LCSC-cache
-connections on the worker thread and runs :func:`kicadtools.capsearch.assess`
+connections on the worker thread and runs :func:`kicadtools.partsearch.assess`
 there (existing-part lookup, then the candidate search).
 """
 from __future__ import annotations
@@ -38,9 +39,10 @@ from typing import Dict, List, Mapping, Optional, Sequence
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor
 
-from kicadtools.capsearch import Candidate, ExistingLookup, assess, requirement_from_lookup
 from kicadtools.partnum import extract_part_numbers
 from kicadtools.partsdb import PartsDb
+from kicadtools.partsearch import Candidate, ExistingLookup, assess, requirement_from_lookup
+from kicadtools.parttypes import PartType
 from kicadtools.requirement import (
     ANY,
     DEFAULT,
@@ -50,21 +52,21 @@ from kicadtools.requirement import (
     RELAXED,
     SCHEMATIC,
     UNSET,
-    CapacitorRequirement,
+    PartRequirement,
     RequirementGroup,
     Sourced,
     dielectric_band,
-    tolerance_class,
+    tolerance_key,
 )
 from kicadtools.resolve import Cache, cached_jlcpcb_part
-from kicadtools.suppliers import DigiKeyClient, jlcpcb_mlcc_search, jlcpcb_search
-from kicadtools.units import fmt_farads, fmt_percent, fmt_volts
+from kicadtools.suppliers import DigiKeyClient, jlcpcb_category_search, jlcpcb_search
+from kicadtools.units import fmt_percent
 
-PARTS_COLUMNS = ["Value", "Package", "Voltage", "Dielectric", "Tolerance", "Qty",
+PARTS_COLUMNS = ["Value", "Package", "Rating", "Dielectric", "Tolerance", "Qty",
                  "References", "Current part", "Status", "Chosen MPN"]
 COL_VALUE = PARTS_COLUMNS.index("Value")
 COL_PACKAGE = PARTS_COLUMNS.index("Package")
-COL_VOLTAGE = PARTS_COLUMNS.index("Voltage")
+COL_RATING = PARTS_COLUMNS.index("Rating")
 COL_DIELECTRIC = PARTS_COLUMNS.index("Dielectric")
 COL_TOLERANCE = PARTS_COLUMNS.index("Tolerance")
 COL_QTY = PARTS_COLUMNS.index("Qty")
@@ -76,7 +78,7 @@ COL_MPN = PARTS_COLUMNS.index("Chosen MPN")
 STATUS_ASSIGNED = "assigned"
 STATUS_QUEUED = "queued"
 STATUS_UNASSIGNED = "unassigned"
-# Two sources state different capacitances or packages (CAPACITOR_PLAN.md,
+# Two sources state different values or packages (CAPACITOR_PLAN.md,
 # Revision 2). Fixed on the schematic for now.
 STATUS_CONFLICT = "conflict"
 # A footprint with no chip-size code (radial or axial electrolytic). Those
@@ -108,11 +110,12 @@ Plan = Dict[Path, Dict[str, Dict[str, Optional[str]]]]
 # Cell text — pure, so it is testable without a window.
 # --------------------------------------------------------------------------- #
 
-def _value_text(field: Sourced, kind: str) -> str:
-    """The bare value of a requirement field: ``"16V"``, ``"X7R, X5R"``."""
+def _value_text(field: Sourced, kind: str, ptype: PartType) -> str:
+    """The bare value of a requirement field: ``"16V"``, ``"100mW"``,
+    ``"X7R, X5R"``."""
     v = field.value
-    if kind == "voltage":
-        return fmt_volts(v)
+    if kind == "rating":
+        return ptype.fmt_rating(v)
     if kind == "tolerance":
         return fmt_percent(v)
     if kind == "dielectric":
@@ -120,38 +123,42 @@ def _value_text(field: Sourced, kind: str) -> str:
     return str(v)
 
 
-def sourced_cell(field: Sourced, kind: str) -> str:
-    """The cell text for a requirement field. *kind* is ``"package"``,
-    ``"voltage"``, ``"dielectric"`` or ``"tolerance"``. A value from a default,
+def sourced_cell(field: Sourced, kind: str, ptype: PartType) -> str:
+    """The cell text for a requirement field of a *ptype* part. *kind* is
+    ``"package"``, ``"rating"``, ``"dielectric"`` or ``"tolerance"``. A
+    dielectric cell of a type without one is empty. A value from a default,
     an edit, the existing part or the Description is suffixed ``(default)`` /
     ``(edited)`` / ``(part)`` / ``(description)``; an unset field is a
     dash; a value stated on the schematic that does not parse reads
     ``unreadable`` (``not a chip size`` for a package from a footprint such as
     a radial electrolytic)."""
+    if kind == "dielectric" and not ptype.has_dielectric:
+        return ""
     if field.source == ANY:
         return "any"
     if field.source == UNSET or (field.value in (None, "", ()) and field.source != SCHEMATIC):
         return DASH
     if field.value in (None, "", ()):
         return "not a chip size" if kind == "package" else "unreadable"
-    text = _value_text(field, kind)
+    text = _value_text(field, kind, ptype)
     marker = _SOURCE_MARKERS.get(field.source)
     return f"{text} ({marker})" if marker else text
 
 
-def value_cell(req: CapacitorRequirement) -> str:
+def value_cell(req: PartRequirement) -> str:
     """The Value cell: the symbol's Value as written, followed by the parsed
-    capacitance for a library-style Value (``C_4p7U (4.7uF)``); when the symbol
-    has no Value, the capacitance from the Description or the existing part
-    with its marker; else a dash."""
+    value for a library-style Value (``C_4p7U (4.7uF)``, ``R_49p9K
+    (49.9k)``); when the symbol has no Value, the value from the Description
+    or the existing part with its marker; else a dash."""
+    t = req.ptype
     if req.value_text:
-        library = req.value_text.strip().upper().startswith(("C_", "C-"))
-        if library and req.capacitance_f and req.capacitance_source == SCHEMATIC:
-            return f"{req.value_text} ({fmt_farads(req.capacitance_f)})"
+        if (t.is_library_value(req.value_text) and req.nominal
+                and req.nominal_source == SCHEMATIC):
+            return f"{req.value_text} ({t.fmt_nominal(req.nominal)})"
         return req.value_text
-    marker = _SOURCE_MARKERS.get(req.capacitance_source)
-    if req.capacitance_f and marker:
-        return f"{fmt_farads(req.capacitance_f)} ({marker})"
+    marker = _SOURCE_MARKERS.get(req.nominal_source)
+    if req.nominal and marker:
+        return f"{t.fmt_nominal(req.nominal)} ({marker})"
     return DASH
 
 
@@ -163,29 +170,30 @@ def current_part_cell(group: RequirementGroup) -> str:
     return existing.mpn or existing.digikey_pn or DASH
 
 
-def requirement_settings(req: CapacitorRequirement) -> Dict[str, str]:
+def requirement_settings(req: PartRequirement) -> Dict[str, str]:
     """The settings a requirement updates on accept: each field whose value
-    came from a default or an edit, under its ``cap.*`` key. Values from the
-    existing part, the Description or a dropped tolerance limit are written to
-    the symbols but never become remembered settings. Dielectrics are
-    stored under the capacitance band's key and tolerance under the
-    dielectric class's key, as :func:`kicadtools.requirement.capacitor_requirement`
-    reads them."""
+    came from a default or an edit, under its ``cap.*`` / ``res.*`` key.
+    Values from the existing part, the Description or a dropped tolerance
+    limit are written to the symbols but never become remembered settings. A
+    capacitor's dielectrics are stored under the capacitance band's key and
+    its tolerance under the dielectric class's key, as
+    :func:`kicadtools.requirement.part_requirement` reads them."""
+    t = req.ptype
     out: Dict[str, str] = {}
 
     def written(f: Sourced) -> bool:
         return f.source in (DEFAULT, EDITED) and f.value not in (None, "", ())
 
     if written(req.package):
-        out["cap.package"] = str(req.package.value)
-    if written(req.voltage_min_v):
-        out["cap.voltage_min"] = fmt_volts(req.voltage_min_v.value)
-    if written(req.dielectrics) and req.capacitance_f:
-        out["cap.dielectric." + dielectric_band(req.capacitance_f)] = ", ".join(
+        out[t.key("package")] = str(req.package.value)
+    if written(req.rating_min):
+        out[t.key(t.rating_setting)] = t.fmt_rating(req.rating_min.value)
+    if t.has_dielectric and written(req.dielectrics) and req.nominal:
+        out[t.key("dielectric." + dielectric_band(req.nominal))] = ", ".join(
             req.dielectrics.value
         )
     if written(req.tolerance_max_pct):
-        key = "cap.tolerance." + tolerance_class(req.dielectrics.value or ())
+        key = tolerance_key(t, req.dielectrics.value or ())
         out[key] = fmt_percent(req.tolerance_max_pct.value)
     return out
 
@@ -219,13 +227,13 @@ def merge_plans(plans: Sequence[Plan]) -> Plan:
 @dataclass
 class _Queued:
     """An accepted candidate for one group, waiting for File > Save."""
-    requirement: CapacitorRequirement
+    requirement: PartRequirement
     candidate: Candidate
     plan: Plan
 
 
 class PartsTableModel(QAbstractTableModel):
-    """Value · Package · Voltage · Dielectric · Tolerance · Qty · References ·
+    """Value · Package · Rating · Dielectric · Tolerance · Qty · References ·
     Current part · Status · Chosen MPN, one row per :class:`RequirementGroup`."""
 
     def __init__(self, groups: Optional[Sequence[RequirementGroup]] = None):
@@ -284,7 +292,7 @@ class PartsTableModel(QAbstractTableModel):
         return list(self._groups)
 
     # ---- queue -------------------------------------------------------
-    def queue(self, row: int, req: CapacitorRequirement, candidate: Candidate,
+    def queue(self, row: int, req: PartRequirement, candidate: Candidate,
               plan: Plan) -> None:
         """Record *candidate* as the choice for *row*, with the requirement as
         accepted and the write plan from :func:`kicadtools.assign.assignment_plan`.
@@ -295,7 +303,7 @@ class PartsTableModel(QAbstractTableModel):
     def is_queued(self, row: int) -> bool:
         return row in self._queued
 
-    def requirement_at(self, row: int) -> CapacitorRequirement:
+    def requirement_at(self, row: int) -> PartRequirement:
         """The requirement as accepted for a queued row, else the group's."""
         q = self._queued.get(row)
         return q.requirement if q else self._groups[row].requirement
@@ -348,8 +356,12 @@ class PartsTableModel(QAbstractTableModel):
         return len(PARTS_COLUMNS)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+        if orientation != Qt.Horizontal:
+            return None
+        if role == Qt.DisplayRole:
             return PARTS_COLUMNS[section]
+        if role == Qt.ToolTipRole and section == COL_RATING:
+            return "Voltage:Min for a capacitor, Power:Min for a resistor"
         return None
 
     def flags(self, index: QModelIndex):
@@ -362,14 +374,15 @@ class PartsTableModel(QAbstractTableModel):
         req = self.requirement_at(row)
         if col == COL_VALUE:
             return value_cell(req)
+        t = req.ptype
         if col == COL_PACKAGE:
-            return sourced_cell(req.package, "package")
-        if col == COL_VOLTAGE:
-            return sourced_cell(req.voltage_min_v, "voltage")
+            return sourced_cell(req.package, "package", t)
+        if col == COL_RATING:
+            return sourced_cell(req.rating_min, "rating", t)
         if col == COL_DIELECTRIC:
-            return sourced_cell(req.dielectrics, "dielectric")
+            return sourced_cell(req.dielectrics, "dielectric", t)
         if col == COL_TOLERANCE:
-            return sourced_cell(req.tolerance_max_pct, "tolerance")
+            return sourced_cell(req.tolerance_max_pct, "tolerance", t)
         if col == COL_QTY:
             return str(group.quantity)
         if col == COL_REFERENCES:
@@ -424,7 +437,7 @@ class PartsTableModel(QAbstractTableModel):
 # --------------------------------------------------------------------------- #
 
 class CandidateWorker(QObject):
-    """Runs :func:`kicadtools.capsearch.assess` for one group off the GUI
+    """Runs :func:`kicadtools.partsearch.assess` for one group off the GUI
     thread; emits ``found`` (a ``SearchResult``) or ``failed``.
 
     *requirement* is the dialog's requirement, or ``None`` for the first
@@ -442,7 +455,7 @@ class CandidateWorker(QObject):
         *,
         group: RequirementGroup,
         defaults: Mapping[str, str],
-        requirement: Optional[CapacitorRequirement],
+        requirement: Optional[PartRequirement],
         needed: int,
         db_path: Path,
         search_suppliers: bool = False,
@@ -472,7 +485,7 @@ class CandidateWorker(QObject):
                 self._defaults,
                 db=db,
                 jlc_search=jlcpcb_search,
-                jlc_mlcc=jlcpcb_mlcc_search,
+                jlc_filtered=jlcpcb_category_search,
                 jlc_part=lambda code: cached_jlcpcb_part(code, cache),
                 digikey=DigiKeyClient(),
                 needed=self._needed,

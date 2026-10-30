@@ -12,9 +12,12 @@ every machine), overridable with ``KICADTOOLS_PARTS_DB``. The file is listed in
 Tables (see ``CAPACITOR_PLAN.md``):
 
 - ``meta`` — ``schema_version``, stamped at creation and checked on open;
-- ``settings`` — last-used defaults (``cap.package``, ``cap.voltage_min`` …);
-- ``part`` — one row per (manufacturer, MPN), with its decision status;
+- ``settings`` — last-used defaults (``cap.package``, ``cap.voltage_min``,
+  ``res.tolerance`` …);
+- ``part`` — one row per (manufacturer, MPN), with its type and decision
+  status;
 - ``capacitor`` — capacitance, voltage, dielectric and tolerance of a part;
+- ``resistor`` — resistance, power and tolerance of a part;
 - ``supplier_pn`` — DigiKey and LCSC part numbers of a part;
 - ``usage`` — which board references place a part.
 
@@ -36,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
+from kicadtools.parttypes import CAPACITOR, RESISTOR
 from kicadtools.units import dielectric_tokens
 
 SCHEMA_VERSION = 1
@@ -43,9 +47,9 @@ SCHEMA_VERSION = 1
 # Environment variable naming an alternative database file.
 ENV_VAR = "KICADTOOLS_PARTS_DB"
 
-# Relative half-width of the band within which a stored capacitance equals a
+# Relative half-width of the band within which a stored value equals a
 # requested one (0.1 %), so float rounding of "100nF" never misses a match.
-CAPACITANCE_REL_TOL = 1e-3
+VALUE_REL_TOL = 1e-3
 
 ACCEPTED = "accepted"
 REJECTED = "rejected"
@@ -73,6 +77,12 @@ CREATE TABLE IF NOT EXISTS capacitor (
   dielectric    TEXT NOT NULL,
   tolerance_pct REAL
 );
+CREATE TABLE IF NOT EXISTS resistor (
+  part_id        INTEGER PRIMARY KEY REFERENCES part(id) ON DELETE CASCADE,
+  resistance_ohm REAL NOT NULL,
+  power_w        REAL,
+  tolerance_pct  REAL
+);
 CREATE TABLE IF NOT EXISTS supplier_pn (
   part_id       INTEGER NOT NULL REFERENCES part(id) ON DELETE CASCADE,
   supplier      TEXT NOT NULL,
@@ -90,6 +100,29 @@ CREATE TABLE IF NOT EXISTS usage (
   PRIMARY KEY (part_id, board, reference)
 );
 """
+
+
+@dataclass(frozen=True)
+class _Table:
+    """The parameter table of one part type: its name and the columns that
+    hold the value, the rating and (capacitors) the dielectric."""
+    name: str
+    nominal: str
+    rating: str
+    dielectric: Optional[str]
+
+
+_TABLES: Dict[str, _Table] = {
+    CAPACITOR.name: _Table("capacitor", "capacitance_f", "voltage_v", "dielectric"),
+    RESISTOR.name: _Table("resistor", "resistance_ohm", "power_w", None),
+}
+
+
+def _table(kind: str) -> _Table:
+    try:
+        return _TABLES[kind]
+    except KeyError:
+        raise ValueError(f"no parts table for type {kind!r}") from None
 
 
 def default_path() -> Path:
@@ -119,24 +152,28 @@ def _opt_text(text: Optional[str]) -> Optional[str]:
 
 
 @dataclass(frozen=True)
-class CapacitorParams:
-    """The parameters that make two capacitors interchangeable on a footprint."""
+class PartParams:
+    """The parameters that make two parts of one type interchangeable on a
+    footprint: the value (farads, ohms), the rating (volts, watts), the
+    dielectric (capacitors; ``""`` otherwise) and the tolerance."""
 
-    capacitance_f: float
-    voltage_v: float
+    nominal: float
+    rating: Optional[float]
     dielectric: str
     tolerance_pct: Optional[float]
 
 
 @dataclass(frozen=True)
-class CapacitorChoice:
-    """A capacitor to record as accepted or rejected, with its supplier part
-    numbers. ``jlc_library`` is ``"basic"`` or ``"extended"``."""
+class PartChoice:
+    """A part to record as accepted or rejected, with its supplier part
+    numbers. ``kind`` is the part type (``"capacitor"``, ``"resistor"``);
+    ``jlc_library`` is ``"basic"`` or ``"extended"``."""
 
+    kind: str
     mpn: str
     manufacturer: str
     package: str
-    params: CapacitorParams
+    params: PartParams
     digikey_pn: Optional[str] = None
     digikey_packaging: Optional[str] = None
     lcsc: Optional[str] = None
@@ -146,15 +183,16 @@ class CapacitorChoice:
 
 
 @dataclass(frozen=True)
-class DbCapacitor:
-    """An accepted capacitor read back from the database. ``usage_count`` is
+class DbPart:
+    """An accepted part read back from the database. ``usage_count`` is
     the number of (board, reference) pairs recorded against it."""
 
+    kind: str
     part_id: int
     mpn: str
     manufacturer: str
     package: str
-    params: CapacitorParams
+    params: PartParams
     digikey_pn: Optional[str]
     lcsc: Optional[str]
     jlc_library: Optional[str]
@@ -218,16 +256,16 @@ class PartsDb:
 
     # ----- decisions -------------------------------------------------------
 
-    def accept_capacitor(self, choice: CapacitorChoice) -> int:
+    def accept_part(self, choice: PartChoice) -> int:
         """Record *choice* as accepted and return its part id. An existing row
         for the same (manufacturer, MPN) is updated in place, including one
         previously rejected."""
-        return self._upsert_capacitor(choice, ACCEPTED)
+        return self._upsert(choice, ACCEPTED)
 
-    def reject_capacitor(self, choice: CapacitorChoice) -> int:
+    def reject_part(self, choice: PartChoice) -> int:
         """Record *choice* as rejected and return its part id. A rejected part
-        is excluded from :meth:`find_capacitors`."""
-        return self._upsert_capacitor(choice, REJECTED)
+        is excluded from :meth:`find_parts`."""
+        return self._upsert(choice, REJECTED)
 
     def is_rejected(self, manufacturer: str, mpn: str) -> bool:
         """True when (manufacturer, MPN) is recorded with status rejected."""
@@ -238,11 +276,12 @@ class PartsDb:
             ).fetchone()
         return row is not None and row[0] == REJECTED
 
-    def _upsert_capacitor(self, choice: CapacitorChoice, status: str) -> int:
+    def _upsert(self, choice: PartChoice, status: str) -> int:
+        table = _table(choice.kind)
         mpn = (choice.mpn or "").strip()
         manufacturer = (choice.manufacturer or "").strip()
         if not mpn:
-            raise ValueError("a capacitor choice needs an MPN")
+            raise ValueError(f"a {choice.kind} choice needs an MPN")
         stamp = self._now()
         p = choice.params
         digikey_pn = _opt_text(choice.digikey_pn)
@@ -254,26 +293,35 @@ class PartsDb:
             self.conn.execute(
                 "INSERT INTO part(mpn, manufacturer, type, package, description,"
                 " datasheet_url, status, decided_at)"
-                " VALUES (?, ?, 'capacitor', ?, ?, ?, ?, ?)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(manufacturer, mpn) DO UPDATE SET"
                 " type = excluded.type, package = excluded.package,"
                 " description = excluded.description,"
                 " datasheet_url = excluded.datasheet_url,"
                 " status = excluded.status, decided_at = excluded.decided_at",
-                (mpn, manufacturer, (choice.package or "").strip(),
+                (mpn, manufacturer, choice.kind, (choice.package or "").strip(),
                  choice.description, choice.datasheet_url, status, stamp),
             )
             part_id = self.conn.execute(
                 "SELECT id FROM part WHERE manufacturer = ? AND mpn = ?",
                 (manufacturer, mpn),
             ).fetchone()[0]
+            # A part whose type changed keeps no row in the other table.
+            for other in _TABLES.values():
+                if other.name != table.name:
+                    self.conn.execute(
+                        f"DELETE FROM {other.name} WHERE part_id = ?", (part_id,))
+            cols = ["part_id", table.nominal, table.rating, "tolerance_pct"]
+            values: list = [part_id, float(p.nominal),
+                            None if p.rating is None else float(p.rating),
+                            None if p.tolerance_pct is None else float(p.tolerance_pct)]
+            if table.dielectric:
+                cols.append(table.dielectric)
+                values.append(_norm_dielectric_field(p.dielectric))
             self.conn.execute(
-                "INSERT OR REPLACE INTO capacitor"
-                "(part_id, capacitance_f, voltage_v, dielectric, tolerance_pct)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (part_id, float(p.capacitance_f), float(p.voltage_v),
-                 _norm_dielectric_field(p.dielectric),
-                 None if p.tolerance_pct is None else float(p.tolerance_pct)),
+                f"INSERT OR REPLACE INTO {table.name}({', '.join(cols)})"
+                f" VALUES ({', '.join('?' * len(cols))})",
+                values,
             )
             # A part has at most one PN per supplier: the rows for a supplier
             # named in the choice are replaced, so a changed PN leaves no stale
@@ -303,30 +351,33 @@ class PartsDb:
 
     # ----- search ----------------------------------------------------------
 
-    def find_capacitors(
+    def find_parts(
         self,
         *,
-        capacitance_f: float,
+        kind: str,
+        nominal: float,
         package: str,
-        voltage_min_v: Optional[float],
+        rating_min: Optional[float],
         dielectrics: Sequence[str],
         tolerance_max_pct: Optional[float],
-    ) -> List[DbCapacitor]:
-        """Accepted capacitors meeting a requirement: capacitance within 0.1 %
-        of *capacitance_f*, the same *package*, a voltage rating of at least
-        *voltage_min_v* (any rating when ``None``), a dielectric in
-        *dielectrics* (compared normalized; any dielectric when empty), and,
+    ) -> List[DbPart]:
+        """Accepted parts of type *kind* meeting a requirement: value within
+        0.1 % of *nominal*, the same *package*, a rating of at least
+        *rating_min* (any rating when ``None``), a dielectric in *dielectrics*
+        (capacitors; compared normalized; any dielectric when empty), and,
         when *tolerance_max_pct* is given, a stated tolerance no looser than
         it. Ordered by usage count (highest first), then JLCPCB Basic
         before Extended, then MPN.
 
         Each entry of *dielectrics* may itself list codes (``"C0G, NP0"``); a
         stored part matches when any of its codes is allowed."""
+        table = _table(kind)
         allowed = {t for d in dielectrics for t in dielectric_tokens(d)}
-        band = abs(float(capacitance_f)) * CAPACITANCE_REL_TOL
+        band = abs(float(nominal)) * VALUE_REL_TOL
+        diel_col = f"c.{table.dielectric}" if table.dielectric else "''"
         sql = (
             "SELECT p.id, p.mpn, p.manufacturer, p.package, p.description,"
-            " p.datasheet_url, c.capacitance_f, c.voltage_v, c.dielectric,"
+            f" p.datasheet_url, c.{table.nominal}, c.{table.rating}, {diel_col},"
             " c.tolerance_pct,"
             " (SELECT pn FROM supplier_pn WHERE part_id = p.id"
             "   AND supplier = 'digikey' ORDER BY pn LIMIT 1),"
@@ -335,14 +386,14 @@ class PartsDb:
             " (SELECT jlc_library FROM supplier_pn WHERE part_id = p.id"
             "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS jlc_library,"
             " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
-            " FROM part p JOIN capacitor c ON c.part_id = p.id"
+            f" FROM part p JOIN {table.name} c ON c.part_id = p.id"
             " WHERE p.status = ? AND p.package = ?"
-            " AND ABS(c.capacitance_f - ?) <= ?"
+            f" AND ABS(c.{table.nominal} - ?) <= ?"
         )
-        args: list = [ACCEPTED, (package or "").strip(), float(capacitance_f), band]
-        if voltage_min_v is not None:
-            sql += " AND c.voltage_v >= ?"
-            args.append(float(voltage_min_v))
+        args: list = [ACCEPTED, (package or "").strip(), float(nominal), band]
+        if rating_min is not None:
+            sql += f" AND c.{table.rating} >= ?"
+            args.append(float(rating_min))
         if tolerance_max_pct is not None:
             # A part with no stated tolerance cannot be shown to meet a limit.
             sql += " AND c.tolerance_pct IS NOT NULL AND c.tolerance_pct <= ?"
@@ -354,17 +405,17 @@ class PartsDb:
         )
         with self._lock:
             rows = self.conn.execute(sql, args).fetchall()
-        out: List[DbCapacitor] = []
+        out: List[DbPart] = []
         for row in rows:
-            (pid, mpn, mfr, pkg, desc, url, cap, volts, diel, tol,
+            (pid, mpn, mfr, pkg, desc, url, value, rating, diel, tol,
              dk, lcsc, lib, uses) = row
             # The dielectric filter runs here: a stored value can list two
             # codes, which an SQL IN test would compare as one string.
             if allowed and not allowed.intersection(dielectric_tokens(diel)):
                 continue
-            out.append(DbCapacitor(
-                part_id=int(pid), mpn=mpn, manufacturer=mfr, package=pkg,
-                params=CapacitorParams(cap, volts, diel, tol),
+            out.append(DbPart(
+                kind=kind, part_id=int(pid), mpn=mpn, manufacturer=mfr, package=pkg,
+                params=PartParams(value, rating, diel or "", tol),
                 digikey_pn=dk, lcsc=lcsc, jlc_library=lib,
                 usage_count=int(uses),
                 description=desc or "", datasheet_url=url or "",

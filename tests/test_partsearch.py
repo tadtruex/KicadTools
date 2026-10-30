@@ -1,4 +1,4 @@
-"""Tests for capacitor candidate search (kicadtools.capsearch)."""
+"""Tests for capacitor candidate search (kicadtools.partsearch); resistors are in test_resistor.py."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 
 import pytest
 
-from kicadtools.capsearch import (
+from kicadtools.partsearch import (
     CURRENT,
     DATABASE,
     MIN_STOCK,
@@ -26,7 +26,8 @@ from kicadtools.capsearch import (
 )
 from kicadtools.evidence import ExistingPart
 from kicadtools.intent import ElectricalIntent
-from kicadtools.partsdb import CapacitorChoice, CapacitorParams, PartsDb
+from kicadtools.partsdb import PartChoice, PartParams, PartsDb
+from kicadtools.parttypes import CAPACITOR
 from kicadtools.requirement import (
     DEFAULT,
     DESCRIPTION,
@@ -35,15 +36,15 @@ from kicadtools.requirement import (
     RELAXED,
     SCHEMATIC,
     UNSET,
-    CapacitorRequirement,
+    PartRequirement,
     Sourced,
-    capacitor_defaults,
-    group_capacitors,
+    part_defaults,
+    group_parts,
 )
 from kicadtools.resolve import PartRecord
 from kicadtools.suppliers import DigiKeyProduct, JlcPart
 
-DEFAULTS = capacitor_defaults({})
+DEFAULTS = part_defaults({})
 
 INF = float("inf")
 
@@ -54,14 +55,14 @@ INF = float("inf")
 
 def _req(*, cap=100e-9, package="0603", volts=16.0, diel=("X7R",),
          tol=10.0, value="100nF", footprint="",
-         tol_source=SCHEMATIC) -> CapacitorRequirement:
+         tol_source=SCHEMATIC) -> PartRequirement:
     # Tolerance defaults to stated on the schematic, so the checks below see a
     # single pass; the relaxation tests at the end pass tol_source=DEFAULT.
-    return CapacitorRequirement(
+    return PartRequirement(kind="capacitor",
         value_text=value,
-        capacitance_f=cap,
+        nominal=cap,
         package=Sourced(package, SCHEMATIC if footprint else DEFAULT),
-        voltage_min_v=Sourced(volts, SCHEMATIC if volts is not None else UNSET),
+        rating_min=Sourced(volts, SCHEMATIC if volts is not None else UNSET),
         dielectrics=Sourced(tuple(diel), DEFAULT),
         tolerance_max_pct=Sourced(tol, tol_source if tol is not None else UNSET),
         footprint=footprint,
@@ -107,6 +108,7 @@ class FakeJlc:
         self.parts = parts or {}
         self.searches: List[str] = []
         self.lookups: List[str] = []
+        self.categories: list = []
 
     def search(self, keyword: str) -> List[JlcPart]:
         self.searches.append(keyword)
@@ -116,9 +118,11 @@ class FakeJlc:
         self.lookups.append(lcsc)
         return self.parts.get(lcsc)
 
-    def mlcc(self, value: str, package: str) -> List[JlcPart]:
-        """The filtered MLCC search: *default*, plus every part listed under a
-        keyword that starts with the value and package, once per LCSC code."""
+    def filtered(self, value: str, package: str, category=None) -> List[JlcPart]:
+        """The filtered category search: *default*, plus every part listed
+        under a keyword that starts with the value and package, once per LCSC
+        code. The category is recorded in *categories*."""
+        self.categories.append(category)
         key = f"{value} {package}"
         self.searches.append(key)
         out: List[JlcPart] = []
@@ -151,9 +155,9 @@ def _db() -> PartsDb:
 
 def _choice(mpn="GRM188R71H104KA93D", *, mfr="Murata", dk="490-1519-1-ND",
             lcsc="C77047", lib="extended", v=50.0, diel="X7R", tol=10.0):
-    return CapacitorChoice(
+    return PartChoice(kind="capacitor",
         mpn=mpn, manufacturer=mfr, package="0603",
-        params=CapacitorParams(100e-9, v, diel, tol),
+        params=PartParams(100e-9, v, diel, tol),
         digikey_pn=dk, digikey_packaging="cut tape", lcsc=lcsc, jlc_library=lib,
     )
 
@@ -168,7 +172,7 @@ def _run(req=None, *, db=None, jlc=None, dk=None, needed=10, **kw):
     jlc = jlc or FakeJlc()
     dk = dk if dk is not None else FakeDigiKey()
     return find_candidates(
-        req or _req(), db=db or _db(), jlc_mlcc=jlc.mlcc,
+        req or _req(), db=db or _db(), jlc_filtered=jlc.filtered,
         jlc_part=jlc.part, digikey=dk, needed=needed, **kw,
     )
 
@@ -218,8 +222,8 @@ def test_facets_count_each_field_against_the_others():
     f = facets(_req(volts=16.0, diel=("X7R",), tol=10.0), pool)
     # dielectric counted against voltage >= 16 V and tolerance <= 10 %
     assert f["dielectric"] == [("X5R", 2)]
-    # voltage counted against X7R and <= 10 %: only D (6.3 V)
-    assert f["voltage"] == [("6.3V", 1)]
+    # rating counted against X7R and <= 10 %: only D (6.3 V)
+    assert f["rating"] == [("6.3V", 1)]
     # tolerance counted against X7R and >= 16 V: only C (20 %)
     assert f["tolerance"] == [("20%", 1)]
 
@@ -238,7 +242,7 @@ def test_cleared_fields_are_not_checked_and_facets_are_returned():
     out = requirement_for(req, res, res.candidates[0])
     assert out.dielectrics == Sourced(("X5R",), RELAXED)
     # a cleared voltage: any rating passes
-    res = _run(_req(volts=16.0, diel=("X5R",)).edited(clear=("voltage_min_v",)),
+    res = _run(_req(volts=16.0, diel=("X5R",)).edited(clear=("rating_min",)),
                jlc=jlc, dk=dk)
     assert sorted(c.mpn for c in res.candidates) == ["A", "B"]
 
@@ -257,7 +261,7 @@ def test_not_searchable_returns_problem_without_calls():
 
 def test_database_hit_returned_without_supplier_search():
     db = _db()
-    pid = db.accept_capacitor(_choice())
+    pid = db.accept_part(_choice())
     db.record_usage(pid, "ECG/ECG.kicad_sch", ["C1", "C2"])
     live = _jlc("C77047", "GRM188R71H104KA93D", library="expand",
                 preferred=True, stock=4000, price=0.004)
@@ -280,7 +284,7 @@ def test_database_hit_without_live_data_fails_stock_floor():
     # Unknown stock does not meet the stock floor; with no candidate left the
     # supplier search is attempted, which needs DigiKey.
     db = _db()
-    db.accept_capacitor(_choice(lib="basic"))
+    db.accept_part(_choice(lib="basic"))
     res = _run(db=db, dk=FakeDigiKey(configured=False))
     assert res.candidates == []
     assert _reasons(res) == {"C77047 GRM188R71H104KA93D": "JLCPCB stock unknown"}
@@ -289,7 +293,7 @@ def test_database_hit_without_live_data_fails_stock_floor():
 
 def test_search_suppliers_merges_and_dedupes_by_mpn():
     db = _db()
-    db.accept_capacitor(_choice())
+    db.accept_part(_choice())
     jlc = FakeJlc(default=[
         _jlc("C77047", "GRM188R71H104KA93D", library="expand"),   # in the database
         _jlc("C14663", "CL10B104KB8NNNC"),
@@ -316,8 +320,8 @@ def test_database_miss_runs_search():
     assert c.lcsc == "C14663" and c.jlc_library == "basic"
     assert c.digikey_pn == "1276-1000-1-ND"          # cut tape
     assert c.digikey_stock == 500000
-    assert c.params.capacitance_f == pytest.approx(100e-9)
-    assert (c.params.voltage_v, c.params.dielectric, c.params.tolerance_pct) == (
+    assert c.params.nominal == pytest.approx(100e-9)
+    assert (c.params.rating, c.params.dielectric, c.params.tolerance_pct) == (
         50.0, "X7R", 10.0)
     assert c.datasheet_url == "https://dk/ds.pdf"
 
@@ -326,7 +330,7 @@ def test_digikey_unconfigured_sets_problem_database_stock_unknown():
     # Without DigiKey the database part's DigiKey stock is unknown, so it does
     # not meet the stock floor.
     db = _db()
-    db.accept_capacitor(_choice())
+    db.accept_part(_choice())
     jlc = FakeJlc(default=[_jlc()], parts={"C77047": _live_grm()})
     res = _run(db=db, jlc=jlc, dk=FakeDigiKey(configured=False),
                search_suppliers=True)
@@ -344,7 +348,7 @@ def test_digikey_unconfigured_empty_database():
 
 def test_database_rejected_mpn_dropped():
     db = _db()
-    db.reject_capacitor(_choice("CL10B104KB8NNNC", mfr="SAMSUNG"))
+    db.reject_part(_choice("CL10B104KB8NNNC", mfr="SAMSUNG"))
     dk = FakeDigiKey({"CL10B104KB8NNNC": _dk()})
     res = _run(db=db, jlc=FakeJlc(default=[_jlc()]), dk=dk)
     assert res.candidates == []
@@ -386,7 +390,7 @@ def test_jlc_passes_higher_rating_tighter_tolerance_and_listed_dielectric():
     res = _run(_req(diel=("X5R", "X7R")), jlc=FakeJlc(default=[part]),
                dk=FakeDigiKey({"CL10B104KB8NNNC": _dk(volts="100V", tol="±5%")}))
     [c] = res.candidates
-    assert (c.params.voltage_v, c.params.dielectric, c.params.tolerance_pct) == (
+    assert (c.params.rating, c.params.dielectric, c.params.tolerance_pct) == (
         100.0, "X7R", 5.0)
 
 
@@ -468,8 +472,8 @@ def test_limit_keeps_best_ranked_hits():
 # --------------------------------------------------------------------------- #
 
 def _cand(mpn, **kw) -> Candidate:
-    base = dict(mpn=mpn, manufacturer="M", package="0603",
-                params=CapacitorParams(100e-9, 50.0, "X7R", 10.0),
+    base = dict(kind="capacitor", mpn=mpn, manufacturer="M", package="0603",
+                params=PartParams(100e-9, 50.0, "X7R", 10.0),
                 lcsc=None, jlc_library="extended", jlc_preferred=False,
                 jlc_stock=0, jlc_price=1.0, digikey_pn=None, digikey_stock=0,
                 source=SEARCH)
@@ -496,7 +500,7 @@ def test_rank_key_order():
 
 def test_final_list_ranked():
     db = _db()
-    db.accept_capacitor(_choice(lib="extended"))
+    db.accept_part(_choice(lib="extended"))
     parts = [_jlc("C2", "EXT", library="expand"), _jlc("C1", "BASIC", library="base")]
     dk = FakeDigiKey({"EXT": _dk("EXT"), "BASIC": _dk("BASIC"),
                       "490-1519-1-ND": _dk("GRM188R71H104KA93D")})
@@ -509,7 +513,7 @@ def test_final_list_ranked():
 
 def test_database_usage_ranks_first():
     db = _db()
-    pid = db.accept_capacitor(_choice(lib="extended"))
+    pid = db.accept_part(_choice(lib="extended"))
     db.record_usage(pid, "b", ["C1"])
     parts = [_jlc("C1", "BASIC", library="base")]
     dk = FakeDigiKey({"BASIC": _dk("BASIC"),
@@ -531,9 +535,9 @@ def test_choice_round_trips_into_database():
     assert choice.digikey_packaging == "cut tape"
     assert choice.jlc_library == "basic"
     db = _db()
-    pid = db.accept_capacitor(choice)
-    [hit] = db.find_capacitors(capacitance_f=100e-9, package="0603",
-                               voltage_min_v=16.0, dielectrics=["X7R"],
+    pid = db.accept_part(choice)
+    [hit] = db.find_parts(kind="capacitor", nominal=100e-9, package="0603",
+                               rating_min=16.0, dielectrics=["X7R"],
                                tolerance_max_pct=10.0)
     assert hit.part_id == pid
     assert (hit.mpn, hit.manufacturer) == ("CL10B104KB8NNNC", "SAMSUNG")
@@ -626,7 +630,7 @@ def test_search_without_mpn_rejected():
 
 def test_database_hit_not_orderable_rejected_with_zero_stock():
     db = _db()
-    db.accept_capacitor(_choice())
+    db.accept_part(_choice())
     gone = _jlc("C77047", "GRM188R71H104KA93D", no_buy="discontinued")
     res = _run(db=db, jlc=FakeJlc(parts={"C77047": gone}),
                dk=FakeDigiKey({"490-1519-1-ND": _dk("GRM188R71H104KA93D")}))
@@ -679,7 +683,7 @@ def test_requirement_for_writes_the_parts_own_tolerance_when_relaxed():
     res = _run(req, jlc=jlc, dk=dk)
     out = requirement_for(req, res, res.candidates[0])
     assert out.tolerance_max_pct == Sourced(20.0, RELAXED)
-    assert out.voltage_min_v == req.voltage_min_v
+    assert out.rating_min == req.rating_min
 
 
 def test_requirement_for_is_unchanged_without_relaxation():
@@ -733,7 +737,7 @@ def test_stock_floor_passes_at_exactly_min_stock():
 
 def test_database_hit_low_digikey_stock_rejected_and_search_runs():
     db = _db()
-    db.accept_capacitor(_choice())
+    db.accept_part(_choice())
     jlc = FakeJlc(default=[_jlc()], parts={"C77047": _live_grm()})
     dk = FakeDigiKey({"490-1519-1-ND": _dk("GRM188R71H104KA93D", qty=12),
                       "CL10B104KB8NNNC": _dk()})
@@ -782,19 +786,19 @@ def _record(ref="C1", **props):
 
 
 def _group(**props):
-    [g] = group_capacitors([_record(**props)], DEFAULTS)
+    [g] = group_parts([_record(**props)], DEFAULTS)
     return g
 
 
 def _assess(group, *, db=None, jlc=None, dk=None, needed=10, **kw):
     jlc = jlc or FakeJlc()
     dk = dk if dk is not None else FakeDigiKey()
-    return assess(group, DEFAULTS, db=db or _db(), jlc_search=jlc.search, jlc_mlcc=jlc.mlcc,
+    return assess(group, DEFAULTS, db=db or _db(), jlc_search=jlc.search, jlc_filtered=jlc.filtered,
                   jlc_part=jlc.part, digikey=dk, needed=needed, **kw)
 
 
 def _read(existing, jlc, dk):
-    return read_existing(existing, jlc_part=jlc.part, jlc_search=jlc.search,
+    return read_existing(existing, CAPACITOR, jlc_part=jlc.part, jlc_search=jlc.search,
                          digikey=dk)
 
 
@@ -820,8 +824,8 @@ def test_read_existing_evidence_from_digikey_and_current_candidate():
     assert dk.calls == [TDK_DK, TDK]
     ev = out.evidence
     assert ev.label == f"current part {TDK_DK} (DigiKey)"
-    assert ev.capacitance_f == pytest.approx(4.7e-6)
-    assert (ev.voltage_v, ev.dielectrics, ev.tolerance_pct, ev.package) == (
+    assert ev.nominal == pytest.approx(4.7e-6)
+    assert (ev.rating, ev.dielectrics, ev.tolerance_pct, ev.package) == (
         16.0, ("X6S",), 10.0, "0603")
     c = out.current
     assert c.source == CURRENT
@@ -913,8 +917,8 @@ def test_read_existing_evidence_from_jlc_when_digikey_has_nothing():
     out = _read(ExistingPart(mpn=TDK, digikey_pn=TDK_DK, lcsc=TDK_LCSC), jlc, dk)
     ev = out.evidence
     assert ev.label == f"current part {TDK_LCSC} (JLCPCB)"
-    assert ev.capacitance_f == pytest.approx(4.7e-6)
-    assert (ev.voltage_v, ev.dielectrics, ev.tolerance_pct, ev.package) == (
+    assert ev.nominal == pytest.approx(4.7e-6)
+    assert (ev.rating, ev.dielectrics, ev.tolerance_pct, ev.package) == (
         16.0, ("X6S",), 10.0, "0603")
     assert out.current is None
     assert any("not found at DigiKey" in n for n in out.notes)
@@ -936,7 +940,7 @@ def test_read_existing_network_failure_becomes_notes():
         configured = True
         product_for = staticmethod(boom)
 
-    out = read_existing(ExistingPart(mpn=TDK, lcsc=TDK_LCSC), jlc_part=boom,
+    out = read_existing(ExistingPart(mpn=TDK, lcsc=TDK_LCSC), CAPACITOR, jlc_part=boom,
                         jlc_search=boom, digikey=BoomDigiKey())
     assert out.evidence is None and out.current is None
     assert any("offline" in n for n in out.notes)
@@ -966,7 +970,7 @@ def test_assess_current_part_passing_listed_first_no_search():
     assert res.candidates[0].mpn == TDK
     # Only the MPN lookup at JLCPCB; no keyword search.
     assert jlc.searches == [TDK]
-    assert res.requirement.voltage_min_v == Sourced(16.0, PART)
+    assert res.requirement.rating_min == Sourced(16.0, PART)
     assert res.requirement.dielectrics == Sourced(("X6S", "X7R"), PART)
     assert res.existing.current is not None
     assert res.rejected == []
@@ -975,9 +979,9 @@ def test_assess_current_part_passing_listed_first_no_search():
 def test_assess_current_part_listed_before_database_part():
     jlc, dk = _tdk_suppliers()
     db = _db()
-    db.accept_capacitor(CapacitorChoice(
+    db.accept_part(PartChoice(kind="capacitor",
         mpn="OTHER", manufacturer="Murata", package="0603",
-        params=CapacitorParams(4.7e-6, 25.0, "X7R", 10.0),
+        params=PartParams(4.7e-6, 25.0, "X7R", 10.0),
         digikey_pn="OTHER-1-ND", digikey_packaging="cut tape", lcsc="C5",
         jlc_library="basic"))
     jlc.parts["C5"] = _jlc("C5", "OTHER", cap="4.7uF", library="base")
@@ -1037,7 +1041,7 @@ def test_assess_no_part_fits_searches_from_schematic():
     assert req.conflicts == () and req.searchable
     assert req.warnings[0].startswith("Value says 10nF; current part")
     assert req.warnings[0].endswith("not used)")
-    assert req.voltage_min_v == Sourced(16.0, SCHEMATIC)
+    assert req.rating_min == Sourced(16.0, SCHEMATIC)
     assert "current part" not in _reasons(res)
     assert any(k.startswith("10nF 0603") for k in jlc.searches)
 
@@ -1056,7 +1060,7 @@ def test_assess_reuses_existing_lookup():
 def test_assess_edited_requirement_used_as_is():
     jlc, dk = _tdk_suppliers()
     g = _group(MPN=TDK)
-    edited = g.requirement.edited(voltage_min_v=50.0)
+    edited = g.requirement.edited(rating_min=50.0)
     res = _assess(g, jlc=jlc, dk=dk, requirement=edited)
     assert res.requirement is edited
     assert _reasons(res)["current part"] == "DigiKey rating 16V, need at least 50V"
@@ -1103,8 +1107,8 @@ def test_buckconverter_swapped_fields_value_disagrees():
         "(current part 1276-3388-1-ND (DigiKey) not used)",
     )
     # the search runs from the schematic: 10nF 1210, voltage from the Description
-    assert (req.capacitance_f, req.package.value) == (pytest.approx(10e-9), "1210")
-    assert req.voltage_min_v == Sourced(50.0, DESCRIPTION)
+    assert (req.nominal, req.package.value) == (pytest.approx(10e-9), "1210")
+    assert req.rating_min == Sourced(50.0, DESCRIPTION)
     assert req.searchable
 
 
@@ -1136,7 +1140,7 @@ def test_fitting_parts_give_the_loosest_requirement():
                Footprint="Capacitor_SMD:C_0402_1005Metric", Description="")
     res = _assess(g, jlc=jlc, dk=dk)
     req = res.requirement
-    assert req.voltage_min_v == Sourced(25.0, PART)
+    assert req.rating_min == Sourced(25.0, PART)
     assert req.tolerance_max_pct == Sourced(10.0, PART)
     assert req.dielectrics.value[:2] == ("X7R", "X5R")
     assert [(c.source, c.mpn) for c in res.candidates] == [(CURRENT, "CC0402KRX7R8BB103")]
@@ -1171,7 +1175,7 @@ def test_motordriver_fields_naming_parts_of_different_packages():
     assert req.conflicts == () and req.searchable
     assert res.existing.evidence.label == "current part 13-CC0402JRX7R8BB104CT-ND (DigiKey)"
     assert req.package == Sourced("0402", SCHEMATIC)
-    assert req.voltage_min_v == Sourced(50.0, PART)
+    assert req.rating_min == Sourced(50.0, PART)
     assert req.warnings == (
         "Description says 0603; Footprint says 0402 (Description not used)",
         "Footprint says 0402; current part CGA3E2X7R1E104K080AA (DigiKey) says 0603 "
@@ -1187,8 +1191,8 @@ def test_ecg_100nf_matches_0p1uf_part_no_conflict():
                Description="Unpolarized capacitor, small symbol")
     res = _assess(g, jlc=jlc, dk=dk)
     assert res.requirement.conflicts == ()
-    assert res.requirement.capacitance_source == SCHEMATIC
-    assert res.requirement.voltage_min_v == Sourced(50.0, PART)
+    assert res.requirement.nominal_source == SCHEMATIC
+    assert res.requirement.rating_min == Sourced(50.0, PART)
     assert [c.source for c in res.candidates] == [CURRENT]
     assert res.candidates[0].digikey_pn == "1276-1000-1-ND"
 
@@ -1201,7 +1205,7 @@ def test_read_existing_network_failure_adds_no_not_found_note():
         configured = True
         product_for = staticmethod(boom)
 
-    out = read_existing(ExistingPart(digikey_pn=TDK_DK, lcsc=TDK_LCSC),
+    out = read_existing(ExistingPart(digikey_pn=TDK_DK, lcsc=TDK_LCSC), CAPACITOR,
                         jlc_part=boom, jlc_search=boom, digikey=BoomDigiKey())
     assert len(out.notes) == 2
     assert all("failed: offline" in n for n in out.notes)
@@ -1212,7 +1216,7 @@ def test_read_existing_search_failure_after_digikey_becomes_note():
         raise TimeoutError("slow")
 
     _, dk = _tdk_suppliers()
-    out = read_existing(ExistingPart(mpn=TDK), jlc_part=boom, jlc_search=boom,
+    out = read_existing(ExistingPart(mpn=TDK), CAPACITOR, jlc_part=boom, jlc_search=boom,
                         digikey=dk)
     assert out.evidence is not None and out.current is None
     assert any("failed: slow" in n for n in out.notes)
@@ -1224,7 +1228,7 @@ def test_read_existing_digikey_unconfigured_finds_jlc_by_mpn_field():
     dk = FakeDigiKey(configured=False)
     out = _read(ExistingPart(mpn=TDK, digikey_pn=TDK_DK), jlc, dk)
     assert out.evidence.label == f"current part {TDK_LCSC} (JLCPCB)"
-    assert out.evidence.capacitance_f == pytest.approx(4.7e-6)
+    assert out.evidence.nominal == pytest.approx(4.7e-6)
     assert out.current is None
     assert jlc.searches == [TDK]
 
@@ -1257,9 +1261,9 @@ def test_current_part_rejected_also_rejects_its_database_entry():
     jlc, dk = _tdk_suppliers()
     dk.products[TDK] = _tdk_dk(status="Obsolete")
     db = _db()
-    db.accept_capacitor(CapacitorChoice(
+    db.accept_part(PartChoice(kind="capacitor",
         mpn=TDK, manufacturer="TDK", package="0603",
-        params=CapacitorParams(4.7e-6, 16.0, "X6S", 10.0),
+        params=PartParams(4.7e-6, 16.0, "X6S", 10.0),
         digikey_pn=TDK_DK, digikey_packaging="cut tape", lcsc=TDK_LCSC,
         jlc_library="extended"))
     res = _assess(_group(MPN=TDK), db=db, jlc=jlc, dk=dk)
@@ -1289,9 +1293,9 @@ def test_real_value_and_description_pairs_search(value, desc, fp, farads,
     res = _assess(_group(Value=value, Description=desc, Footprint=fp), jlc=jlc)
     req = res.requirement
     assert req.conflicts == ()
-    assert req.capacitance_f == pytest.approx(farads)
+    assert req.nominal == pytest.approx(farads)
     assert req.package.value == package
-    assert req.voltage_min_v == Sourced(volts, DESCRIPTION)
+    assert req.rating_min == Sourced(volts, DESCRIPTION)
     # Searchable: the keyword search ran with the merged requirement.
     assert jlc.searches and all(k.split()[1] == package for k in jlc.searches)
     assert len(jlc.searches) == 1
@@ -1302,8 +1306,8 @@ def test_real_value_and_description_pairs_search(value, desc, fp, farads,
 def test_generic_description_states_nothing(desc):
     res = _assess(_group(Value="C_1U", Description=desc, Footprint=FP_0603))
     req = res.requirement
-    assert req.capacitance_f == pytest.approx(1e-6)
-    assert req.voltage_min_v.source == UNSET
+    assert req.nominal == pytest.approx(1e-6)
+    assert req.rating_min.source == UNSET
     assert res.problem == req.problem() and res.candidates == []
 
 

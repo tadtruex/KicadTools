@@ -1,9 +1,10 @@
-"""The "Assign Part" dialog for one capacitor requirement group.
+"""The "Assign Part" dialog for one capacitor or resistor requirement group.
 
 The header lists the group's references, its quantity, the build quantity, the
 units the build needs and the part already on the schematic (what the
-existing-part lookup found). Below it the four editable requirement fields
-(Package, Voltage:Min, Dielectric, Tolerance) each name their source; a value
+existing-part lookup found). Below it the editable requirement fields
+(Package, the rating floor — Voltage:Min for a capacitor, Power:Min for a
+resistor —, Dielectric for a capacitor, Tolerance) each name their source; a value
 from a default, an edit, the existing part or the Description is written to
 the group's symbols on accept, and its label says so. A field stated on the schematic is read-only: the write plan
 never overwrites a stated value, so it is changed on the schematic (or with
@@ -12,12 +13,12 @@ footprint when the symbol has one.
 
 The dialog runs no network code. A search is requested with the
 ``search_requested(requirement, search_suppliers)`` signal; the window runs it
-(:func:`kicadtools.capsearch.assess`) on a worker thread and passes the
+(:func:`kicadtools.partsearch.assess`) on a worker thread and passes the
 outcome to :meth:`show_result` or :meth:`show_error`. The first request sends
 ``None`` as the requirement: assess derives it from the group and its existing
 part. The requirement that result names, or, when the dialog was given
 *defaults*, the group's requirement rebuilt from the first lookup
-(:func:`kicadtools.capsearch.requirement_from_lookup`), becomes the dialog's base requirement (:attr:`original`); the
+(:func:`kicadtools.partsearch.requirement_from_lookup`), becomes the dialog's base requirement (:attr:`original`); the
 lookup is kept (:attr:`existing_lookup`) for later requests. Field text the
 user has typed, and fields the opening requirement held as edited, are kept
 over the new base, so an edit made while the lookup ran is merged with the
@@ -27,7 +28,7 @@ again. A requirement with conflicts lists them in amber, shows no candidates
 and cannot be searched. Every request is numbered (:attr:`request_id`), and an
 outcome tagged with an older number is ignored, so a slow search cannot
 overwrite a newer one. Field edits request the last kind of search again about
-400 ms after the last keystroke, once Voltage:Min parses.
+400 ms after the last keystroke, once the rating floor parses.
 
 The candidates shown belong to the requirement they were searched for. While
 the fields differ from that requirement (an edit whose search has not
@@ -74,16 +75,18 @@ from PySide6.QtWidgets import (
 )
 
 from kicadtools.assign import assignment_plan
-from kicadtools.capsearch import (
+from kicadtools.evidence import ExistingPart
+from kicadtools.partsearch import (
     CURRENT,
     DATABASE,
     Candidate,
     ExistingLookup,
     SearchResult,
+    facet_fields,
     requirement_for,
     requirement_from_lookup,
 )
-from kicadtools.evidence import ExistingPart
+from kicadtools.parttypes import PartType, part_type
 from kicadtools.requirement import (
     ANY,
     DEFAULT,
@@ -91,26 +94,23 @@ from kicadtools.requirement import (
     EDITED,
     PART,
     SCHEMATIC,
-    CapacitorRequirement,
+    PartRequirement,
     RequirementGroup,
     Sourced,
 )
 from kicadtools.suppliers import digikey_url, lcsc_url
 from kicadtools.units import (
-    dielectric_tokens,
-    fmt_farads,
-    fmt_percent,
     chip_size,
-    fmt_volts,
+    dielectric_tokens,
+    fmt_percent,
     package_code,
     parse_percent,
-    parse_volts,
 )
 
 CANDIDATE_COLUMNS = [
     "MPN", "Manufacturer", "Source", "LCSC", "JLC library", "JLC stock",
     "DigiKey PN", "DigiKey stock", "Unit price",
-    "Capacitance", "Voltage", "Dielectric", "Tolerance",
+    "Value", "Rating", "Dielectric", "Tolerance",
 ]
 COL_LCSC = CANDIDATE_COLUMNS.index("LCSC")
 COL_DIGIKEY = CANDIDATE_COLUMNS.index("DigiKey PN")
@@ -152,14 +152,15 @@ def field_label(sourced: Sourced, n_symbols: int) -> str:
     return f"required — written to {n_symbols} {noun}"
 
 
-def field_text(sourced: Sourced, kind: str) -> str:
-    """The text a field starts with: the bare value, ``""`` when there is none.
-    *kind* is ``"package"``, ``"voltage"``, ``"dielectric"`` or ``"tolerance"``."""
+def field_text(sourced: Sourced, kind: str, ptype: PartType) -> str:
+    """The text a field of a *ptype* requirement starts with: the bare value,
+    ``"any"`` for a field with no limit, ``""`` when there is none. *kind* is
+    ``"package"``, ``"rating"``, ``"dielectric"`` or ``"tolerance"``."""
     v = sourced.value
     if v in (None, "", ()):
-        return ""
-    if kind == "voltage":
-        return fmt_volts(v)
+        return "any" if sourced.source == ANY else ""
+    if kind == "rating":
+        return ptype.fmt_rating(v)
     if kind == "tolerance":
         return fmt_percent(v)
     if kind == "dielectric":
@@ -169,26 +170,28 @@ def field_text(sourced: Sourced, kind: str) -> str:
 
 def parse_field_values(
     package: str,
-    voltage: str,
+    rating: str,
     dielectric: str,
     tolerance: str,
     *,
-    original: CapacitorRequirement,
+    original: PartRequirement,
 ) -> Union[Dict[str, Any], str]:
-    """Parse the four field texts against *original* (the group's
-    requirement). Returns the keyword arguments for
-    :meth:`CapacitorRequirement.edited` — only the fields whose parsed value
-    differs from *original*, so an unchanged field keeps its source — or a
-    one-line error when a field does not parse. A field stated on the
-    schematic (source ``schematic``) is not read: stated values are never
-    edited here.
+    """Parse the field texts against *original* (the group's requirement).
+    Returns the keyword arguments for :meth:`PartRequirement.edited` — only
+    the fields whose parsed value differs from *original*, so an unchanged
+    field keeps its source — or a one-line error when a field does not parse.
+    A field stated on the schematic (source ``schematic``) is not read: stated
+    values are never edited here. *dielectric* is ignored for a type without
+    one.
 
-    A blank Voltage:Min, Dielectric or Tolerance field, or one holding
-    ``any``, is cleared (the ``clear`` keyword): the search applies no limit
-    on it and lists the values found (:attr:`SearchResult.facets`). A blank
-    Voltage:Min or Dielectric that had no value to begin with is an error
-    instead, so a voltage floor is never left out by accident; ``any`` clears
-    it."""
+    A blank rating (``Voltage:Min`` / ``Power:Min``), Dielectric or Tolerance
+    field, or one holding ``any``, is cleared (the ``clear`` keyword): the
+    search applies no limit on it and lists the values found
+    (:attr:`SearchResult.facets`). A blank capacitor Voltage:Min or Dielectric
+    that had no value to begin with is an error instead, so a voltage floor is
+    never left out by accident; ``any`` clears it. A resistor's power floor
+    starts as ``any`` when none is stated or remembered."""
+    t = original.ptype
     kwargs: Dict[str, Any] = {}
     clear: List[str] = []
 
@@ -207,25 +210,26 @@ def parse_field_values(
             if code != original.package.value:
                 kwargs["package"] = code
 
-    text = voltage.strip()
-    if original.voltage_min_v.source == SCHEMATIC:
+    text = rating.strip()
+    prop = t.rating_property
+    if original.rating_min.source == SCHEMATIC:
         pass
-    elif is_any(text, original.voltage_min_v):
-        if original.voltage_min_v.source != ANY:
-            clear.append("voltage_min_v")
+    elif is_any(text, original.rating_min):
+        if original.rating_min.source != ANY:
+            clear.append("rating_min")
     elif text:
-        v = parse_volts(text)
+        v = t.parse_rating(text)
         if v is None or v <= 0:
-            return f"Voltage:Min '{text}' is not a voltage"
-        if original.voltage_min_v.value is None or not math.isclose(
-            v, float(original.voltage_min_v.value), rel_tol=1e-9
+            return f"{prop} '{text}' is not a {t.rating_title.lower()}"
+        if original.rating_min.value is None or not math.isclose(
+            v, float(original.rating_min.value), rel_tol=1e-9
         ):
-            kwargs["voltage_min_v"] = v
-    elif original.voltage_min_v.value is None:
-        return "Enter Voltage:Min (or 'any') to search"
+            kwargs["rating_min"] = v
+    elif original.rating_min.value is None:
+        return f"Enter {prop} (or 'any') to search"
 
     text = dielectric.strip()
-    if original.dielectrics.source == SCHEMATIC:
+    if not t.has_dielectric or original.dielectrics.source == SCHEMATIC:
         pass
     elif is_any(text, original.dielectrics):
         if original.dielectrics.source != ANY:
@@ -239,7 +243,7 @@ def parse_field_values(
             return f"Dielectric '{text}' names no dielectric such as X7R"
         if tuple(codes) != tuple(original.dielectrics.value or ()):
             kwargs["dielectrics"] = tuple(codes)
-    elif not original.dielectrics.value and original.capacitance_f:
+    elif not original.dielectrics.value and original.nominal:
         return "Enter a dielectric (or 'any') to search"
 
     text = tolerance.strip()
@@ -261,11 +265,15 @@ def parse_field_values(
     return kwargs
 
 
-# The facet titles shown in the values popup, by SearchResult.facets key.
-FACET_TITLES = {"voltage": "Voltage", "dielectric": "Dielectric", "tolerance": "Tolerance"}
+def facet_title(key: str, ptype: PartType) -> str:
+    """The title of a values-popup section: the rating property for
+    ``"rating"`` (``"Voltage:Min"``, ``"Power:Min"``), else the field name."""
+    if key == "rating":
+        return ptype.rating_property
+    return {"dielectric": "Dielectric", "tolerance": "Tolerance"}.get(key, key)
 
 
-def facet_rows(result: SearchResult, req: Optional[CapacitorRequirement]
+def facet_rows(result: SearchResult, req: Optional[PartRequirement]
                ) -> List[Tuple[str, List[Tuple[str, int]]]]:
     """The facets the values popup shows for *result*, as (field key, rows):
     the fields cleared in *req* (source ``any``); when none is cleared and the
@@ -275,15 +283,13 @@ def facet_rows(result: SearchResult, req: Optional[CapacitorRequirement]
         return []
     cleared = []
     if req is not None:
-        for key, sourced in (("voltage", req.voltage_min_v),
-                             ("dielectric", req.dielectrics),
-                             ("tolerance", req.tolerance_max_pct)):
-            if sourced.source == ANY:
+        for key, name in facet_fields(req.ptype):
+            if getattr(req, name).source == ANY:
                 cleared.append(key)
     if not cleared:
         if result.candidates:
             return []
-        cleared = list(FACET_TITLES)
+        cleared = list(result.facets)
     return [(key, result.facets.get(key, [])) for key in cleared]
 
 
@@ -308,7 +314,8 @@ class FacetPopup(QDialog):
         layout.addWidget(self._tree)
         self.resize(320, 360)
 
-    def set_facets(self, rows: List[Tuple[str, List[Tuple[str, int]]]], pool: int) -> None:
+    def set_facets(self, rows: List[Tuple[str, List[Tuple[str, int]]]], pool: int,
+                   ptype: PartType) -> None:
         self._note.setText(
             f"{pool} JLCPCB part(s) of this value and package, in stock, from the "
             "listed manufacturers (DigiKey not checked). Each count meets the "
@@ -316,7 +323,7 @@ class FacetPopup(QDialog):
         )
         self._tree.clear()
         for key, values in rows:
-            top = QTreeWidgetItem([FACET_TITLES.get(key, key), str(sum(n for _, n in values))])
+            top = QTreeWidgetItem([facet_title(key, ptype), str(sum(n for _, n in values))])
             top.setData(0, Qt.UserRole, None)
             for text, n in values:
                 child = QTreeWidgetItem([text, str(n)])
@@ -340,6 +347,7 @@ def candidate_cells(candidate: Candidate) -> List[str]:
     """The table row for *candidate*, in :data:`CANDIDATE_COLUMNS` order."""
     c = candidate
     p = c.params
+    t = part_type(c.kind)
     price = "" if c.jlc_price is None or math.isinf(c.jlc_price) else f"${c.jlc_price:.4f}"
     library = {"basic": "Basic", "extended": "Extended"}.get(c.jlc_library or "", "")
     if library and c.jlc_preferred:
@@ -357,8 +365,8 @@ def candidate_cells(candidate: Candidate) -> List[str]:
         c.digikey_pn or "",
         _count(c.digikey_stock),
         price,
-        fmt_farads(p.capacitance_f) if p.capacitance_f else "",
-        fmt_volts(p.voltage_v) if p.voltage_v else "",
+        t.fmt_nominal(p.nominal) if p.nominal else "",
+        t.fmt_rating(p.rating) if p.rating else "",
         p.dielectric or "",
         fmt_percent(p.tolerance_pct) if p.tolerance_pct is not None else "",
     ]
@@ -393,7 +401,7 @@ def current_part_text(existing: ExistingPart,
     return text if lookup is not None else text + " (looking up…)"
 
 
-def conflict_text(req: CapacitorRequirement) -> str:
+def conflict_text(req: PartRequirement) -> str:
     """The amber note for a requirement's conflicts and Description warnings,
     ``""`` when it has neither. Warnings do not block a search."""
     blocks = []
@@ -405,15 +413,16 @@ def conflict_text(req: CapacitorRequirement) -> str:
     return "\n".join(blocks)
 
 
-def value_header(req: CapacitorRequirement) -> str:
+def value_header(req: PartRequirement) -> str:
     """The header's Value line: the Value as written; with no Value, the
-    capacitance from the Description or the existing part, naming it."""
+    value from the Description or the existing part, naming it."""
     if req.value_text:
         return req.value_text
-    if req.capacitance_f and req.capacitance_source == DESCRIPTION:
-        return f"{fmt_farads(req.capacitance_f)} (from description)"
-    if req.capacitance_f and req.capacitance_source == PART:
-        return f"{fmt_farads(req.capacitance_f)} (from current part)"
+    fmt = req.ptype.fmt_nominal
+    if req.nominal and req.nominal_source == DESCRIPTION:
+        return f"{fmt(req.nominal)} (from description)"
+    if req.nominal and req.nominal_source == PART:
+        return f"{fmt(req.nominal)} (from current part)"
     return "—"
 
 
@@ -453,20 +462,20 @@ def result_summary(result: SearchResult) -> str:
 # --------------------------------------------------------------------------- #
 
 class AssignDialog(QDialog):
-    search_requested = Signal(object, bool)   # (CapacitorRequirement or None, search_suppliers)
+    search_requested = Signal(object, bool)   # (PartRequirement or None, search_suppliers)
     reject_requested = Signal(object)         # Candidate
 
     def __init__(
         self,
         group: RequirementGroup,
-        requirement: CapacitorRequirement,
+        requirement: PartRequirement,
         build_qty: int,
         parent=None,
         *,
         defaults: Optional[Mapping[str, str]] = None,
         existing: Optional[ExistingLookup] = None,
     ) -> None:
-        """*defaults* (the capacitor settings) let the dialog rebuild the
+        """*defaults* (the part settings) let the dialog rebuild the
         group's requirement from a lookup that arrives with the result of an
         edited request. *existing* is a lookup recorded earlier for the group;
         it is reused by every request."""
@@ -476,6 +485,7 @@ class AssignDialog(QDialog):
         self.resize(1100, 560)
         self._group = group
         self._original = requirement
+        self._ptype = requirement.ptype
         self._n_symbols = symbol_count(group)
         self.needed = group.quantity * max(1, int(build_qty))
         self._candidates: List[Candidate] = []
@@ -483,8 +493,8 @@ class AssignDialog(QDialog):
         self._last_suppliers = False
         # The requirement of the latest request, and the one the shown
         # candidates were searched for.
-        self._requested_req: Optional[CapacitorRequirement] = None
-        self._shown_req: Optional[CapacitorRequirement] = None
+        self._requested_req: Optional[PartRequirement] = None
+        self._shown_req: Optional[PartRequirement] = None
         self._result: Optional[SearchResult] = None
         # The existing-part lookup from the first result, reused by later
         # requests; set once any result has been shown.
@@ -514,12 +524,13 @@ class AssignDialog(QDialog):
         self._fields: Dict[str, QLineEdit] = {}
         self._notes: Dict[str, QLabel] = {}
         form = QFormLayout()
-        specs = (
+        t = self._ptype
+        specs = [
             ("package", "Package"),
-            ("voltage", "Voltage:Min"),
+            ("rating", t.rating_property),
             ("dielectric", "Dielectric"),
             ("tolerance", "Tolerance"),
-        )
+        ]
         for kind, label in specs:
             edit = QLineEdit()
             note = QLabel()
@@ -532,7 +543,10 @@ class AssignDialog(QDialog):
             edit.textEdited.connect(self._field_edited)
             self._fields[kind] = edit
             self._notes[kind] = note
-        self._fields["voltage"].setPlaceholderText("e.g. 16V")
+            if kind == "dielectric" and not t.has_dielectric:
+                form.setRowVisible(row, False)
+        self._fields["rating"].setPlaceholderText(
+            "e.g. 16V" if t.rating_required else "e.g. 100mW, or any")
         self._fields["dielectric"].setPlaceholderText("comma-separated, e.g. X7R, X5R")
 
         self._debounce = QTimer(self)
@@ -570,7 +584,7 @@ class AssignDialog(QDialog):
         self._search_btn = self._buttons.addButton("Search suppliers", QDialogButtonBox.ActionRole)
         self._search_btn.clicked.connect(lambda: self.request_search(True))
         self._values_btn = self._buttons.addButton("Values…", QDialogButtonBox.ActionRole)
-        self._values_btn.setToolTip("Voltages, dielectrics and tolerances of the JLCPCB "
+        self._values_btn.setToolTip("Ratings, dielectrics and tolerances of the JLCPCB "
                                     "parts of this value and package")
         self._values_btn.setEnabled(False)
         self._values_btn.clicked.connect(lambda: self._show_facets(force=True))
@@ -597,7 +611,7 @@ class AssignDialog(QDialog):
         return self._group
 
     @property
-    def original(self) -> CapacitorRequirement:
+    def original(self) -> PartRequirement:
         """The requirement the fields are edited against: the one the dialog
         was opened with, or the one adopted from a result."""
         return self._original
@@ -611,15 +625,10 @@ class AssignDialog(QDialog):
         """Set each field's text, read-only state and tooltip from
         :attr:`original`, and the conflict note and Search button with it."""
         req = self._original
-        values = {
-            "package": req.package,
-            "voltage": req.voltage_min_v,
-            "dielectric": req.dielectrics,
-            "tolerance": req.tolerance_max_pct,
-        }
-        for kind, sourced in values.items():
+        for kind in self._fields:
+            sourced = self._field_value(req, kind)
             edit = self._fields[kind]
-            edit.setText(field_text(sourced, kind))
+            edit.setText(field_text(sourced, kind, self._ptype))
             stated = sourced.source == SCHEMATIC
             edit.setReadOnly(stated)
             edit.setToolTip(
@@ -634,7 +643,7 @@ class AssignDialog(QDialog):
         self._show_conflicts(req)
         self._refresh_notes()
 
-    def _show_conflicts(self, req: CapacitorRequirement) -> None:
+    def _show_conflicts(self, req: PartRequirement) -> None:
         text = conflict_text(req)
         self._conflicts.setText(text)
         self._conflicts.setVisible(bool(text))
@@ -645,15 +654,15 @@ class AssignDialog(QDialog):
             self._search_btn.setToolTip("")
 
     @staticmethod
-    def _field_value(req: CapacitorRequirement, kind: str) -> Sourced:
+    def _field_value(req: PartRequirement, kind: str) -> Sourced:
         return {
             "package": req.package,
-            "voltage": req.voltage_min_v,
+            "rating": req.rating_min,
             "dielectric": req.dielectrics,
             "tolerance": req.tolerance_max_pct,
         }[kind]
 
-    def _adopt(self, req: CapacitorRequirement) -> None:
+    def _adopt(self, req: PartRequirement) -> None:
         """Make *req* (a requirement merged with the existing part's evidence)
         the dialog's base requirement. A field whose text differs from what
         the old base showed (typed by the user), or whose old value was an
@@ -665,7 +674,7 @@ class AssignDialog(QDialog):
             was = self._field_value(old, kind)
             if was.source == SCHEMATIC or (kind == "package" and old.footprint):
                 continue
-            if edit.text() != field_text(was, kind) or was.source == EDITED:
+            if edit.text() != field_text(was, kind, self._ptype) or was.source == EDITED:
                 keep[kind] = edit.text()
         self._original = req
         self._fill_fields()
@@ -678,7 +687,7 @@ class AssignDialog(QDialog):
         self._refresh_notes()
 
     def _merged_base(self, result: SearchResult, stale: bool,
-                     first_lookup: bool) -> Optional[CapacitorRequirement]:
+                     first_lookup: bool) -> Optional[PartRequirement]:
         """The base requirement *result* implies, ``None`` when it implies
         none: the result's own requirement for a current answer to a request
         that sent ``None``; else, for the first lookup and with *defaults*
@@ -692,11 +701,11 @@ class AssignDialog(QDialog):
     def _parsed(self) -> Union[Dict[str, Any], str]:
         f = self._fields
         return parse_field_values(
-            f["package"].text(), f["voltage"].text(), f["dielectric"].text(),
+            f["package"].text(), f["rating"].text(), f["dielectric"].text(),
             f["tolerance"].text(), original=self._original,
         )
 
-    def current_requirement(self) -> Optional[CapacitorRequirement]:
+    def current_requirement(self) -> Optional[PartRequirement]:
         """The group's requirement with the field edits applied, or ``None``
         while a field does not parse."""
         parsed = self._parsed()
@@ -706,14 +715,9 @@ class AssignDialog(QDialog):
 
     def _refresh_notes(self) -> None:
         req = self.current_requirement() or self._original
-        fields = {
-            "package": req.package,
-            "voltage": req.voltage_min_v,
-            "dielectric": req.dielectrics,
-            "tolerance": req.tolerance_max_pct,
-        }
-        for kind, sourced in fields.items():
-            self._notes[kind].setText(field_label(sourced, self._n_symbols))
+        for kind in self._fields:
+            self._notes[kind].setText(
+                field_label(self._field_value(req, kind), self._n_symbols))
 
     def _field_edited(self, _text: str) -> None:
         self._user_edited = True
@@ -855,18 +859,17 @@ class AssignDialog(QDialog):
         if result is None or not result.facets:
             return
         rows = facet_rows(result, self._shown_req)
+        every = list(result.facets.items())
         if force:
-            rows = [(key, result.facets.get(key, [])) for key in FACET_TITLES]
+            rows = every
         if not rows:
             if self._facet_popup is not None and self._facet_popup.isVisible():
-                self._facet_popup.set_facets(
-                    [(key, result.facets.get(key, [])) for key in FACET_TITLES],
-                    result.pool_size)
+                self._facet_popup.set_facets(every, result.pool_size, self._ptype)
             return
         if self._facet_popup is None:
             self._facet_popup = FacetPopup(self)
             self._facet_popup.value_chosen.connect(self._use_facet_value)
-        self._facet_popup.set_facets(rows, result.pool_size)
+        self._facet_popup.set_facets(rows, result.pool_size, self._ptype)
         self._facet_popup.show()
         self._facet_popup.raise_()
 
@@ -945,7 +948,7 @@ class AssignDialog(QDialog):
             return str(exc)
         return ""
 
-    def requirement_for(self, candidate: Candidate) -> Optional[CapacitorRequirement]:
+    def requirement_for(self, candidate: Candidate) -> Optional[PartRequirement]:
         """The requirement to write when *candidate* is accepted: the current
         one, with the part's own tolerance when the search dropped the default
         tolerance limit. ``None`` while a field does not parse."""

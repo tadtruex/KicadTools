@@ -18,6 +18,8 @@ size from a footprint or package string, and :func:`norm_dielectric` /
 library style (``"C_4p7U"``, ``"C_10U_805"``); :func:`parse_cap_description`
 reads the facts a free-text Description states (``"10uF, 25V, X5R, 805
 package"``) into a :class:`~kicadtools.evidence.DescriptionEvidence`.
+:func:`parse_res_value` and :func:`parse_res_description` do the same for
+resistors (``"R_49p9K"``, ``"10K, 603, 1%"``).
 
 Pure: no I/O.
 """
@@ -353,8 +355,105 @@ def parse_cap_description(text: object) -> DescriptionEvidence:
                     if chip_size(t)), None)
 
     return DescriptionEvidence(
-        capacitance_f=capacitance,
-        voltage_v=min(volts) if volts else None,
+        nominal=capacitance,
+        rating=min(volts) if volts else None,
         dielectrics=dielectrics,
         package=package,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Resistor Values and Descriptions as written on the user's boards.
+# --------------------------------------------------------------------------- #
+
+# "49p9K": a 'p' between digits followed by a multiplier letter is a decimal
+# point. Groups: integer digits, fraction digits, multiplier letter.
+_RES_P_DECIMAL_RE = re.compile(r"([0-9]*)[pP]([0-9]+)([RrKkMmG]?)")
+
+
+def _res_value_text(text: str) -> str:
+    """*text* rewritten for :func:`parse_resistance`: the 'p' decimal point
+    replaced by '.'."""
+    m = _RES_P_DECIMAL_RE.fullmatch(text)
+    if m:
+        return f"{m.group(1) or '0'}.{m.group(2)}{m.group(3)}"
+    return text
+
+
+def parse_res_value(text: object) -> Tuple[Optional[float], Optional[str]]:
+    """``(ohms, package)`` from a resistor Value. A plain Value (``"10K"``,
+    ``"4k7"``, ``"1"``, ``"10M"`` = 10 MΩ) has no package. Library style takes
+    an optional ``"R_"`` / ``"R-"`` prefix and ``_``-separated parts: the first
+    is the value, with ``p`` as a decimal point (``"R_49p9K"`` = 49.9 kΩ), a
+    later part accepted by :func:`chip_size` is the package (``"R_10K_805"`` ->
+    ``(10e3, "0805")``). A size code standing alone (``"R_0805"``) is the
+    package, with no resistance. Either element is ``None`` when it is not
+    stated or does not parse."""
+    if text is None:
+        return None, None
+    s = str(text).strip()
+    ohms = parse_resistance(s)
+    if ohms is not None:
+        return ohms, None
+    if s[:2] in ("R_", "R-", "r_", "r-"):
+        s = s[2:]
+    parts = [p for p in s.split("_") if p]
+    if not parts:
+        return None, None
+    if chip_size(parts[0]):
+        return None, chip_size(parts[0])
+    package = next((chip_size(p) for p in parts[1:] if chip_size(p)), None)
+    return parse_resistance(_res_value_text(parts[0])), package
+
+
+# A resistance written with its multiplier or unit apart ("10 kOhms",
+# "4.7 k"): the space is removed before the text is split into tokens.
+_DESC_RES_SPACE_RE = re.compile(r"([0-9])\s+(?=(?:[kKMG]|[Oo]hm|Ω))")
+_DESC_POWER_RE = re.compile(
+    r"(?<![A-Za-z0-9.])([0-9]+(?:\.[0-9]+)?(?:/[0-9]+)?)\s?(m?)W(?:atts?)?(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_DESC_PERCENT_RE = re.compile(r"(?<![A-Za-z0-9.])±?([0-9]+(?:\.[0-9]+)?)\s?%")
+
+
+def parse_res_description(text: object) -> DescriptionEvidence:
+    """The facts a resistor Description states: tolerance from the first
+    percentage (``"1%"``), power from the first wattage (``"1/4W"``,
+    ``"100mW"``), package from the first token :func:`chip_size` accepts
+    (``"603"`` -> ``"0603"``), and resistance from the first other token that
+    :func:`parse_res_value` reads (``"10K"``, ``"49.9K"``, ``"330"``). Text
+    stating none of these (``"Resistor, small US symbol"``) gives empty
+    evidence."""
+    s = str(text or "")
+
+    tolerance: Optional[float] = None
+    m = _DESC_PERCENT_RE.search(s)
+    if m:
+        tolerance = float(m.group(1))
+
+    power: Optional[float] = None
+    m = _DESC_POWER_RE.search(s)
+    if m:
+        power = parse_watts(m.group(1) + m.group(2) + "W")
+
+    masked = _DESC_POWER_RE.sub(" ", _DESC_PERCENT_RE.sub(" ", s))
+    masked = _DESC_METRIC_RE.sub(" ", masked)
+    masked = _DESC_RES_SPACE_RE.sub(r"\1", masked)
+    package: Optional[str] = None
+    ohms: Optional[float] = None
+    for token in re.split(r"[\s,;]+", masked):
+        token = token.strip("()[]")
+        if not token:
+            continue
+        if package is None and chip_size(token):
+            package = chip_size(token)
+            continue
+        if ohms is None and re.search(r"[0-9]", token):
+            ohms = parse_res_value(token)[0]
+
+    return DescriptionEvidence(
+        nominal=ohms,
+        rating=power,
+        package=package,
+        tolerance_pct=tolerance,
     )

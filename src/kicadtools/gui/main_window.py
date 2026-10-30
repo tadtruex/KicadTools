@@ -71,7 +71,7 @@ from kicadtools.gui.substitute_dialog import SubstituteDialog, describe_part
 from kicadtools.naturalsort import natural_key
 from kicadtools.partrotation import PartRotationStore
 from kicadtools.partsdb import PartsDb
-from kicadtools.requirement import capacitor_defaults, group_capacitors
+from kicadtools.requirement import group_parts, part_defaults
 from kicadtools.resolve import iter_bom_part_records
 from kicadtools.sexpr_parser import has_instantiated_sheets
 from kicadtools.substitute import (
@@ -190,7 +190,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.addWidget(self.parts_table)
         hint = QLabel(
-            "Double-click a capacitor group to choose its part. Stock is checked "
+            "Double-click a capacitor or resistor group to choose its part. Stock is checked "
             "against the Boards count on the LCSC tab."
         )
         hint.setWordWrap(True)
@@ -293,7 +293,7 @@ class MainWindow(QMainWindow):
         self.table.resizeColumnsToContents()  # sensible initial widths; still draggable
         self.lcsc_model.load(self._records)
         self.lcsc_table.resizeColumnsToContents()
-        self.parts_model.load(group_capacitors(self._records, self._cap_defaults()))
+        self.parts_model.load(group_parts(self._records, self._part_defaults()))
         self.parts_table.resizeColumnsToContents()
         self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
         self.setWindowModified(False)  # a fresh load matches disk → clean
@@ -600,11 +600,11 @@ class MainWindow(QMainWindow):
         self._resolve_worker = None
 
     # ---- part assignment (Parts tab) ---------------------------------
-    def _cap_defaults(self) -> "dict[str, str]":
-        """The capacitor defaults: built-in values overlaid by the database's
-        remembered settings."""
+    def _part_defaults(self) -> "dict[str, str]":
+        """The capacitor and resistor defaults: built-in values overlaid by the
+        database's remembered settings."""
         settings = self._parts_db.settings() if self._parts_db is not None else {}
-        return capacitor_defaults(settings)
+        return part_defaults(settings)
 
     def _parts_double_clicked(self, index) -> None:
         row = self.parts_proxy.mapToSource(index).row()
@@ -632,7 +632,7 @@ class MainWindow(QMainWindow):
             return
         # Re-read the remembered settings, so a defaulted field starts with the
         # last value used (an earlier accept this session may have changed it).
-        defaults = self._cap_defaults()
+        defaults = self._part_defaults()
         self.parts_model.set_defaults(defaults)
         group = self.parts_model.group_at(row)
         req = self.parts_model.requirement_at(row)
@@ -671,7 +671,7 @@ class MainWindow(QMainWindow):
         if (still_here and lookup is not None
                 and lookup is not self.parts_model.lookup_at(row)):
             # The row now shows the part's evidence and any warning it gave.
-            self.parts_model.record_lookup(row, lookup, self._cap_defaults())
+            self.parts_model.record_lookup(row, lookup, self._part_defaults())
             self._refresh_status()
         if cand is None or final_req is None:
             return
@@ -689,7 +689,7 @@ class MainWindow(QMainWindow):
         if db is None:
             return
         try:
-            part_id = db.accept_capacitor(cand.choice())
+            part_id = db.accept_part(cand.choice())
             if self._board is not None:
                 db.record_usage(part_id, board_label(self._board), group.references)
             for key, value in requirement_settings(req).items():
@@ -699,7 +699,7 @@ class MainWindow(QMainWindow):
             return
         self.parts_model.queue(row, req, cand, plan)
         # The settings written above are the new defaults for the other groups.
-        self.parts_model.set_defaults(self._cap_defaults())
+        self.parts_model.set_defaults(self._part_defaults())
         self._mark_dirty()
         self.statusBar().showMessage(
             f"{', '.join(group.references)} → {cand.mpn} ({cand.lcsc}, "
@@ -729,7 +729,7 @@ class MainWindow(QMainWindow):
         # lookup that the first one returned.
         worker = CandidateWorker(
             group=dialog.group if dialog is not None else None,
-            defaults=self._cap_defaults(),
+            defaults=self._part_defaults(),
             requirement=req,
             needed=needed,
             db_path=self._parts_db_path,
@@ -775,7 +775,7 @@ class MainWindow(QMainWindow):
         if self._parts_db is None:
             return
         try:
-            self._parts_db.reject_capacitor(cand.choice())
+            self._parts_db.reject_part(cand.choice())
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Parts database", f"Could not reject the part:\n{exc}")
             return
@@ -1160,7 +1160,7 @@ class MainWindow(QMainWindow):
             f"{sum(s.values())} components — {s['typed']} typed, "
             f"{s['guessed']} guessed, {s['accepted']} accepted, "
             f"{s['unclassified']} unclassified; "
-            f"{sum(p.values())} capacitor groups, {p[STATUS_UNASSIGNED]} unassigned"
+            f"{sum(p.values())} part groups, {p[STATUS_UNASSIGNED]} unassigned"
             + (f", {p[STATUS_CONFLICT]} with conflicts"
                if p[STATUS_CONFLICT] else "")
             + (f", {p[STATUS_NOT_SEARCHABLE]} not searchable"

@@ -178,8 +178,8 @@ def test_parse_cap_value_package_without_value():
 ])
 def test_parse_cap_description(text, farads, volts, dielectrics, package):
     ev = parse_cap_description(text)
-    assert ev.capacitance_f == pytest.approx(farads, rel=1e-9)
-    assert ev.voltage_v == volts
+    assert ev.nominal == pytest.approx(farads, rel=1e-9)
+    assert ev.rating == volts
     assert ev.dielectrics == dielectrics
     assert ev.package == package
 
@@ -225,7 +225,7 @@ def test_parse_cap_value_size_code_alone_is_a_package_not_farads(text, package):
     ("1uF, 1-2kV", 1000.0),
 ])
 def test_parse_cap_description_voltage_range_takes_lowest(text, volts):
-    assert parse_cap_description(text).voltage_v == volts
+    assert parse_cap_description(text).rating == volts
 
 
 def test_parse_cap_description_range_digits_not_a_package():

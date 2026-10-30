@@ -3,6 +3,21 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Parts tab: capacitor and resistor assignment (through 2026-10-30)
+
+The design, decisions, revisions and open items are in `CAPACITOR_PLAN.md`
+(revision 4 added resistors on the same code path; the TBD list there is the
+to-do list). State on 2026-10-30:
+
+- Revision 3 (filtered JLCPCB search, manufacturer lists, cleared fields,
+  values popup) is pushed; revision 4 (resistors) is not yet committed.
+- Neither revision has been tried in the Cockpit GUI yet; scripted live
+  checks on BarrelJackAdapter, ECG, MotorDriver and BuckConverter give every
+  chip-capacitor and resistor group a candidate (MotorDriver's radial 47 µF
+  is not searchable, TBD 2).
+- The DigiKey token was blocked once for too many requests (TBD 7); live
+  checks make a few hundred DigiKey calls.
+
 ## JLCPCB stock check + parametric substitutes (2026-10-15)
 
 Motivation: BarrelJackAdapter reached JLCPCB with unavailable parts. Check
