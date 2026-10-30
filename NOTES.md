@@ -10,7 +10,7 @@ The design, decisions, revisions and open items are in `CAPACITOR_PLAN.md`
 to-do list). State on 2026-10-30:
 
 - Revision 3 (filtered JLCPCB search, manufacturer lists, cleared fields,
-  values popup) is pushed; revision 4 (resistors) is not yet committed.
+  values popup) is pushed; revision 4 (resistors) is pushed as 236a4dc.
 - Neither revision has been tried in the Cockpit GUI yet; scripted live
   checks on BarrelJackAdapter, ECG, MotorDriver and BuckConverter give every
   chip-capacitor and resistor group a candidate (MotorDriver's radial 47 µF
