@@ -94,14 +94,13 @@ BUILTIN_DEFAULTS: Dict[str, str] = {
     # supplier's manufacturer name (case and accents ignored). Each is stocked
     # by both DigiKey and JLCPCB.
     "cap.manufacturers": (
-        "Murata, Samsung, Yageo, TDK, Taiyo Yuden, KEMET, Walsin, Samwha, "
-        "Vishay, Wurth, Kyocera, AVX, Holy Stone, Knowles"
+        "Murata, Samsung, Yageo, TDK, Taiyo Yuden, KEMET, Vishay, Wurth, "
+        "Kyocera, AVX"
     ),
     "res.package": "0603",
     "res.tolerance": "1%",
     "res.manufacturers": (
-        "Yageo, Vishay, Panasonic, Viking, Stackpole, KOA, Rohm, Walsin, "
-        "TE Connectivity, Bourns, Susumu"
+        "Yageo, Vishay, Panasonic, Stackpole, Rohm, TE Connectivity, Bourns"
     ),
 }
 

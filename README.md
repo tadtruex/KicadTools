@@ -336,11 +336,10 @@ remembered `cap.voltage_min` can't be searched until one is entered.
   manufacturer not in the `cap.manufacturers` / `res.manufacturers` setting
   are dropped, each entry matched as text within the supplier's manufacturer
   name. The built-in capacitor list is Murata, Samsung, Yageo, TDK, Taiyo
-  Yuden, KEMET, Walsin, Samwha, Vishay, Wurth, Kyocera, AVX, Holy Stone and
-  Knowles; the resistor list is Yageo, Vishay, Panasonic, Viking, Stackpole,
-  KOA, Rohm, Walsin, TE Connectivity, Bourns and Susumu. Each maker is stocked
-  at both suppliers; UNI-ROYAL, which supplies most JLCPCB Basic resistors, is
-  not sold by DigiKey. Each remaining hit's attributes are checked
+  Yuden, KEMET, Vishay, Wurth, Kyocera and AVX; the resistor list is Yageo,
+  Vishay, Panasonic, Stackpole, Rohm, TE Connectivity and Bourns. Each maker
+  is stocked at both suppliers; UNI-ROYAL, which supplies most JLCPCB Basic
+  resistors, is not sold by DigiKey. Each remaining hit's attributes are checked
   against the requirement, and the best hits are confirmed at DigiKey: same
   MPN, an active product, and parameters that also meet the requirement. The supplier search
   needs `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET`; without them the

@@ -387,10 +387,11 @@ relevance: of 600 hits, 16 were 4.7 µF. The fix and the decisions with it:
   is the capacitance alone, with the MLCC category, package and in-stock as
   request filters, every page. For 4.7 µF 0603: 196 hits, all 4.7 µF 0603.
 - **Manufacturer list** (`cap.manufacturers` setting): Murata, Samsung,
-  Yageo, TDK, Taiyo Yuden, KEMET, Walsin, Samwha, Vishay, Wurth, Kyocera,
-  AVX, Holy Stone, Knowles. Chosen as makers stocked at both suppliers; the
-  JLCPCB counts across seven common values put Murata, Samsung, Taiyo Yuden,
-  Yageo, KEMET, TDK and Walsin at the top among them. Hits from other makers
+  Yageo, TDK, Taiyo Yuden, KEMET, Vishay, Wurth, Kyocera, AVX. Chosen as
+  makers stocked at both suppliers; the JLCPCB counts across seven common
+  values put Murata, Samsung, Taiyo Yuden, Yageo, KEMET, TDK and Walsin at the
+  top among them. Walsin, Samwha, Holy Stone and Knowles were on the first
+  list and removed on 2026-10-30 (user decision). Hits from other makers
   (CCTC, HRE, FH, FOJAN …) are rejected before any DigiKey lookup, which also
   cuts DigiKey calls (see item 7 below).
 - **Cleared fields** (source `any`): Voltage:Min, Dielectric and Tolerance
@@ -424,12 +425,13 @@ Resistors use the capacitor code path. Decisions:
 - **Tolerance:** default `res.tolerance` = 1 %. Every resistor Description on
   the boards states 1 %; resistor Descriptions are read for tolerance and
   wattage as well as value and package.
-- **Manufacturers** (`res.manufacturers`): Yageo, Vishay, Panasonic, Viking,
-  Stackpole, KOA, Rohm, Walsin, TE Connectivity, Bourns, Susumu. Chosen from
-  the JLCPCB makers with at least 1000 in stock across eight common 0603
-  values, keeping those DigiKey also sells. UNI-ROYAL (most JLCPCB Basic
-  resistors), Fenghua, FOJAN, HKR and RESI are left out: DigiKey does not
-  sell them.
+- **Manufacturers** (`res.manufacturers`): Yageo, Vishay, Panasonic,
+  Stackpole, Rohm, TE Connectivity, Bourns. Chosen from the JLCPCB makers
+  with at least 1000 in stock across eight common 0603 values, keeping those
+  DigiKey also sells. UNI-ROYAL (most JLCPCB Basic resistors), Fenghua,
+  FOJAN, HKR and RESI are left out: DigiKey does not sell them. Viking, KOA,
+  Walsin and Susumu were on the first list and removed on 2026-10-30 (user
+  decision).
 - **JLCPCB search:** category `Resistors` / `Chip Resistor - Surface Mount`,
   keyword `10kΩ`. For 10 kΩ 0603: 254 hits, all 10 kΩ.
 - **Parts tab:** capacitors and resistors in one table; the Voltage column
