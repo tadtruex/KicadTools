@@ -18,7 +18,7 @@ this one is working.
 | Footprint | The Cockpit writes `Footprint` from the chosen package when the symbol has none. An existing footprint is never overwritten. |
 | Voltage floor | Never derived from net or rail names. When a symbol has no `Voltage:Min`, the dialog prompts for one (pre-filled with the last value used), keeps it editable, and writes it to the symbol on accept. |
 | Database | `Boards/parts.sqlite`, listed in `Boards/.gitignore`. |
-| Search order | Parts database first. On a miss: JLCPCB keyword search, attribute filter, then DigiKey exact lookup by MPN for the top candidates. |
+| Search order | Parts database first. On a miss: filtered JLCPCB search (value keyword, MLCC category, package, in stock), manufacturer list, attribute filter, then DigiKey exact lookup by MPN for the top candidates (revision 3). |
 | Alternates | Not stored on the symbol. Any accepted database part meeting the symbol's requirement properties is an alternate. |
 | Database path | `~/Code/Boards/parts.sqlite`, overridable with `KICADTOOLS_PARTS_DB`. |
 | Defaults | Dielectric: C0G/NP0 ≤ 1 nF, X7R between, X7R/X5R ≥ 10 µF. Tolerance: 10 % for X-class, 5 % for C0G. |
@@ -372,6 +372,35 @@ Generic parts (every capacitor, for now) need at least **1000** in stock at
 JLCPCB and at DigiKey, and at least the build quantity. Parts below that are
 not candidates; the rejection reason says so. `MIN_STOCK = 1000`.
 
+## Revision 3: filtered search, manufacturers, cleared fields (2026-10-30)
+
+A search for 4.7 µF 0603 X7R ≥16 V found nothing although JLCPCB lists over
+12,000 4.7 µF parts. The keyword `4.7uF 0603 16V X7R` was ranked by loose text
+relevance: of 600 hits, 16 were 4.7 µF. The fix and the decisions with it:
+
+- **One filtered JLCPCB search** (`suppliers.jlcpcb_mlcc_search`): keyword
+  is the capacitance alone, with the MLCC category, package and in-stock as
+  request filters, every page. For 4.7 µF 0603: 196 hits, all 4.7 µF 0603.
+- **Manufacturer list** (`cap.manufacturers` setting): Murata, Samsung,
+  Yageo, TDK, Taiyo Yuden, KEMET, Walsin, Samwha, Vishay, Wurth, Kyocera,
+  AVX, Holy Stone, Knowles. Chosen as makers stocked at both suppliers; the
+  JLCPCB counts across seven common values put Murata, Samsung, Taiyo Yuden,
+  Yageo, KEMET, TDK and Walsin at the top among them. Hits from other makers
+  (CCTC, HRE, FH, FOJAN …) are rejected before any DigiKey lookup, which also
+  cuts DigiKey calls (see item 7 below).
+- **Cleared fields** (source `any`): Voltage:Min, Dielectric and Tolerance
+  can be emptied (or set to `any`) in the dialog; the search applies no limit
+  on them and the chosen part's own value is written (source `relaxed`).
+- **Values popup** (`capsearch.facets`): per field, the values in the JLCPCB
+  pool and how many parts have each, counting parts that meet the other
+  fields. Shown for cleared fields, or for every field when nothing was
+  found; double-click fills the field.
+
+Result for the case above: with X7R, 71 parts in the pool and one X7R part
+meeting 16 V (Murata GRM188Z71C475KE21D, DigiKey stock 37, rejected by the
+floor); the popup lists X5R 28, X6S 6, X7S 3, X7R 1. With Dielectric cleared,
+X5R parts from Taiyo Yuden, Samsung, Murata and Yageo are confirmed.
+
 ## TBD (after the main loop is working)
 
 Decisions from the review of the first build (2026-10-29):
@@ -395,10 +424,9 @@ Decisions from the review of the first build (2026-10-29):
    supplier search (MotorDriver C21 accepts X5R because its LCSC part is
    X5R). Alternative: loosen only for the current parts themselves.
 6. **Search speed** (revisit after R0.1 is ready): a group with no usable
-   current part takes about 25–30 s, from the voltage-bearing and plain
-   JLCPCB keyword searches and up to 30 DigiKey lookups, run one after
-   another. Candidates: run the supplier calls in parallel, or stop at the
-   first keyword that gives enough confirmed parts.
+   current part takes about 20 s, almost all of it up to 30 DigiKey lookups
+   run one after another (the filtered JLCPCB search takes about 5 s).
+   Candidate: run the DigiKey lookups in parallel.
 7. **DigiKey rate limiting** (2026-10-29): the DigiKey API blocked the
    token for too many requests. Each group makes one `productdetails` call
    per distinct existing part-number field, one per LCSC-only part, and up to

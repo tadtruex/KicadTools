@@ -42,6 +42,7 @@ from kicadtools.capsearch import Candidate, ExistingLookup, assess, requirement_
 from kicadtools.partnum import extract_part_numbers
 from kicadtools.partsdb import PartsDb
 from kicadtools.requirement import (
+    ANY,
     DEFAULT,
     DESCRIPTION,
     EDITED,
@@ -56,7 +57,7 @@ from kicadtools.requirement import (
     tolerance_class,
 )
 from kicadtools.resolve import Cache, cached_jlcpcb_part
-from kicadtools.suppliers import DigiKeyClient, jlcpcb_search
+from kicadtools.suppliers import DigiKeyClient, jlcpcb_mlcc_search, jlcpcb_search
 from kicadtools.units import fmt_farads, fmt_percent, fmt_volts
 
 PARTS_COLUMNS = ["Value", "Package", "Voltage", "Dielectric", "Tolerance", "Qty",
@@ -127,6 +128,8 @@ def sourced_cell(field: Sourced, kind: str) -> str:
     dash; a value stated on the schematic that does not parse reads
     ``unreadable`` (``not a chip size`` for a package from a footprint such as
     a radial electrolytic)."""
+    if field.source == ANY:
+        return "any"
     if field.source == UNSET or (field.value in (None, "", ()) and field.source != SCHEMATIC):
         return DASH
     if field.value in (None, "", ()):
@@ -469,6 +472,7 @@ class CandidateWorker(QObject):
                 self._defaults,
                 db=db,
                 jlc_search=jlcpcb_search,
+                jlc_mlcc=jlcpcb_mlcc_search,
                 jlc_part=lambda code: cached_jlcpcb_part(code, cache),
                 digikey=DigiKeyClient(),
                 needed=self._needed,

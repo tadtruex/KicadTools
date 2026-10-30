@@ -23,6 +23,7 @@ from kicadtools.gui.assign_dialog import (  # noqa: E402
 )
 from kicadtools.partsdb import CapacitorParams  # noqa: E402
 from kicadtools.requirement import (  # noqa: E402
+    ANY,
     DEFAULT,
     EDITED,
     SCHEMATIC,
@@ -99,7 +100,23 @@ def test_parse_only_changed_fields():
 def test_parse_unchanged_default_voltage_kept():
     orig = _req(volts=(25.0, DEFAULT))
     assert parse_field_values("0603", "25V", "X7R", "10%", original=orig) == {}
-    assert parse_field_values("0603", "", "X7R", "10%", original=orig) == {}
+
+
+def test_parse_blank_or_any_clears_a_field():
+    orig = _req(volts=(25.0, DEFAULT))
+    assert parse_field_values("0603", "", "X7R", "10%", original=orig) == {
+        "clear": ("voltage_min_v",)}
+    assert parse_field_values("0603", "25V", "any", "", original=orig) == {
+        "clear": ("dielectrics", "tolerance_max_pct")}
+    cleared = orig.edited(clear=("voltage_min_v",))
+    assert cleared.voltage_min_v == Sourced(None, ANY) and cleared.searchable
+    # already cleared: blank changes nothing
+    assert parse_field_values("0603", "", "X7R", "10%", original=cleared) == {}
+    # no value to begin with: blank is an error, "any" clears
+    unset = _req(volts=(None, UNSET))
+    assert "Voltage:Min" in parse_field_values("0603", "", "X7R", "10%", original=unset)
+    assert parse_field_values("0603", "Any", "X7R", "10%", original=unset) == {
+        "clear": ("voltage_min_v",)}
 
 
 def test_parse_errors():
@@ -110,7 +127,7 @@ def test_parse_errors():
 
 def test_parse_ignores_package_with_footprint():
     orig = _req(footprint="Capacitor_SMD:C_0603_1608Metric", package=("0603", SCHEMATIC))
-    out = parse_field_values("0805", "16", "", "", original=orig)
+    out = parse_field_values("0805", "16", "X7R", "10%", original=orig)
     assert out == {"voltage_min_v": 16.0}
     orig.edited(**out)  # does not raise: package is not passed
 
@@ -660,3 +677,40 @@ def test_dialog_reopened_queued_row_keeps_its_edit(app):
 def AssignDialog_(group, req, defaults):
     from kicadtools.gui.assign_dialog import AssignDialog
     return AssignDialog(group, req, 1, None, defaults=defaults)
+
+
+# ---- values popup ---------------------------------------------------------------
+
+def test_facet_rows_cleared_fields_or_all_when_nothing_found():
+    from kicadtools.gui.assign_dialog import facet_rows
+
+    facets = {"voltage": [("16V", 3)], "dielectric": [("X5R", 5), ("X7R", 1)],
+              "tolerance": [("10%", 6)]}
+    req = _req(volts=(16.0, DEFAULT))
+    assert facet_rows(SearchResult([], facets=facets), req) == [
+        ("voltage", [("16V", 3)]), ("dielectric", [("X5R", 5), ("X7R", 1)]),
+        ("tolerance", [("10%", 6)])]
+    assert facet_rows(SearchResult([_cand()], facets=facets), req) == []
+    cleared = req.edited(clear=("dielectrics",))
+    assert facet_rows(SearchResult([_cand()], facets=facets), cleared) == [
+        ("dielectric", [("X5R", 5), ("X7R", 1)])]
+    assert facet_rows(SearchResult([]), cleared) == []
+
+
+def test_dialog_values_popup_fills_the_field(app):
+    from kicadtools.gui.assign_dialog import AssignDialog
+
+    req = _req(volts=(16.0, DEFAULT)).edited(clear=("dielectrics",))
+    dialog = AssignDialog(_group(req), req, 1, None)
+    assert not dialog._values_btn.isEnabled()
+    facets = {"voltage": [], "dielectric": [("X5R", 5)], "tolerance": []}
+    dialog.show_result(SearchResult([], requirement=req, facets=facets, pool_size=9))
+    assert dialog._values_btn.isEnabled()
+    popup = dialog._facet_popup
+    assert popup is not None and popup.isVisible()
+    top = popup._tree.topLevelItem(0)
+    assert (top.text(0), top.child(0).text(0), top.child(0).text(1)) == ("Dielectric", "X5R", "5")
+    popup._double_clicked(top.child(0), 0)
+    assert dialog._fields["dielectric"].text() == "X5R"
+    assert dialog.current_requirement().dielectrics == Sourced(("X5R",), EDITED)
+    popup.close()

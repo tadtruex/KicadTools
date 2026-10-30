@@ -99,7 +99,7 @@ def test_dielectric_set_normalized():
     assert _find(db, dielectrics=["COG", "NP0"])
     assert _find(db, dielectrics=[" C0G "])
     assert not _find(db, dielectrics=["X7R", "X5R"])
-    assert not _find(db, dielectrics=[])
+    assert _find(db, dielectrics=[])          # empty: any dielectric
 
 
 def test_tolerance_max():
@@ -366,3 +366,10 @@ def test_usable_from_another_thread():
     t.start()
     t.join()
     assert out == [1]
+
+
+def test_no_voltage_floor_finds_any_rating():
+    db = _db()
+    db.accept_capacitor(_cap(v=6.3))
+    assert not _find(db)                       # 16 V floor
+    assert _find(db, voltage_min_v=None)

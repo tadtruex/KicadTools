@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
-from typing import Any, Dict, List, Mapping, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
@@ -67,6 +67,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -83,6 +85,7 @@ from kicadtools.capsearch import (
 )
 from kicadtools.evidence import ExistingPart
 from kicadtools.requirement import (
+    ANY,
     DEFAULT,
     DESCRIPTION,
     EDITED,
@@ -144,6 +147,8 @@ def field_label(sourced: Sourced, n_symbols: int) -> str:
         return f"from current part — written to {n_symbols} {noun}"
     if sourced.source == DESCRIPTION:
         return f"from description — written to {n_symbols} {noun}"
+    if sourced.source == ANY:
+        return f"any — the chosen part's value is written to {n_symbols} {noun}"
     return f"required — written to {n_symbols} {noun}"
 
 
@@ -176,10 +181,22 @@ def parse_field_values(
     differs from *original*, so an unchanged field keeps its source — or a
     one-line error when a field does not parse. A field stated on the
     schematic (source ``schematic``) is not read: stated values are never
-    edited here. A blank field keeps the original value, except Voltage:Min
-    and Dielectric with no original value, which are errors: the search needs
-    a voltage floor and at least one dielectric."""
+    edited here.
+
+    A blank Voltage:Min, Dielectric or Tolerance field, or one holding
+    ``any``, is cleared (the ``clear`` keyword): the search applies no limit
+    on it and lists the values found (:attr:`SearchResult.facets`). A blank
+    Voltage:Min or Dielectric that had no value to begin with is an error
+    instead, so a voltage floor is never left out by accident; ``any`` clears
+    it."""
     kwargs: Dict[str, Any] = {}
+    clear: List[str] = []
+
+    def is_any(text: str, sourced: Sourced) -> bool:
+        if text.lower() == "any":
+            return True
+        return not text and sourced.value not in (None, "", ()) or (
+            not text and sourced.source == ANY)
 
     if not original.footprint and original.package.source != SCHEMATIC:
         text = package.strip()
@@ -193,6 +210,9 @@ def parse_field_values(
     text = voltage.strip()
     if original.voltage_min_v.source == SCHEMATIC:
         pass
+    elif is_any(text, original.voltage_min_v):
+        if original.voltage_min_v.source != ANY:
+            clear.append("voltage_min_v")
     elif text:
         v = parse_volts(text)
         if v is None or v <= 0:
@@ -202,11 +222,14 @@ def parse_field_values(
         ):
             kwargs["voltage_min_v"] = v
     elif original.voltage_min_v.value is None:
-        return "Enter Voltage:Min to search"
+        return "Enter Voltage:Min (or 'any') to search"
 
     text = dielectric.strip()
     if original.dielectrics.source == SCHEMATIC:
         pass
+    elif is_any(text, original.dielectrics):
+        if original.dielectrics.source != ANY:
+            clear.append("dielectrics")
     elif text:
         codes = []
         for code in dielectric_tokens(text):
@@ -217,11 +240,14 @@ def parse_field_values(
         if tuple(codes) != tuple(original.dielectrics.value or ()):
             kwargs["dielectrics"] = tuple(codes)
     elif not original.dielectrics.value and original.capacitance_f:
-        return "Enter a dielectric to search"
+        return "Enter a dielectric (or 'any') to search"
 
     text = tolerance.strip()
     if original.tolerance_max_pct.source == SCHEMATIC:
         pass
+    elif is_any(text, original.tolerance_max_pct):
+        if original.tolerance_max_pct.source != ANY:
+            clear.append("tolerance_max_pct")
     elif text:
         t = parse_percent(text)
         if t is None or t <= 0:
@@ -230,7 +256,80 @@ def parse_field_values(
             t, float(original.tolerance_max_pct.value), rel_tol=1e-9
         ):
             kwargs["tolerance_max_pct"] = t
+    if clear:
+        kwargs["clear"] = tuple(clear)
     return kwargs
+
+
+# The facet titles shown in the values popup, by SearchResult.facets key.
+FACET_TITLES = {"voltage": "Voltage", "dielectric": "Dielectric", "tolerance": "Tolerance"}
+
+
+def facet_rows(result: SearchResult, req: Optional[CapacitorRequirement]
+               ) -> List[Tuple[str, List[Tuple[str, int]]]]:
+    """The facets the values popup shows for *result*, as (field key, rows):
+    the fields cleared in *req* (source ``any``); when none is cleared and the
+    result has no candidates, every field. Empty when the supplier search did
+    not run."""
+    if not result.facets:
+        return []
+    cleared = []
+    if req is not None:
+        for key, sourced in (("voltage", req.voltage_min_v),
+                             ("dielectric", req.dielectrics),
+                             ("tolerance", req.tolerance_max_pct)):
+            if sourced.source == ANY:
+                cleared.append(key)
+    if not cleared:
+        if result.candidates:
+            return []
+        cleared = list(FACET_TITLES)
+    return [(key, result.facets.get(key, [])) for key in cleared]
+
+
+class FacetPopup(QDialog):
+    """The values popup: for each field shown, the values the JLCPCB parts
+    have and how many have each (counting parts that meet the other fields).
+    Double-click a value to put it in its field (``value_chosen(key, text)``)."""
+
+    value_chosen = Signal(str, str)
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Matching values")
+        self.setModal(False)
+        self._note = QLabel("")
+        self._note.setWordWrap(True)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Value", "Parts"])
+        self._tree.itemDoubleClicked.connect(self._double_clicked)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._note)
+        layout.addWidget(self._tree)
+        self.resize(320, 360)
+
+    def set_facets(self, rows: List[Tuple[str, List[Tuple[str, int]]]], pool: int) -> None:
+        self._note.setText(
+            f"{pool} JLCPCB part(s) of this value and package, in stock, from the "
+            "listed manufacturers (DigiKey not checked). Each count meets the "
+            "other fields. Double-click a value to use it."
+        )
+        self._tree.clear()
+        for key, values in rows:
+            top = QTreeWidgetItem([FACET_TITLES.get(key, key), str(sum(n for _, n in values))])
+            top.setData(0, Qt.UserRole, None)
+            for text, n in values:
+                child = QTreeWidgetItem([text, str(n)])
+                child.setData(0, Qt.UserRole, key)
+                top.addChild(child)
+            self._tree.addTopLevelItem(top)
+            top.setExpanded(True)
+        self._tree.resizeColumnToContents(0)
+
+    def _double_clicked(self, item: QTreeWidgetItem, _col: int) -> None:
+        key = item.data(0, Qt.UserRole)
+        if key:
+            self.value_chosen.emit(key, item.text(0))
 
 
 def _count(n: Optional[int]) -> str:
@@ -470,6 +569,12 @@ class AssignDialog(QDialog):
         self._buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self._search_btn = self._buttons.addButton("Search suppliers", QDialogButtonBox.ActionRole)
         self._search_btn.clicked.connect(lambda: self.request_search(True))
+        self._values_btn = self._buttons.addButton("Values…", QDialogButtonBox.ActionRole)
+        self._values_btn.setToolTip("Voltages, dielectrics and tolerances of the JLCPCB "
+                                    "parts of this value and package")
+        self._values_btn.setEnabled(False)
+        self._values_btn.clicked.connect(lambda: self._show_facets(force=True))
+        self._facet_popup: Optional[FacetPopup] = None
         self._accept_btn = self._buttons.addButton("Accept", QDialogButtonBox.AcceptRole)
         self._accept_btn.setEnabled(False)
         self._buttons.accepted.connect(self.accept)
@@ -738,8 +843,40 @@ class AssignDialog(QDialog):
             current = [r for r, c in enumerate(self._candidates) if c.source == CURRENT]
             self._table.selectRow(current[0] if current else 0)
         self._selection_changed()
+        self._values_btn.setEnabled(bool(result.facets))
+        self._show_facets()
         if changed:
             self._search_again()
+
+    def _show_facets(self, force: bool = False) -> None:
+        """Open (or update) the values popup: automatically when a field is
+        cleared or the search found nothing; with *force*, for every field."""
+        result = self._result
+        if result is None or not result.facets:
+            return
+        rows = facet_rows(result, self._shown_req)
+        if force:
+            rows = [(key, result.facets.get(key, [])) for key in FACET_TITLES]
+        if not rows:
+            if self._facet_popup is not None and self._facet_popup.isVisible():
+                self._facet_popup.set_facets(
+                    [(key, result.facets.get(key, [])) for key in FACET_TITLES],
+                    result.pool_size)
+            return
+        if self._facet_popup is None:
+            self._facet_popup = FacetPopup(self)
+            self._facet_popup.value_chosen.connect(self._use_facet_value)
+        self._facet_popup.set_facets(rows, result.pool_size)
+        self._facet_popup.show()
+        self._facet_popup.raise_()
+
+    def _use_facet_value(self, key: str, text: str) -> None:
+        """Put a value from the popup in its field, as if typed."""
+        edit = self._fields.get(key)
+        if edit is None or edit.isReadOnly():
+            return
+        edit.setText(text)
+        self._field_edited(text)
 
     def _search_again(self) -> None:
         """Request the last kind of search for the merged requirement when it

@@ -18,7 +18,9 @@ that records where it came from:
 * ``description`` — stated in the symbol's free-text ``Description``
   (:class:`kicadtools.evidence.DescriptionEvidence`); used only for fields no
   other source states;
-* ``unset``     — no value from any source (the dialog prompts for one).
+* ``unset``     — no value from any source (the dialog prompts for one);
+* ``any``       — cleared in the Cockpit's assign dialog: no limit on the
+  field; the chosen part's own value is written.
 
 Each field takes the first source that states it; the order per field is in
 :func:`capacitor_requirement`. When two sources state a capacitance or a
@@ -70,6 +72,9 @@ RELAXED = "relaxed"
 PART = "part"
 DESCRIPTION = "description"
 UNSET = "unset"
+# Cleared in the assign dialog: the search applies no limit on the field, and
+# the chosen part's own value is written (see capsearch.requirement_for).
+ANY = "any"
 
 # Two capacitances within this relative difference are the same value.
 _CAP_MATCH_REL = 1e-3
@@ -84,6 +89,13 @@ BUILTIN_DEFAULTS: Dict[str, str] = {
     "cap.dielectric.bulk": "X7R, X5R",
     "cap.tolerance.class1": "5%",
     "cap.tolerance.class2": "10%",
+    # Manufacturers whose parts are searched, matched as text within the
+    # supplier's manufacturer name (case and accents ignored). Each is stocked
+    # by both DigiKey and JLCPCB.
+    "cap.manufacturers": (
+        "Murata, Samsung, Yageo, TDK, Taiyo Yuden, KEMET, Walsin, Samwha, "
+        "Vishay, Wurth, Kyocera, AVX, Holy Stone, Knowles"
+    ),
 }
 
 # Dielectric band boundaries (farads): small at or below 1 nF, bulk at or
@@ -178,7 +190,7 @@ class CapacitorRequirement:
             return "no package"
         if package_code(pkg) != pkg:
             return f"package '{pkg}' is not a known chip size"
-        if self.voltage_min_v.value is None:
+        if self.voltage_min_v.value is None and self.voltage_min_v.source != ANY:
             if self.voltage_min_v.source == SCHEMATIC:
                 return "Voltage:Min on the schematic is not a voltage"
             return "no minimum voltage (Voltage:Min)"
@@ -191,11 +203,18 @@ class CapacitorRequirement:
         voltage_min_v: Optional[float] = None,
         dielectrics: Optional[Sequence[str]] = None,
         tolerance_max_pct: Optional[float] = None,
+        clear: Sequence[str] = (),
     ) -> "CapacitorRequirement":
         """A copy in which each argument that is not ``None`` replaces its field,
-        tagged :data:`EDITED`. The package of a symbol with a footprint is fixed
-        by that footprint, so editing it raises ``ValueError``."""
+        tagged :data:`EDITED`, and each field named in *clear*
+        (``"voltage_min_v"``, ``"dielectrics"``, ``"tolerance_max_pct"``) has
+        no value, tagged :data:`ANY`. The package of a symbol with a footprint
+        is fixed by that footprint, so editing it raises ``ValueError``."""
         changes: Dict[str, Sourced] = {}
+        for name in clear:
+            if name not in _CLEARABLE:
+                raise ValueError(f"{name} cannot be cleared")
+            changes[name] = Sourced(_CLEARABLE[name], ANY)
         if package is not None:
             if self.footprint:
                 raise ValueError(
@@ -213,6 +232,14 @@ class CapacitorRequirement:
                 float(tolerance_max_pct), EDITED
             )
         return replace(self, **changes)
+
+
+# Fields the assign dialog can clear, and the value a cleared field holds.
+_CLEARABLE: Dict[str, Any] = {
+    "voltage_min_v": None,
+    "dielectrics": (),
+    "tolerance_max_pct": None,
+}
 
 
 def _codes(entries: Sequence[str] | str) -> Tuple[str, ...]:

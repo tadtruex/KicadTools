@@ -300,17 +300,24 @@ remembered `cap.voltage_min` can't be searched until one is entered.
   evidence.
 - When the existing part is Active at DigiKey, orderable at JLCPCB, meets the
   requirement and the stock floor, it is the first candidate (source
-  `current`), it is selected, and the supplier keyword search does not run:
+  `current`), it is selected, and the supplier search does not run:
   a part that meets the requirement is kept. Otherwise the reason it was
   passed over is listed among the rejections (hover over the status line) and
   the search proceeds with the requirement its evidence provided.
 - The other candidates come from the parts database: accepted parts that
   meet the requirement, with JLCPCB stock and price and DigiKey stock fetched
   fresh. When neither the existing part nor the database gives a candidate,
-  or on **Search suppliers**, JLCPCB is searched once per allowed dielectric
-  (`100nF 0603 X7R`), each hit's attributes are checked against the
-  requirement, and the best hits are confirmed at DigiKey: same MPN, an active
-  product, and parameters that also meet the requirement. The supplier search
+  or on **Search suppliers**, JLCPCB is searched once, the way its parts page
+  filters: the capacitance as the keyword (`4.7uF`), with the MLCC category,
+  the package and in-stock as filters, every result page. (A longer keyword
+  such as `4.7uF 0603 X7R` is ranked by loose text relevance, and most hits
+  are then other values.) Hits from a manufacturer not in the
+  `cap.manufacturers` setting are dropped; the built-in list is Murata,
+  Samsung, Yageo, TDK, Taiyo Yuden, KEMET, Walsin, Samwha, Vishay, Wurth,
+  Kyocera, AVX, Holy Stone and Knowles, each matched as text within the
+  supplier's manufacturer name. Each remaining hit's attributes are checked
+  against the requirement, and the best hits are confirmed at DigiKey: same
+  MPN, an active product, and parameters that also meet the requirement. The supplier search
   needs `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET`; without them the
   dialog lists the current part and the database matches only and says why.
   Candidates are ranked with the current part first, then by recorded uses,
@@ -329,6 +336,19 @@ remembered `cap.voltage_min` can't be searched until one is entered.
   `Tolerance:Preferred`; the remembered `cap.tolerance.*` default is left as it
   was. A tolerance stated on the schematic or edited in the dialog is always
   applied.
+- **Clearing a field.** Empty the Voltage:Min, Dielectric or Tolerance field
+  (or type `any`) to search without a limit on it; its note reads `any`. A
+  field that had no value must be given one or `any`, so a voltage floor is
+  never left out by accident. On Accept the chosen part's own value is written
+  to the symbols for a cleared field, and the remembered default is left as it
+  was.
+- **Values popup.** After a supplier search, a popup lists, for each cleared
+  field, the values the JLCPCB parts have and how many have each, counting
+  only parts of the right value and package, in stock above the floor, from a
+  listed manufacturer, and meeting the other fields (DigiKey is not checked).
+  It opens by itself when a field is cleared, or for every field when the
+  search found nothing; **Values…** opens it for every field at any time.
+  Double-click a value to put it in its field.
 - Right-click a candidate and choose **Reject** to record it as rejected in the
   parts database; it is excluded from every later search.
 - Select a candidate and press **Accept**. The part is recorded as accepted in

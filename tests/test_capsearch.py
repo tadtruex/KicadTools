@@ -20,7 +20,9 @@ from kicadtools.capsearch import (
     read_existing,
     rank_key,
     requirement_for,
-    search_keywords,
+    facets,
+    manufacturer_allowed,
+    parse_manufacturers,
 )
 from kicadtools.evidence import ExistingPart
 from kicadtools.intent import ElectricalIntent
@@ -114,6 +116,22 @@ class FakeJlc:
         self.lookups.append(lcsc)
         return self.parts.get(lcsc)
 
+    def mlcc(self, value: str, package: str) -> List[JlcPart]:
+        """The filtered MLCC search: *default*, plus every part listed under a
+        keyword that starts with the value and package, once per LCSC code."""
+        key = f"{value} {package}"
+        self.searches.append(key)
+        out: List[JlcPart] = []
+        seen = set()
+        lists = [self.default] + [v for k, v in self.by_keyword.items()
+                                  if k == key or k.startswith(key + " ")]
+        for hits in lists:
+            for h in hits:
+                if h.lcsc not in seen:
+                    seen.add(h.lcsc)
+                    out.append(h)
+        return out
+
 
 class FakeDigiKey:
     def __init__(self, products: Optional[Dict[str, DigiKeyProduct]] = None,
@@ -150,7 +168,7 @@ def _run(req=None, *, db=None, jlc=None, dk=None, needed=10, **kw):
     jlc = jlc or FakeJlc()
     dk = dk if dk is not None else FakeDigiKey()
     return find_candidates(
-        req or _req(), db=db or _db(), jlc_search=jlc.search,
+        req or _req(), db=db or _db(), jlc_mlcc=jlc.mlcc,
         jlc_part=jlc.part, digikey=dk, needed=needed, **kw,
     )
 
@@ -163,20 +181,66 @@ def _reasons(result) -> Dict[str, str]:
 # Keywords and problems
 # --------------------------------------------------------------------------- #
 
-def test_keyword_format():
-    assert search_keywords(_req()) == ["100nF 0603 16V X7R", "100nF 0603 X7R"]
-    assert search_keywords(_req(volts=None)) == ["100nF 0603 X7R"]
-    assert search_keywords(_req(cap=10e-6, package="0805", diel=("X7R", "X5R"))) == [
-        "10uF 0805 16V X7R", "10uF 0805 16V X5R", "10uF 0805 X7R", "10uF 0805 X5R"]
-    assert search_keywords(_req(cap=22e-12, diel=("C0G", "NP0"))) == [
-        "22pF 0603 16V C0G", "22pF 0603 16V NP0", "22pF 0603 C0G", "22pF 0603 NP0"]
-
-
-def test_one_search_per_dielectric():
+def test_one_filtered_search_by_value_and_package():
     jlc = FakeJlc()
     _run(_req(diel=("X7R", "X5R")), jlc=jlc)
-    assert jlc.searches == ["100nF 0603 16V X7R", "100nF 0603 16V X5R",
-                            "100nF 0603 X7R", "100nF 0603 X5R"]
+    assert jlc.searches == ["100nF 0603"]
+    jlc = FakeJlc()
+    _run(_req(cap=22e-12, diel=("C0G", "NP0")), jlc=jlc)
+    assert jlc.searches == ["22pF 0603"]
+
+
+def test_manufacturer_matching():
+    allowed = parse_manufacturers("Murata, Samsung , ,Holy Stone, Wurth")
+    assert allowed == ("Murata", "Samsung", "Holy Stone", "Wurth")
+    assert manufacturer_allowed("Samsung Electro-Mechanics", allowed)
+    assert manufacturer_allowed("SAMSUNG", allowed)
+    assert manufacturer_allowed("IHHEC(HOLY STONE ENTERPRISE CO., LTD)", allowed)
+    assert manufacturer_allowed("Würth Elektronik", allowed)
+    assert not manufacturer_allowed("CCTC", allowed)
+    assert manufacturer_allowed("CCTC", ())
+
+
+def test_manufacturer_not_listed_is_rejected():
+    jlc = FakeJlc(default=[_jlc("C1", "TCC0603X7R104K500CT", mfr="CCTC")])
+    res = _run(_req(), jlc=jlc, manufacturers=("Murata", "Samsung"))
+    assert _reasons(res)["C1 TCC0603X7R104K500CT"] == "manufacturer 'CCTC' is not in the list"
+    assert res.pool_size == 0
+
+
+def test_facets_count_each_field_against_the_others():
+    pool = [
+        _jlc("C1", "A", diel="X5R", volts="16V"),
+        _jlc("C2", "B", diel="X5R", volts="25V"),
+        _jlc("C3", "C", diel="X7R", volts="16V", tol="±20%"),
+        _jlc("C4", "D", diel="X7R", volts="6.3V"),
+    ]
+    f = facets(_req(volts=16.0, diel=("X7R",), tol=10.0), pool)
+    # dielectric counted against voltage >= 16 V and tolerance <= 10 %
+    assert f["dielectric"] == [("X5R", 2)]
+    # voltage counted against X7R and <= 10 %: only D (6.3 V)
+    assert f["voltage"] == [("6.3V", 1)]
+    # tolerance counted against X7R and >= 16 V: only C (20 %)
+    assert f["tolerance"] == [("20%", 1)]
+
+
+def test_cleared_fields_are_not_checked_and_facets_are_returned():
+    jlc = FakeJlc(default=[_jlc("C1", "A", diel="X5R", volts="6.3V"),
+                           _jlc("C2", "B", diel="X5R", volts="16V")])
+    dk = FakeDigiKey({"A": _dk("A", diel="X5R", volts="6.3V"),
+                      "B": _dk("B", diel="X5R", volts="16V")})
+    req = _req(volts=16.0, diel=("X7R",)).edited(clear=("dielectrics",))
+    res = _run(req, jlc=jlc, dk=dk)
+    assert [c.mpn for c in res.candidates] == ["B"]
+    assert res.facets["dielectric"] == [("X5R", 1)]
+    assert res.pool_size == 2
+    # the chosen part's own dielectric is written
+    out = requirement_for(req, res, res.candidates[0])
+    assert out.dielectrics == Sourced(("X5R",), RELAXED)
+    # a cleared voltage: any rating passes
+    res = _run(_req(volts=16.0, diel=("X5R",)).edited(clear=("voltage_min_v",)),
+               jlc=jlc, dk=dk)
+    assert sorted(c.mpn for c in res.candidates) == ["A", "B"]
 
 
 def test_not_searchable_returns_problem_without_calls():
@@ -517,8 +581,6 @@ def test_absolute_pf_tolerance_too_loose_rejected():
 def test_combined_dielectric_entry_in_requirement_is_split():
     # A requirement entry written as one string still matches each code.
     req = _req(diel=("C0G, NP0",), cap=22e-12, tol=5.0, value="22pF")
-    assert search_keywords(req) == ["22pF 0603 16V C0G", "22pF 0603 16V NP0",
-                                    "22pF 0603 C0G", "22pF 0603 NP0"]
     part = _jlc(cap="22pF", diel="NP0", tol="±5%")
     dk = FakeDigiKey({"CL10B104KB8NNNC": _dk(cap="22 pF", diel="NP0", tol="±5%")})
     res = _run(req, jlc=FakeJlc(default=[part]), dk=dk)
@@ -532,11 +594,11 @@ def test_greek_mu_and_micro_sign_capacitance_agree():
     assert len(res.candidates) == 1
 
 
-def test_same_lcsc_from_two_keywords_examined_once():
-    jlc = FakeJlc(default=[_jlc()])
+def test_same_lcsc_listed_twice_examined_once():
+    jlc = FakeJlc(default=[_jlc()], by_keyword={"100nF 0603 X7R": [_jlc()]})
     dk = FakeDigiKey({"CL10B104KB8NNNC": _dk()})
     res = _run(_req(diel=("X7R", "X5R")), jlc=jlc, dk=dk)
-    assert len(jlc.searches) == 4
+    assert len(jlc.searches) == 1
     assert res.examined == 1
     assert dk.calls == ["CL10B104KB8NNNC"]
     assert len(res.candidates) == 1
@@ -590,7 +652,7 @@ def test_default_tolerance_dropped_when_nothing_meets_it():
     assert res.relaxed_tolerance_pct == 10.0
     assert "10%" in res.relaxed_note
     # The second pass reuses the first pass's supplier answers.
-    assert jlc.searches == ["100nF 0603 16V X7R", "100nF 0603 X7R"]
+    assert jlc.searches == ["100nF 0603"]
     assert dk.calls == ["CL10B104KB8NNNC"]
 
 
@@ -679,7 +741,7 @@ def test_database_hit_low_digikey_stock_rejected_and_search_runs():
     assert [(c.mpn, c.source) for c in res.candidates] == [("CL10B104KB8NNNC", SEARCH)]
     assert _reasons(res) == {
         "C77047 GRM188R71H104KA93D": "DigiKey stock 12, need at least 1000"}
-    assert jlc.searches == ["100nF 0603 16V X7R", "100nF 0603 X7R"]
+    assert jlc.searches == ["100nF 0603"]
 
 
 # --------------------------------------------------------------------------- #
@@ -727,7 +789,7 @@ def _group(**props):
 def _assess(group, *, db=None, jlc=None, dk=None, needed=10, **kw):
     jlc = jlc or FakeJlc()
     dk = dk if dk is not None else FakeDigiKey()
-    return assess(group, DEFAULTS, db=db or _db(), jlc_search=jlc.search,
+    return assess(group, DEFAULTS, db=db or _db(), jlc_search=jlc.search, jlc_mlcc=jlc.mlcc,
                   jlc_part=jlc.part, digikey=dk, needed=needed, **kw)
 
 
@@ -933,8 +995,7 @@ def test_assess_current_part_low_jlc_stock_rejected_and_search_runs():
     res = _assess(_group(MPN=TDK), jlc=jlc, dk=dk)
     assert _reasons(res) == {"current part": "JLCPCB stock 33, need at least 1000"}
     assert [c.mpn for c in res.candidates] == ["ALT"]
-    assert jlc.searches == [TDK, "4.7uF 0603 16V X6S", "4.7uF 0603 16V X7R",
-                            "4.7uF 0603 X6S", "4.7uF 0603 X7R"]
+    assert jlc.searches == [TDK, "4.7uF 0603"]
 
 
 def test_assess_current_part_failing_requirement_rejected_and_search_runs():
@@ -942,7 +1003,7 @@ def test_assess_current_part_failing_requirement_rejected_and_search_runs():
     jlc, dk = _tdk_suppliers()
     res = _assess(_group(MPN=TDK, **{"Voltage:Min": "25V"}), jlc=jlc, dk=dk)
     assert _reasons(res)["current part"] == "DigiKey rating 16V, need at least 25V"
-    assert "4.7uF 0603 X6S" in jlc.searches
+    assert "4.7uF 0603" in jlc.searches
 
 
 def test_assess_current_part_inactive_rejected():
@@ -964,7 +1025,7 @@ def test_assess_part_not_fitting_is_ignored_and_the_other_used():
         "Value says 4.7uF; current part 13-CC0402JRX7R8BB104CT-ND (DigiKey) says 100nF "
         "(current part 13-CC0402JRX7R8BB104CT-ND (DigiKey) not used)",)
     assert [(c.source, c.mpn) for c in res.candidates] == [(CURRENT, TDK)]
-    assert "4.7uF 0603 X6S" not in jlc.searches
+    assert "4.7uF 0603" not in jlc.searches
 
 
 def test_assess_no_part_fits_searches_from_schematic():
@@ -1233,6 +1294,7 @@ def test_real_value_and_description_pairs_search(value, desc, fp, farads,
     assert req.voltage_min_v == Sourced(volts, DESCRIPTION)
     # Searchable: the keyword search ran with the merged requirement.
     assert jlc.searches and all(k.split()[1] == package for k in jlc.searches)
+    assert len(jlc.searches) == 1
 
 
 @pytest.mark.parametrize("desc", ["Unpolarized capacitor, small symbol",

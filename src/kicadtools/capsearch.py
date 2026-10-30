@@ -28,17 +28,21 @@ suppliers:
    *jlc_part* and its DigiKey stock through *digikey* when DigiKey credentials
    are set. Source ``database``; always listed.
 2. **Supplier search** — when neither the current part nor the database gives
-   a candidate, or when *search_suppliers* is true. One JLCPCB keyword search per allowed dielectric
-   (``"100nF 0603 X7R"``). JLCPCB ranks hits by text relevance, so each hit is
-   re-checked against its catalog attributes: capacitance equal within 0.1 %,
+   a candidate, or when *search_suppliers* is true. One filtered JLCPCB search
+   (*jlc_mlcc*): the capacitance as the keyword (``"4.7uF"``), the MLCC
+   category, the package and in-stock as filters, every page. Hits from a
+   manufacturer not in *manufacturers* are dropped. Each remaining hit is
+   checked against its catalog attributes: capacitance equal within 0.1 %,
    voltage rating at or above the floor, dielectric in the allowed set,
-   tolerance at or below the maximum, and the same chip package. A hit lacking
-   a constrained attribute is rejected, since an unknown rating is not an
-   acceptable one. Hits that are not orderable, rejected in the database, or
-   already listed from the database are dropped. The survivors are ranked and
-   the top *limit* are looked up at DigiKey by MPN; a candidate is kept only
-   when DigiKey lists the same MPN, as an active product, with parameters that
-   also meet the requirement. Source ``search``.
+   tolerance at or below the maximum, and the same chip package. A field
+   cleared in the dialog (source ``any``) is not checked. A hit lacking a
+   constrained attribute is rejected, since an unknown rating is not an
+   acceptable one. Hits that are rejected in the database, or already listed,
+   are dropped. The survivors are ranked and looked up at DigiKey by MPN until
+   *limit* are confirmed; a candidate is kept only when DigiKey lists the same
+   MPN, as an active product, with parameters that also meet the
+   requirement. Source ``search``. :attr:`SearchResult.facets` counts the
+   hits per voltage, dielectric and tolerance (see :func:`facets`).
 3. **Stock floor** — every candidate, from any source, needs a known stock of
    at least :data:`MIN_STOCK` and at least the build quantity at JLCPCB and at
    DigiKey. A search hit's JLCPCB stock is checked before its DigiKey lookup,
@@ -51,7 +55,9 @@ Every part dropped in steps 0 to 3 is recorded with its reason in
 :attr:`SearchResult.rejected`, for the assign dialog's "rejected N" note.
 
 Pure apart from the injected callables: *jlc_search* (keyword ->
-:class:`~kicadtools.suppliers.JlcPart` hits), *jlc_part* (LCSC code -> one
+:class:`~kicadtools.suppliers.JlcPart` hits, for existing-part MPNs),
+*jlc_mlcc* (capacitance text and package -> the filtered MLCC hits, as
+:func:`kicadtools.suppliers.jlcpcb_mlcc_search`), *jlc_part* (LCSC code -> one
 ``JlcPart`` or ``None``) and *digikey* (``configured`` plus
 ``product_for(pn) -> DigiKeyProduct | None``, as on
 :class:`~kicadtools.suppliers.DigiKeyClient`).
@@ -59,12 +65,14 @@ Pure apart from the injected callables: *jlc_search* (keyword ->
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from kicadtools.evidence import ExistingPart, PartEvidence
 from kicadtools.partsdb import CapacitorChoice, CapacitorParams, DbCapacitor, PartsDb
 from kicadtools.requirement import (
+    ANY,
     DEFAULT,
     PART,
     RELAXED,
@@ -197,7 +205,9 @@ class SearchResult:
     ``relaxed_tolerance_pct`` is the default tolerance limit that was dropped
     because no part met it, or ``None`` when the limit applied.
     ``requirement`` and ``existing`` are the requirement searched and the
-    existing-part lookup, set by :func:`assess`."""
+    existing-part lookup, set by :func:`assess`. ``facets`` and ``pool_size``
+    describe the JLCPCB pool (see :func:`facets`), set when the supplier
+    search ran."""
     candidates: List[Candidate]
     examined: int = 0
     rejected: List[Tuple[str, str]] = field(default_factory=list)
@@ -206,6 +216,9 @@ class SearchResult:
     relaxed_tolerance_pct: Optional[float] = None
     requirement: Optional[CapacitorRequirement] = None
     existing: Optional["ExistingLookup"] = None
+    # Field -> [(value, count)] over the JLCPCB pool; see :func:`facets`.
+    facets: Dict[str, List[Tuple[str, int]]] = field(default_factory=dict)
+    pool_size: int = 0
 
     @property
     def relaxed_note(self) -> str:
@@ -249,11 +262,11 @@ def _check_params(
     """Parse and check capacitance, voltage, dielectric and tolerance read
     through *get* under the supplier's parameter *names* (in that order).
     Returns the parsed parameters and ``""`` when every check passes, else
-    ``None`` and the reason. Dielectric and tolerance are checked only when the
-    requirement constrains them; capacitance and voltage always."""
+    ``None`` and the reason. Voltage, dielectric and tolerance are checked
+    only when the requirement constrains them; capacitance always."""
     cap_name, volt_name, diel_name, tol_name = names
     want_c = float(req.capacitance_f)
-    want_v = float(req.voltage_min_v.value)
+    want_v = req.voltage_min_v.value
     allowed: Tuple[str, ...] = tuple(
         t for d in (req.dielectrics.value or ()) for t in dielectric_tokens(d)
     )
@@ -271,14 +284,16 @@ def _check_params(
         )
 
     raw = get(volt_name)
-    if raw is None:
-        return None, f"{supplier} lists no {volt_name}"
     v = parse_volts(raw)
-    if v is None:
+    if want_v is None:
+        pass
+    elif raw is None:
+        return None, f"{supplier} lists no {volt_name}"
+    elif v is None:
         return None, f"{supplier} {volt_name} '{raw}' does not parse"
-    if v < want_v * (1 - _LIMIT_EPS):
+    elif v < float(want_v) * (1 - _LIMIT_EPS):
         return None, (
-            f"{supplier} rating {fmt_volts(v)}, need at least {fmt_volts(want_v)}"
+            f"{supplier} rating {fmt_volts(v)}, need at least {fmt_volts(float(want_v))}"
         )
 
     raw = get(diel_name)
@@ -395,29 +410,74 @@ def _from_database(hit: DbCapacitor, jlc_part, digikey) -> Candidate:
 # Supplier search.
 # --------------------------------------------------------------------------- #
 
-def search_keywords(req: CapacitorRequirement) -> List[str]:
-    """The JLCPCB search texts for *req*: capacitance and package, once per
-    allowed dielectric (``"100nF 0603 X7R"``). Relevance ranking buries an X5R
-    part under a search for X7R, so each dielectric gets its own search. The
-    voltage floor and tolerance are left out of the text, since a higher
-    rating or a tighter tolerance also qualifies, and are checked on the
-    hits."""
-    base = f"{fmt_farads(float(req.capacitance_f))} {req.package.value}"
-    dielectrics: List[str] = []
-    for entry in req.dielectrics.value or ():
-        for code in dielectric_tokens(entry):
-            if code not in dielectrics:
-                dielectrics.append(code)
-    plain = [f"{base} {d}" for d in dielectrics] if dielectrics else [base]
-    # With the voltage floor in the text the results are mostly parts at that
-    # rating; without it, higher-rated parts (often JLCPCB Basic) come back.
-    # Both are searched, the voltage-bearing ones first.
-    volts = req.voltage_min_v.value
-    if volts:
-        v = fmt_volts(float(volts))
-        rated = [f"{base} {v} {d}" for d in dielectrics] if dielectrics else [f"{base} {v}"]
-        return rated + plain
-    return plain
+def _fold(text: str) -> str:
+    """*text* lower-cased with accents removed (``"Würth"`` -> ``"wurth"``)."""
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
+
+
+def parse_manufacturers(text: Optional[str]) -> Tuple[str, ...]:
+    """The comma-separated manufacturer list of the ``cap.manufacturers``
+    setting, blanks dropped."""
+    return tuple(m.strip() for m in (text or "").split(",") if m.strip())
+
+
+def manufacturer_allowed(name: str, allowed: Sequence[str]) -> bool:
+    """True when *allowed* is empty, or one of its entries occurs in the
+    supplier's manufacturer *name* (case and accents ignored), so
+    ``"Samsung"`` accepts ``"Samsung Electro-Mechanics"`` and ``"Holy Stone"``
+    accepts ``"IHHEC(HOLY STONE ENTERPRISE CO., LTD)"``."""
+    if not allowed:
+        return True
+    folded = _fold(name)
+    return any(_fold(m) in folded for m in allowed if m.strip())
+
+
+# The fields facets() counts, with the requirement field each one clears.
+FACET_FIELDS = (
+    ("voltage", "voltage_min_v"),
+    ("dielectric", "dielectrics"),
+    ("tolerance", "tolerance_max_pct"),
+)
+
+
+def facets(req: CapacitorRequirement,
+           pool: Sequence[JlcPart]) -> Dict[str, List[Tuple[str, int]]]:
+    """For each of voltage, dielectric and tolerance, the values the *pool*
+    parts have and how many have each, counting only parts that meet *req* on
+    the other fields (the field itself is treated as cleared). Voltages and
+    tolerances are listed in ascending order, dielectrics by count. The pool
+    is the JLCPCB search hits of the right capacitance, package and listed
+    manufacturer, orderable and above the stock floor; DigiKey is not
+    consulted."""
+    names = (JLC_CAPACITANCE, JLC_VOLTAGE, JLC_DIELECTRIC, JLC_TOLERANCE)
+    out: Dict[str, List[Tuple[str, int]]] = {}
+    for key, req_field in FACET_FIELDS:
+        sub = req.edited(clear=(req_field,))
+        counts: Dict[str, int] = {}
+        order: Dict[str, float] = {}
+        for part in pool:
+            params, _ = _check_params(sub, "JLCPCB", part.attributes.get, names)
+            if params is None:
+                continue
+            if key == "voltage":
+                if params.voltage_v is None:
+                    continue
+                label, rank = fmt_volts(params.voltage_v), params.voltage_v
+            elif key == "dielectric":
+                label, rank = params.dielectric or "(none listed)", 0.0
+            else:
+                if params.tolerance_pct is None:
+                    continue
+                label, rank = fmt_percent(params.tolerance_pct), params.tolerance_pct
+            counts[label] = counts.get(label, 0) + 1
+            order[label] = rank
+        if key == "dielectric":
+            rows = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        else:
+            rows = sorted(counts.items(), key=lambda kv: order[kv[0]])
+        out[key] = rows
+    return out
 
 
 def _jlc_check(req: CapacitorRequirement, part: JlcPart) -> Tuple[Optional[Candidate], str]:
@@ -495,13 +555,14 @@ def find_candidates(
     req: CapacitorRequirement,
     *,
     db: PartsDb,
-    jlc_search: Callable[[str], Sequence[JlcPart]],
+    jlc_mlcc: Callable[[str, str], Sequence[JlcPart]],
     jlc_part: Callable[[str], Optional[JlcPart]],
     digikey,
     needed: int,
     limit: int = 10,
     search_suppliers: bool = False,
     currents: Sequence[Candidate] = (),
+    manufacturers: Sequence[str] = (),
 ) -> SearchResult:
     """The parts meeting *req*, best first (see :func:`rank_key`).
 
@@ -523,10 +584,11 @@ def find_candidates(
     that was dropped. :func:`requirement_for` then gives the requirement to
     write for the chosen part."""
     # The second pass reuses the first pass's supplier answers: tolerance is
-    # not part of the search text, so the same keywords and MPNs come back.
-    kwargs = dict(db=db, jlc_search=_memo(jlc_search), jlc_part=_memo(jlc_part),
+    # not part of the search, so the same hits and MPNs come back.
+    kwargs = dict(db=db, jlc_mlcc=_memo(jlc_mlcc), jlc_part=_memo(jlc_part),
                   digikey=_MemoDigiKey(digikey), needed=needed, limit=limit,
-                  search_suppliers=search_suppliers, currents=tuple(currents))
+                  search_suppliers=search_suppliers, currents=tuple(currents),
+                  manufacturers=tuple(manufacturers))
     result = _find(req, **kwargs)
     tol = req.tolerance_max_pct
     if (result.candidates or result.problem or not req.searchable
@@ -538,13 +600,13 @@ def find_candidates(
 
 
 def _memo(fn: Callable):
-    """*fn* with its results kept per argument for the length of one search."""
-    seen: Dict[str, object] = {}
+    """*fn* with its results kept per arguments for the length of one search."""
+    seen: Dict[Tuple[str, ...], object] = {}
 
-    def call(arg: str):
-        if arg not in seen:
-            seen[arg] = fn(arg)
-        return seen[arg]
+    def call(*args: str):
+        if args not in seen:
+            seen[args] = fn(*args)
+        return seen[args]
     return call
 
 
@@ -561,26 +623,33 @@ def requirement_for(
     req: CapacitorRequirement, result: SearchResult, cand: Candidate
 ) -> CapacitorRequirement:
     """The requirement to write to the symbols when *cand* is chosen from
-    *result*. Unchanged unless the tolerance limit was dropped; then the
-    tolerance is the part's own (source ``relaxed``, which the write plan
-    writes and the remembered settings ignore), or no value when the part
-    states none."""
-    if result.relaxed_tolerance_pct is None:
-        return req
-    return replace(req, tolerance_max_pct=Sourced(cand.params.tolerance_pct, RELAXED))
+    *result*. A field cleared in the dialog (source ``any``), and the
+    tolerance when its limit was dropped, takes the part's own value (source
+    ``relaxed``, which the write plan writes and the remembered settings
+    ignore), or no value when the part states none. Otherwise unchanged."""
+    changes: Dict[str, Sourced] = {}
+    if result.relaxed_tolerance_pct is not None or req.tolerance_max_pct.source == ANY:
+        changes["tolerance_max_pct"] = Sourced(cand.params.tolerance_pct, RELAXED)
+    if req.voltage_min_v.source == ANY:
+        changes["voltage_min_v"] = Sourced(cand.params.voltage_v, RELAXED)
+    if req.dielectrics.source == ANY:
+        codes = dielectric_tokens(cand.params.dielectric)
+        changes["dielectrics"] = Sourced(tuple(codes), RELAXED)
+    return replace(req, **changes) if changes else req
 
 
 def _find(
     req: CapacitorRequirement,
     *,
     db: PartsDb,
-    jlc_search: Callable[[str], Sequence[JlcPart]],
+    jlc_mlcc: Callable[[str, str], Sequence[JlcPart]],
     jlc_part: Callable[[str], Optional[JlcPart]],
     digikey,
     needed: int,
     limit: int,
     search_suppliers: bool,
     currents: Sequence[Candidate],
+    manufacturers: Sequence[str],
 ) -> SearchResult:
     """One pass of :func:`find_candidates` with *req* as given."""
     if not req.searchable:
@@ -602,7 +671,7 @@ def _find(
     hits = db.find_capacitors(
         capacitance_f=float(req.capacitance_f),
         package=req.package.value,
-        voltage_min_v=float(req.voltage_min_v.value),
+        voltage_min_v=req.voltage_min_v.value,
         dielectrics=tuple(req.dielectrics.value or ()),
         tolerance_max_pct=req.tolerance_max_pct.value,
     )
@@ -637,29 +706,41 @@ def _find(
     listed: Set[str] = {_norm_mpn(c.mpn) for c in candidates}
     seen_lcsc: Set[str] = set()
     passed: List[Candidate] = []
-    for keyword in search_keywords(req):
-        for part in jlc_search(keyword):
-            code = (part.lcsc or "").strip().upper()
-            key = code or f"mpn:{_norm_mpn(part.mpn)}"
-            if key in seen_lcsc:
-                continue
-            seen_lcsc.add(key)
-            result.examined += 1
-            label = _label(part.lcsc, part.mpn)
-            cand, why = _jlc_check(req, part)
-            if cand is None:
-                result.rejected.append((label, why))
-                continue
-            if db.is_rejected(cand.manufacturer, cand.mpn):
-                result.rejected.append((label, "rejected in the parts database"))
-                continue
-            if _norm_mpn(cand.mpn) in listed:
-                continue  # already listed as the current part or from the database
-            why = _stock_reason("JLCPCB", cand.jlc_stock, needed)
-            if why:
-                result.rejected.append((label, why))
-                continue
-            passed.append(cand)
+    pool: List[JlcPart] = []
+    open_req = req.edited(clear=[name for _, name in FACET_FIELDS])
+    for part in jlc_mlcc(fmt_farads(float(req.capacitance_f)), req.package.value):
+        code = (part.lcsc or "").strip().upper()
+        key = code or f"mpn:{_norm_mpn(part.mpn)}"
+        if key in seen_lcsc:
+            continue
+        seen_lcsc.add(key)
+        result.examined += 1
+        label = _label(part.lcsc, part.mpn)
+        if not manufacturer_allowed(part.manufacturer, manufacturers):
+            result.rejected.append(
+                (label, f"manufacturer '{part.manufacturer}' is not in the list"))
+            continue
+        if not part.orderable:
+            why = f"not orderable at JLCPCB ({part.no_buy_reason or 'out of stock'})"
+        else:
+            why = _stock_reason("JLCPCB", part.stock, needed)
+        if why:
+            result.rejected.append((label, why))
+            continue
+        if db.is_rejected(part.manufacturer, part.mpn):
+            result.rejected.append((label, "rejected in the parts database"))
+            continue
+        if _jlc_check(open_req, part)[0] is not None:
+            pool.append(part)      # right value and package: counted in facets
+        cand, why = _jlc_check(req, part)
+        if cand is None:
+            result.rejected.append((label, why))
+            continue
+        if _norm_mpn(cand.mpn) in listed:
+            continue  # already listed as the current part or from the database
+        passed.append(cand)
+    result.facets = facets(req, pool)
+    result.pool_size = len(pool)
 
     # Rank before the DigiKey lookups so the limit keeps the best hits. Several
     # LCSC codes can name one MPN; the best-ranked code is kept.
@@ -1087,6 +1168,7 @@ def assess(
     *,
     db: PartsDb,
     jlc_search: Callable[[str], Sequence[JlcPart]],
+    jlc_mlcc: Callable[[str, str], Sequence[JlcPart]],
     jlc_part: Callable[[str], Optional[JlcPart]],
     digikey,
     needed: int,
@@ -1117,9 +1199,10 @@ def assess(
         return SearchResult([], problem=req.problem(), requirement=req,
                             existing=lookup)
     result = find_candidates(
-        req, db=db, jlc_search=jlc_search, jlc_part=jlc_part, digikey=digikey,
+        req, db=db, jlc_mlcc=jlc_mlcc, jlc_part=jlc_part, digikey=digikey,
         needed=needed, limit=limit, search_suppliers=search_suppliers,
         currents=currents,
+        manufacturers=parse_manufacturers(defaults.get("cap.manufacturers")),
     )
     result.requirement = req
     result.existing = lookup

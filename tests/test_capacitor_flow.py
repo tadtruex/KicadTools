@@ -90,6 +90,10 @@ class FakeSuppliers:
         self.searches.append(keyword)
         return [_jlc_part()]
 
+    def jlc_mlcc(self, value: str, package: str) -> List[JlcPart]:
+        """The filtered MLCC search: recorded like a keyword search."""
+        return self.jlc_search(f"{value} {package}")
+
     def jlc_part(self, code: str) -> Optional[JlcPart]:
         self.lookups.append(code)
         return _jlc_part() if code == LCSC else None
@@ -104,7 +108,7 @@ class FakeSuppliers:
 
 def _find(req, db, fake, needed):
     return find_candidates(
-        req, db=db, jlc_search=fake.jlc_search, jlc_part=fake.jlc_part,
+        req, db=db, jlc_mlcc=fake.jlc_mlcc, jlc_part=fake.jlc_part,
         digikey=fake, needed=needed,
     )
 
@@ -140,7 +144,7 @@ def test_capacitor_flow_end_to_end(tmp_path):
     fake = FakeSuppliers()
     result = _find(req, db, fake, group.quantity)
     assert result.problem == ""
-    assert fake.searches == ["100nF 0603 16V X7R", "100nF 0603 X7R"]
+    assert fake.searches == ["100nF 0603"]
     assert [c.mpn for c in result.candidates] == [MPN]
     cand = result.candidates[0]
     assert cand.source == SEARCH
@@ -333,7 +337,7 @@ def test_capacitor_flow_existing_part(tmp_path):
 
     # ---- assess: the current part first, no keyword search ----------------
     fake = FakeTaiyoSuppliers()
-    result = assess(group, defaults, db=db, jlc_search=fake.jlc_search,
+    result = assess(group, defaults, db=db, jlc_search=fake.jlc_search, jlc_mlcc=fake.jlc_mlcc,
                     jlc_part=fake.jlc_part, digikey=fake, needed=group.quantity)
     assert result.problem == ""
     assert fake.searches == [TY_MPN]            # the exact-MPN lookup only
@@ -410,7 +414,7 @@ def test_capacitor_flow_existing_part(tmp_path):
 
     # ---- second assess: the current part again, now also the database part -
     fake2 = FakeTaiyoSuppliers()
-    result2 = assess(reloaded, defaults, db=db, jlc_search=fake2.jlc_search,
+    result2 = assess(reloaded, defaults, db=db, jlc_search=fake2.jlc_search, jlc_mlcc=fake2.jlc_mlcc,
                      jlc_part=fake2.jlc_part, digikey=fake2,
                      needed=reloaded.quantity)
     assert fake2.searches == []                 # the LCSC field is read instead
@@ -442,7 +446,7 @@ def test_capacitor_flow_existing_part_below_stock_floor(tmp_path):
     group = _group_for(group_capacitors(iter_bom_part_records(board), defaults),
                        "C_10U_805")
     fake = LowStock()
-    result = assess(group, defaults, db=db, jlc_search=fake.jlc_search,
+    result = assess(group, defaults, db=db, jlc_search=fake.jlc_search, jlc_mlcc=fake.jlc_mlcc,
                     jlc_part=fake.jlc_part, digikey=fake, needed=group.quantity)
     assert result.candidates == []
     assert (CURRENT_LABEL, "JLCPCB stock 300, need at least 1000") in result.rejected

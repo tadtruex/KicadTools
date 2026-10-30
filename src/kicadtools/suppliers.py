@@ -302,15 +302,19 @@ _JLC_HEADERS = {
 
 
 def _jlc_search_raw(
-    keyword: str, *, page: int = 1, page_size: int = 25
+    keyword: str, *, page: int = 1, page_size: int = 25,
+    filters: Optional[Dict[str, object]] = None,
 ) -> Optional[List[dict]]:
     """One page of raw JLCPCB search hits for *keyword*, or ``None`` on any
-    network/HTTP/JSON failure (reported on stdout, never raised)."""
+    network/HTTP/JSON failure (reported on stdout, never raised). *filters*
+    are extra request fields, as the JLCPCB parts page sends them
+    (``stockFlag``, ``firstSortName``, ``componentSpecificationList`` …)."""
     body = {
         "currentPage": page,
         "pageSize": page_size,
         "keyword": keyword,
         "searchSource": "search",
+        **(filters or {}),
     }
     try:
         resp = requests.post(
@@ -405,6 +409,35 @@ def jlcpcb_search(keyword: str, *, pages: int = 3, page_size: int = 100) -> List
     parts: List[JlcPart] = []
     for page in range(1, pages + 1):
         hits = _jlc_search_raw(keyword, page=page, page_size=page_size)
+        if not hits:
+            break
+        parts.extend(_parse_jlc_part(h) for h in hits)
+        if len(hits) < page_size:
+            break
+    return parts
+
+
+# JLCPCB's category names for surface-mount ceramic capacitors.
+JLC_MLCC_CATEGORY = ("Capacitors", "Multilayer Ceramic Capacitors MLCC - SMD/SMT")
+
+
+def jlcpcb_mlcc_search(value: str, package: str, *, max_pages: int = 10,
+                       page_size: int = 100) -> List[JlcPart]:
+    """The in-stock JLCPCB surface-mount ceramic capacitors whose catalog text
+    matches *value* (``"4.7uF"``) in *package* (``"0603"``), every page up to
+    *max_pages*. The value is the only keyword: JLCPCB ranks a longer text
+    (``"4.7uF 0603 X7R"``) by loose relevance, and most hits are then other
+    values. Category, package and stock are request filters, as on the JLCPCB
+    parts page."""
+    filters = {
+        "stockFlag": True,
+        "firstSortName": JLC_MLCC_CATEGORY[0],
+        "secondSortName": JLC_MLCC_CATEGORY[1],
+        "componentSpecificationList": [package],
+    }
+    parts: List[JlcPart] = []
+    for page in range(1, max_pages + 1):
+        hits = _jlc_search_raw(value, page=page, page_size=page_size, filters=filters)
         if not hits:
             break
         parts.extend(_parse_jlc_part(h) for h in hits)

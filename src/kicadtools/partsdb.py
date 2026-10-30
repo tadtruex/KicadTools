@@ -308,22 +308,21 @@ class PartsDb:
         *,
         capacitance_f: float,
         package: str,
-        voltage_min_v: float,
+        voltage_min_v: Optional[float],
         dielectrics: Sequence[str],
         tolerance_max_pct: Optional[float],
     ) -> List[DbCapacitor]:
         """Accepted capacitors meeting a requirement: capacitance within 0.1 %
         of *capacitance_f*, the same *package*, a voltage rating of at least
-        *voltage_min_v*, a dielectric in *dielectrics* (compared normalized),
-        and, when *tolerance_max_pct* is given, a stated tolerance no looser
-        than it. Ordered by usage count (highest first), then JLCPCB Basic
+        *voltage_min_v* (any rating when ``None``), a dielectric in
+        *dielectrics* (compared normalized; any dielectric when empty), and,
+        when *tolerance_max_pct* is given, a stated tolerance no looser than
+        it. Ordered by usage count (highest first), then JLCPCB Basic
         before Extended, then MPN.
 
         Each entry of *dielectrics* may itself list codes (``"C0G, NP0"``); a
         stored part matches when any of its codes is allowed."""
         allowed = {t for d in dielectrics for t in dielectric_tokens(d)}
-        if not allowed:
-            return []
         band = abs(float(capacitance_f)) * CAPACITANCE_REL_TOL
         sql = (
             "SELECT p.id, p.mpn, p.manufacturer, p.package, p.description,"
@@ -339,10 +338,11 @@ class PartsDb:
             " FROM part p JOIN capacitor c ON c.part_id = p.id"
             " WHERE p.status = ? AND p.package = ?"
             " AND ABS(c.capacitance_f - ?) <= ?"
-            " AND c.voltage_v >= ?"
         )
-        args: list = [ACCEPTED, (package or "").strip(), float(capacitance_f),
-                      band, float(voltage_min_v)]
+        args: list = [ACCEPTED, (package or "").strip(), float(capacitance_f), band]
+        if voltage_min_v is not None:
+            sql += " AND c.voltage_v >= ?"
+            args.append(float(voltage_min_v))
         if tolerance_max_pct is not None:
             # A part with no stated tolerance cannot be shown to meet a limit.
             sql += " AND c.tolerance_pct IS NOT NULL AND c.tolerance_pct <= ?"
@@ -360,7 +360,7 @@ class PartsDb:
              dk, lcsc, lib, uses) = row
             # The dielectric filter runs here: a stored value can list two
             # codes, which an SQL IN test would compare as one string.
-            if not allowed.intersection(dielectric_tokens(diel)):
+            if allowed and not allowed.intersection(dielectric_tokens(diel)):
                 continue
             out.append(DbCapacitor(
                 part_id=int(pid), mpn=mpn, manufacturer=mfr, package=pkg,
