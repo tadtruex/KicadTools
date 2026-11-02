@@ -22,6 +22,10 @@ from urllib.parse import quote
 import requests
 
 TOKEN_URL = "https://api.digikey.com/v1/oauth2/token"
+# Keyword search: a fuzzy relevance search (``POST {"Keywords", "Limit",
+# "Offset"}`` -> ``{"ExactMatches": [...], "Products": [...]}``). Its rank-1
+# hit can be an unrelated part (see NOTES.md), so a caller must filter the
+# hits itself; :meth:`DigiKeyClient.keyword_search` returns all of them.
 V4_SEARCH_URL = "https://api.digikey.com/products/v4/search/keyword"
 # Exact-lookup endpoint: accepts a DigiKey PN *or* an MPN and returns the single
 # matching product as ``{"Product": {...}}``. Unlike the keyword search (a fuzzy
@@ -130,6 +134,7 @@ class DigiKeyProduct:
     confirm layer's job, not this client's.
     """
     mpn: Optional[str] = None
+    manufacturer: Optional[str] = None   # Manufacturer.Name
     digikey_pns: List[str] = field(default_factory=list)
     datasheet_url: Optional[str] = None
     product_url: Optional[str] = None
@@ -137,6 +142,9 @@ class DigiKeyProduct:
     product_status: Optional[str] = None
     description: Optional[str] = None
     parameters: Dict[str, str] = field(default_factory=dict)
+    # DigiKey's single-unit price in the account's currency (USD by default);
+    # None when the response states none.
+    unit_price: Optional[float] = None
 
     def param(self, name: str) -> Optional[str]:
         """The raw ValueText for a DigiKey parameter name, or ``None``."""
@@ -239,6 +247,53 @@ class DigiKeyClient:
             return None
         return _parse_product(product)
 
+    def keyword_search(self, keyword: str, *, limit: int = 50) -> List[DigiKeyProduct]:
+        """The products DigiKey's keyword search returns for *keyword*: its
+        exact matches first, then the other hits in DigiKey's relevance order,
+        each MPN once. Up to *limit* hits are requested.
+
+        The search is fuzzy: hits need not contain *keyword*, and the first
+        one can be an unrelated part, so the caller filters them (the IC
+        search keeps only MPNs that start with the partial MPN). Every failure
+        (no credentials, network, HTTP status, bad JSON) gives ``[]``."""
+        keyword = (keyword or "").strip()
+        if not self.configured or not keyword or not self._ensure_token():
+            return []
+        body = {"Keywords": keyword, "Limit": max(1, int(limit)), "Offset": 0}
+
+        def post():
+            headers = {**self._auth_headers(), "Content-Type": "application/json"}
+            return requests.post(V4_SEARCH_URL, headers=headers, json=body,
+                                 timeout=_TIMEOUT)
+
+        try:
+            resp = post()
+            if resp.status_code == 401 and self._obtain_token():
+                resp = post()
+        except requests.RequestException as exc:
+            print(f"⚠️  Network error searching DigiKey for {keyword}: {exc}")
+            return []
+        if resp.status_code != 200:
+            print(f"⚠️  DigiKey keyword search failed ({resp.status_code}) for {keyword}")
+            return []
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            print(f"⚠️  DigiKey keyword search returned non-JSON for {keyword}")
+            return []
+        out: List[DigiKeyProduct] = []
+        seen = set()
+        for raw in list(data.get("ExactMatches") or []) + list(data.get("Products") or []):
+            if not isinstance(raw, dict):
+                continue
+            product = _parse_product(raw)
+            key = _norm_mpn(product.mpn or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(product)
+        return out
+
     def mpn_for(self, digikey_pn: str) -> Optional[str]:
         """Return the manufacturer part number for *digikey_pn*, or ``None``.
 
@@ -277,8 +332,16 @@ def _parse_product(product: dict) -> DigiKeyProduct:
     ]
     desc = product.get("Description") or {}
     status = product.get("ProductStatus") or {}
+    maker = product.get("Manufacturer") or {}
+    try:
+        price: Optional[float] = (float(product["UnitPrice"])
+                                  if product.get("UnitPrice") is not None else None)
+    except (TypeError, ValueError):
+        price = None
     return DigiKeyProduct(
         mpn=product.get("ManufacturerProductNumber"),
+        # Manufacturer is an object like {"Id": 296, "Name": "Texas Instruments"}.
+        manufacturer=(maker.get("Name") if isinstance(maker, dict) else None) or None,
         digikey_pns=dk_pns,
         datasheet_url=product.get("DatasheetUrl"),
         product_url=product.get("ProductUrl"),
@@ -289,6 +352,7 @@ def _parse_product(product: dict) -> DigiKeyProduct:
         product_status=status.get("Status") if isinstance(status, dict) else status,
         description=desc.get("ProductDescription") if isinstance(desc, dict) else None,
         parameters=parameters,
+        unit_price=price,
     )
 
 

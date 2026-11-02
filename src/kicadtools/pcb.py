@@ -80,6 +80,10 @@ class Pad:
     w: float
     h: float
     angle: float  # pad's own rotation, degrees
+    # The pad number as text ("1", "A3", "EP"); "" for an unnumbered pad
+    # (paste aperture, mechanical hole). Last and defaulted so positional
+    # construction ``Pad(x, y, w, h, angle)`` keeps working.
+    number: str = ""
 
 
 @dataclass(frozen=True)
@@ -118,6 +122,20 @@ def _footprint_side(node) -> str:
     return "bottom" if name.startswith("B.") else "top"
 
 
+def _pad_number(pad) -> str:
+    """The number of a ``(pad <number> <type> <shape> …)`` node as text. KiCad 6+
+    quotes it (``"1"``); older files leave it bare, which the s-expression reader
+    returns as an int or a Symbol."""
+    if len(pad) < 2:
+        return ""
+    value = pad[1]
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (str, int, Symbol)):
+        return str(value)
+    return ""
+
+
 def _parse_pads(node) -> Tuple[Pad, ...]:
     pads: List[Pad] = []
     for item in node:
@@ -134,6 +152,7 @@ def _parse_pads(node) -> Tuple[Pad, ...]:
                 w=size[0],
                 h=size[1],
                 angle=at[2] if len(at) > 2 else 0.0,
+                number=_pad_number(item),
             )
         )
     return tuple(pads)

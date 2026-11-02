@@ -2,9 +2,9 @@
 Component model.
 
 ``ElectricalIntent`` is the base representation of a schematic symbol. Concrete
-subclasses (resistor, capacitor, diode, …) register themselves against a custom
-``Intent:Type`` schematic property, and ``ElectricalIntent.from_dict`` acts as a
-factory that returns the most specific type it can build.
+subclasses (resistor, capacitor, diode, IC, …) register themselves against a
+custom ``Intent:Type`` schematic property, and ``ElectricalIntent.from_dict``
+acts as a factory that returns the most specific type it can build.
 """
 from __future__ import annotations
 
@@ -449,6 +449,46 @@ class TransistorIntent(ElectricalIntent):
         if self.polarity:
             head = f"{self.polarity} {head}"
         return f"{self.reference}: {head}"
+
+
+@intent_subclass("ic")
+@dataclass(kw_only=True)
+class IcIntent(ElectricalIntent):
+    """Integrated circuit or module (an Arduino Nano, a radio module).
+
+    All fields optional. An IC is found from its part number, not from
+    electrical values, so the intent holds the symbol's ``Value`` and the part
+    numbers read through :func:`~kicadtools.partnum.extract_part_numbers`
+    (every alias spelling). A symbol with no part number still builds an
+    ``IcIntent``: :class:`kicadtools.icrequirement.IcRequirement` reports the
+    missing identifier.
+    """
+    value: str | None = None
+    mpn: str | None = None
+    digikey_pn: str | None = None
+    lcsc: str | None = None
+    manufacturer: str | None = None
+
+    @classmethod
+    def _from_dict_impl(cls, data: Dict[str, Any]) -> "IcIntent":
+        value = data.get("Value")
+        value = value.strip() if isinstance(value, str) and value.strip() else None
+        pn = extract_part_numbers(data)
+        return cls(
+            **cls._base_kwargs(data),
+            value=value,
+            mpn=pn.mpn,
+            digikey_pn=pn.digikey_pn,
+            lcsc=pn.lcsc,
+            manufacturer=pn.manufacturer,
+        )
+
+    def description(self) -> str:
+        head = self.mpn or self.value
+        head = f"{head} IC" if head else "IC"
+        dk = f", DigiKey {self.digikey_pn}" if self.digikey_pn else ""
+        lc = f", LCSC {self.lcsc}" if self.lcsc else ""
+        return f"{self.reference}: {head}{dk}{lc}"
 
 
 @intent_subclass("specificpart")

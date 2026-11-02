@@ -95,12 +95,14 @@ def test_sourced_cell_markers():
 
 def test_columns_and_first_row():
     model = _model_with_ecg()
-    assert model.columnCount() == len(PARTS_COLUMNS) == 10
-    assert [model.headerData(c, Qt.Horizontal) for c in range(10)] == PARTS_COLUMNS
+    assert model.columnCount() == len(PARTS_COLUMNS) == 11
+    assert [model.headerData(c, Qt.Horizontal) for c in range(11)] == PARTS_COLUMNS
+    assert PARTS_COLUMNS[COL_PACKAGE + 1] == "Footprint"
     assert PARTS_COLUMNS[COL_REFERENCES + 1] == "Current part"
     assert model.rowCount() == 4
     assert _cell(model, 0, COL_VALUE) == "100nF"
     assert _cell(model, 0, COL_PACKAGE) == "0603"            # from the footprint
+    assert _cell(model, 0, COL_PACKAGE + 1) == "C_0603_1608Metric"
     assert _cell(model, 0, COL_RATING) == DASH              # unset
     assert _cell(model, 0, COL_DIELECTRIC) == "X7R (default)"
     assert _cell(model, 0, COL_TOLERANCE) == "10% (default)"
@@ -256,9 +258,9 @@ def window(tmp_path, monkeypatch):
 def test_main_window_parts_tab_round_trip(window, tmp_path):
     win, board = window
     model = win.parts_model
-    # ECG: 4 capacitor groups and 9 resistor groups.
-    assert model.rowCount() == 13
-    assert "13 part groups, 13 unassigned" in win.statusBar().currentMessage()
+    # ECG: 4 capacitor groups, 9 resistor groups, then 3 IC groups.
+    assert model.rowCount() == 16
+    assert "16 part groups, 16 unassigned" in win.statusBar().currentMessage()
 
     group = model.group_at(0)
     req = group.requirement.edited(rating_min=16.0)

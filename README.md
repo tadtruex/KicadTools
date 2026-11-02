@@ -178,7 +178,7 @@ different one). `JLCPCB_SPEC.md` §3 has the derivation.
 A PySide6 desktop app with three tabs. **Intents** reviews the intent-type
 guesses and writes the accepted ones back into the schematic (so the next read
 has fewer guesses). **Parts** chooses a manufacturer part for each group of
-capacitors or resistors and records it in a local parts database. **LCSC** resolves, checks
+capacitors, resistors or ICs and records it in a local parts database. **LCSC** resolves, checks
 stock for, and substitutes JLCPCB part numbers (see below). See `BOMCOCKPIT.md`
 for the full vision.
 
@@ -204,15 +204,17 @@ line. Rely on git as the backstop.
 
 ### Parts tab
 
-The table has one row per capacitor or resistor requirement group: parts of
+The table has one row per capacitor or resistor requirement group, and one
+per IC group (see **ICs** below). Capacitors and resistors: parts of
 one type whose `Value`, `Footprint`, `Voltage:Min`, `Power:Min`,
 `Class:Preferred`, `Tolerance:Preferred`, `Package:Preferred` and existing
 `MPN`, `DigiKeyPN` and `LCSC` numbers are identical on the schematic, and (for symbols with no part number) whose
 Descriptions state the same values for the fields those properties leave
 open, share a row and one part choice, so
 symbols with different existing parts are separate rows. Columns: Value ·
-Package · Rating · Dielectric · Tolerance · Qty · References · Current part ·
-Status · Chosen MPN. Rating is the voltage floor of a capacitor and the power
+Package · Footprint · Rating · Dielectric · Tolerance · Qty · References ·
+Current part · Status · Chosen MPN. Footprint is the footprint name without
+its library (the full lib id is in the tooltip). Rating is the voltage floor of a capacitor and the power
 floor of a resistor; Dielectric is empty for a resistor. A requirement cell whose value came from a default, an
 edit, the existing part or the Description is marked `(default)` / `(edited)`
 / `(part)` / `(description)`; a dash means no value. A library-style Value is
@@ -397,17 +399,92 @@ remembered `cap.voltage_min` can't be searched until one is entered.
   canonical numbers under the canonical keys, which also corrects swapped
   `MPN` / `DigiKeyPN` fields and fills an empty `LCSC`.
 
+#### ICs
+
+A part is an IC when its intent type is `ic`: `Intent:Type = ic`, or guessed
+from a `U` reference. Modules (an Arduino Nano, a radio module) are ICs here
+too. An IC is found from the part number its symbol already carries, not from
+values, so nothing in its dialog is editable.
+
+- **Identifiers.** The `MPN`, `DigiKeyPN` and `LCSC` fields (any spelling),
+  and MPN-shaped tokens in the Value: the Value is split on spaces, `_` and
+  `,`, and a token of at least 5 characters with a letter and a digit is kept
+  (`MotorControl_STM32L552CCT6_V2` gives `STM32L552CCT6`). Symbols with the
+  same identifiers and footprint share a row.
+- **Row.** Value is the `MPN` field, else the Value. Package is the chosen
+  part's DigiKey package, else the package read from the footprint name,
+  marked `(footprint)`. Rating, Dielectric and Tolerance are empty. Status is
+  `not searchable` without an identifier or a footprint, `conflict` after a
+  search found identifiers that name different parts, `assigned` when every
+  symbol has `MPN`, `Manufacturer`, `DigiKeyPN` and a `Footprint` (an `LCSC`
+  number is not required), and otherwise as for capacitors. The Footprint
+  cell is red when the footprint does not match the part, amber when it
+  could not be checked, from the chosen part or the part the last search
+  found.
+- **Search.** Double-click the row to open the **Assign IC** dialog; an
+  `assigned` row opens too, to show its footprint check. The dialog looks up
+  each identifier at DigiKey and JLCPCB by exact part number, then accepted
+  ICs in the parts database with the same MPN. When nothing is found, each
+  partial MPN (the `MPN` field, then the Value tokens, longest first) is
+  searched at DigiKey by keyword, keeping only parts whose MPN starts with
+  it. A part with no JLCPCB listing is searched at JLCPCB by its exact MPN.
+  **Search again** reruns the search. The search needs
+  `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET`: without DigiKey no IC
+  passes.
+- **Checks.** A candidate must be listed at DigiKey with status `Active`, a
+  DigiKey stock of at least 10 × the units the build needs, and not be
+  rejected in the parts database. Stock below the floor (the units needed +
+  1000) is accepted with a warning: the stock cell is amber, the warning is
+  shown above Accept, and the part ranks after parts that meet the floor.
+  JLCPCB is optional: a part JLCPCB does not list, cannot sell, or stocks
+  below 10 × the units needed is still a candidate, shown as `not at JLCPCB`
+  with the reason, and its LCSC number is not written; JLCPCB stock between
+  that and the floor gets the same warning. When no part passes, the status
+  line says why in one line, for example `no part passed: C165154
+  DRV8313RHHR DigiKey stock 164, need at least 500`.
+- **Conflicts.** Identifiers that name different parts (a Value of
+  `LTC6992CS6-2` beside a DigiKey PN for `LTC6992HS6-2`), or one that names
+  no part beside one that does, are listed in amber. Each part is still a
+  candidate; pick one.
+- **Footprint check.** The footprint is compared with the part's DigiKey
+  package: the package, pin count, body size and exposed pad read from the
+  footprint name, and the footprint's pad count (from the board, else from
+  the footprint library through the board's `fp-lib-table` or
+  `Libraries/kicad-footprints`). An exposed pad counts as a pad. The result
+  is a match; a mismatch (red), with what disagrees, for example `20 pads vs
+  20 pins + exposed pad`; or cannot verify (amber), when there is nothing to
+  compare or the footprint states a pitch DigiKey does not. DigiKey states no
+  pitch, so a QFN, DFN, TSSOP, MSOP or SSOP footprint that names its pitch is
+  always "cannot verify". The message for the selected candidate is shown
+  above **Accept**. The check ranks candidates; it never removes one, and the
+  footprint is never changed.
+- **Columns.** MPN · Manufacturer · Source · DigiKey PN · DigiKey stock ·
+  LCSC · JLC library · JLC stock · Package · Footprint · Unit price. Source
+  is `database`, `current part` (an identifier names it exactly, with the
+  fields that name it) or `partial MPN`. Candidates are ranked database
+  first, then the current part, then the footprint check (match, cannot
+  verify, mismatch), then at JLCPCB, then JLCPCB Basic, then DigiKey stock,
+  then price.
+- Right-click a candidate and choose **Reject** to record it as rejected.
+  **Accept** records the part in the parts database and **File → Save**
+  writes, on every symbol in the group: `MPN`, `Manufacturer`, `DigiKeyPN`;
+  `LCSC` when the part is at JLCPCB, otherwise an existing `LCSC` is
+  removed; and `Intent:Type = ic` when the type was guessed. Other spellings
+  of the four part-number fields are removed. `Value`, `Footprint`,
+  `Datasheet` and `Reference` are never written, and no settings are stored.
+
 #### Parts database
 
 The parts database is a SQLite file at `~/Code/Boards/parts.sqlite` (the same
 path relative to the home directory on every machine); set
 `KICADTOOLS_PARTS_DB` to use another file. It holds each accepted or rejected
 part with its type, its parameters (capacitors: capacitance, voltage rating,
-dielectric, tolerance; resistors: resistance, power rating, tolerance), its
-package, its DigiKey and LCSC part numbers, and the board references that
+dielectric, tolerance; resistors: resistance, power rating, tolerance; ICs:
+DigiKey's Package / Case and pin count), its package, its DigiKey and LCSC part numbers, and the board references that
 place it. Stock
 and price are not stored. The file is listed in `Boards/.gitignore`, so each
-machine has its own copy.
+machine has its own copy. The schema is version 2; a version-1 file is
+updated in place when it is opened (the `ic` table is added).
 
 The `settings` table holds the remembered defaults under the `cap.*` and
 `res.*` keys in the tables above. A key absent from the table takes the built-in value shown in

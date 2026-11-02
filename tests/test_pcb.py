@@ -51,3 +51,38 @@ def test_read_mounting_for_schematic_with_pcb(tmp_path):
     mounting, pcb = read_mounting_for_schematic(sch)
     assert pcb == tmp_path / "mini.kicad_pcb"
     assert mounting["R1"] == SMD and mounting["J1"] == THT
+
+
+# --- pad numbers ----------------------------------------------------------
+
+from kicadtools.pcb import Pad, parse_footprint_placements  # noqa: E402
+
+_BOARD = """(kicad_pcb
+  (footprint "Package_TO_SOT_SMD:SOT-23-5" (layer "F.Cu") (at 10 20 90)
+    (property "Reference" "U1")
+    (pad "1" smd roundrect (at -1.1 -0.95) (size 1.3 0.6) (layers "F.Cu"))
+    (pad "2" smd roundrect (at -1.1 0) (size 1.3 0.6) (layers "F.Cu"))
+    (pad "" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Paste"))
+  )
+  (footprint "Old:Bare" (at 0 0)
+    (property "Reference" "U2")
+    (pad 1 smd rect (at 0 0) (size 1 1))
+    (pad A2 smd rect (at 1 0) (size 1 1))
+  )
+)"""
+
+
+def test_pad_number_parsed_quoted_bare_and_empty():
+    placements = parse_footprint_placements(_BOARD)
+    assert [p.number for p in placements["U1"].pads] == ["1", "2", ""]
+    assert [p.number for p in placements["U2"].pads] == ["1", "A2"]
+
+
+def test_pad_geometry_unchanged_by_number():
+    u1 = parse_footprint_placements(_BOARD)["U1"]
+    assert u1.pads[0] == Pad(-1.1, -0.95, 1.3, 0.6, 0.0, "1")
+    assert (u1.x, u1.y, u1.angle, u1.side) == (10.0, 20.0, 90.0, "top")
+
+
+def test_pad_positional_construction_defaults_number():
+    assert Pad(0.0, 0.0, 1.0, 1.0, 0.0).number == ""

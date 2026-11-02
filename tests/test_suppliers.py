@@ -334,3 +334,115 @@ def test_digikey_quantity_missing_means_zero_when_packagings_listed():
     assert _quantity({"ProductVariations": [
         {"QuantityAvailableforPackageType": 5}, {"QuantityAvailableforPackageType": 7}]}) == 7
     assert _quantity({}) is None
+
+
+# --------------------------------------------------------------------------- #
+# DigiKey keyword search, manufacturer and unit price
+# --------------------------------------------------------------------------- #
+
+def _ic_product(mpn, **extra):
+    return {
+        "ManufacturerProductNumber": mpn,
+        "Manufacturer": {"Id": 497, "Name": "STMicroelectronics"},
+        "UnitPrice": 7.25,
+        "QuantityAvailable": 900,
+        "ProductStatus": {"Id": 0, "Status": "Active"},
+        "ProductVariations": [{"DigiKeyProductNumber": f"497-{mpn}-ND"}],
+        "Parameters": [{"ParameterText": "Package / Case", "ValueText": "48-LQFP"}],
+        **extra,
+    }
+
+
+def _fake_keyword(monkeypatch, body, *, status=200, raise_json=False):
+    """A DigiKeyClient whose token POST works and whose keyword-search POST
+    returns *body*; returns the client and the list of search request bodies."""
+    sent = []
+
+    def fake_post(url, **kwargs):
+        if url == suppliers.TOKEN_URL:
+            return FakeResp({"access_token": "tok", "expires_in": 3600})
+        assert url == suppliers.V4_SEARCH_URL
+        sent.append(kwargs.get("json"))
+        return FakeResp(body, status=status, raise_json=raise_json)
+
+    monkeypatch.setattr(suppliers.requests, "post", fake_post)
+    return DigiKeyClient(client_id="id", client_secret="secret"), sent
+
+
+def test_product_parses_manufacturer_and_unit_price(monkeypatch):
+    client = _fake_dk(monkeypatch, details=_ic_product("STM32L552CCT6"))
+    p = client.product_for("STM32L552CCT6")
+    assert p.manufacturer == "STMicroelectronics"
+    assert p.unit_price == 7.25
+
+
+def test_product_without_manufacturer_or_price(monkeypatch):
+    client = _fake_dk(monkeypatch)
+    p = client.product_for("311-10.0KLRCT-ND")
+    assert p.manufacturer is None and p.unit_price is None
+
+
+def test_keyword_search_returns_exact_matches_then_products(monkeypatch):
+    body = {
+        "ExactMatches": [_ic_product("STM32L552CCT6")],
+        "Products": [_ic_product("STM32L552CCT6"), _ic_product("STM32L552CCT6TR"),
+                     _ic_product("STM32L552CET6")],
+    }
+    client, sent = _fake_keyword(monkeypatch, body)
+    hits = client.keyword_search("STM32L552CCT6", limit=20)
+    assert [h.mpn for h in hits] == ["STM32L552CCT6", "STM32L552CCT6TR", "STM32L552CET6"]
+    assert hits[0].digikey_pns == ["497-STM32L552CCT6-ND"]
+    assert sent == [{"Keywords": "STM32L552CCT6", "Limit": 20, "Offset": 0}]
+
+
+def test_keyword_search_failures_give_empty_list(monkeypatch):
+    client, _ = _fake_keyword(monkeypatch, {}, status=500)
+    assert client.keyword_search("X") == []
+    client, _ = _fake_keyword(monkeypatch, None, raise_json=True)
+    assert client.keyword_search("X") == []
+
+
+def test_keyword_search_retries_once_with_a_new_token_after_401(monkeypatch):
+    # The first token is refused (expired early); a second token is fetched
+    # and the search is sent again with it.
+    tokens = iter(["old", "new"])
+    calls = []
+
+    def fake_post(url, **kwargs):
+        if url == suppliers.TOKEN_URL:
+            tok = next(tokens)
+            calls.append(("token", tok))
+            return FakeResp({"access_token": tok, "expires_in": 3600})
+        assert url == suppliers.V4_SEARCH_URL
+        auth = kwargs["headers"]["Authorization"]
+        calls.append(("search", auth))
+        if auth == "Bearer old":
+            return FakeResp({}, status=401)
+        return FakeResp({"Products": [_ic_product("STM32L552CCT6")]})
+
+    monkeypatch.setattr(suppliers.requests, "post", fake_post)
+    client = DigiKeyClient(client_id="id", client_secret="secret")
+    assert [h.mpn for h in client.keyword_search("STM32L552CCT6")] == ["STM32L552CCT6"]
+    assert calls == [("token", "old"), ("search", "Bearer old"),
+                     ("token", "new"), ("search", "Bearer new")]
+
+
+def test_keyword_search_needs_credentials_and_keyword(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("should not hit the network")
+
+    monkeypatch.setattr(suppliers.requests, "post", boom)
+    monkeypatch.delenv("DIGIKEY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("DIGIKEY_CLIENT_SECRET", raising=False)
+    assert DigiKeyClient().keyword_search("STM32") == []
+    assert DigiKeyClient(client_id="id", client_secret="s").keyword_search("  ") == []
+
+
+def test_keyword_search_network_error_gives_empty_list(monkeypatch):
+    def fake_post(url, **kwargs):
+        if url == suppliers.TOKEN_URL:
+            return FakeResp({"access_token": "tok", "expires_in": 3600})
+        raise suppliers.requests.ConnectionError("down")
+
+    monkeypatch.setattr(suppliers.requests, "post", fake_post)
+    assert DigiKeyClient(client_id="id", client_secret="s").keyword_search("X") == []

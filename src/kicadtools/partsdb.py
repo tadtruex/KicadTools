@@ -9,7 +9,7 @@ The default file is ``~/Code/Boards/parts.sqlite`` (the same relative layout on
 every machine), overridable with ``KICADTOOLS_PARTS_DB``. The file is listed in
 ``Boards/.gitignore`` and is machine-local.
 
-Tables (see ``CAPACITOR_PLAN.md``):
+Tables (see ``CAPACITOR_PLAN.md`` and ``IC_PLAN.md`` step 7):
 
 - ``meta`` — ``schema_version``, stamped at creation and checked on open;
 - ``settings`` — last-used defaults (``cap.package``, ``cap.voltage_min``,
@@ -18,8 +18,18 @@ Tables (see ``CAPACITOR_PLAN.md``):
   status;
 - ``capacitor`` — capacitance, voltage, dielectric and tolerance of a part;
 - ``resistor`` — resistance, power and tolerance of a part;
-- ``supplier_pn`` — DigiKey and LCSC part numbers of a part;
+- ``ic`` — DigiKey's package/case and pin count of an IC (``part.type`` =
+  ``"ic"``; modules are ICs here);
+- ``supplier_pn`` — DigiKey and LCSC part numbers of a part. An IC first
+  accepted while JLCPCB does not stock it has no LCSC row; an LCSC row
+  recorded earlier is kept when the IC is accepted again without one (the
+  number still names the part, and each search checks JLCPCB's stock again).
 - ``usage`` — which board references place a part.
+
+Schema version 2 added the ``ic`` table. A version-1 file is migrated in place
+when it is opened: the table is added and ``meta.schema_version`` is set to 2
+in one transaction, and every existing row is kept. A file of any other
+version is refused without being changed.
 
 Stock and price are not stored; they change by the hour and are fetched from
 the suppliers (through the existing JLCPCB cache) when candidates are listed.
@@ -37,12 +47,19 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, ClassVar, Dict, List, Optional, Sequence, Union
 
 from kicadtools.parttypes import CAPACITOR, RESISTOR
 from kicadtools.units import dielectric_tokens
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# The one older version :class:`PartsDb` migrates on open.
+_MIGRATABLE_VERSION = 1
+
+# ``part.type`` of an IC. ICs are not a :class:`~kicadtools.parttypes.PartType`
+# (they are found by part number, not by value), so the name is defined here.
+IC = "ic"
 
 # Environment variable naming an alternative database file.
 ENV_VAR = "KICADTOOLS_PARTS_DB"
@@ -83,6 +100,13 @@ CREATE TABLE IF NOT EXISTS resistor (
   power_w        REAL,
   tolerance_pct  REAL
 );
+-- ic.package is DigiKey's Package / Case (IcChoice.package_case). The
+-- Supplier Device Package is part.package, as for every part type.
+CREATE TABLE IF NOT EXISTS ic (
+  part_id       INTEGER PRIMARY KEY REFERENCES part(id) ON DELETE CASCADE,
+  package       TEXT,
+  pins          INTEGER
+);
 CREATE TABLE IF NOT EXISTS supplier_pn (
   part_id       INTEGER NOT NULL REFERENCES part(id) ON DELETE CASCADE,
   supplier      TEXT NOT NULL,
@@ -118,6 +142,10 @@ _TABLES: Dict[str, _Table] = {
 }
 
 
+# Every per-type parameter table; a part has a row in at most one of them.
+_PARAM_TABLES = tuple(t.name for t in _TABLES.values()) + (IC,)
+
+
 def _table(kind: str) -> _Table:
     try:
         return _TABLES[kind]
@@ -149,6 +177,14 @@ def _opt_text(text: Optional[str]) -> Optional[str]:
     """*text* stripped, or ``None`` when that leaves it empty."""
     s = (text or "").strip()
     return s or None
+
+
+def norm_mpn(mpn: object) -> str:
+    """An MPN as compared when ICs are looked up: whitespace removed and
+    upper-cased (``" ldl212pv33r "`` -> ``"LDL212PV33R"``). Punctuation is
+    kept: ``LTC6992CS6-2`` and ``LTC6992CS62`` are different strings, and
+    ``#TRPBF``-style suffixes name different orderable parts."""
+    return "".join(str(mpn or "").split()).upper()
 
 
 @dataclass(frozen=True)
@@ -183,6 +219,51 @@ class PartChoice:
 
 
 @dataclass(frozen=True)
+class IcChoice:
+    """An IC to record as accepted or rejected. ``package`` is DigiKey's
+    ``Supplier Device Package`` (``"24-QFN (4x4)"``, stored in
+    ``part.package``), ``package_case`` its ``Package / Case``
+    (``"24-VFQFN Exposed Pad"``, stored in ``ic.package``), ``pins`` its
+    ``Number of Pins``; each may be empty when DigiKey states none. ``lcsc``
+    is ``None`` for a part JLCPCB does not stock."""
+
+    kind: ClassVar[str] = IC
+    mpn: str
+    manufacturer: str
+    package: str = ""
+    package_case: str = ""
+    pins: Optional[int] = None
+    digikey_pn: Optional[str] = None
+    digikey_packaging: Optional[str] = None
+    lcsc: Optional[str] = None
+    jlc_library: Optional[str] = None
+    description: str = ""
+    datasheet_url: str = ""
+
+
+@dataclass(frozen=True)
+class DbIc:
+    """An accepted IC read back from the database; fields as in
+    :class:`IcChoice` (empty strings for packages not recorded).
+    ``usage_count`` is the number of (board, reference) pairs recorded
+    against it."""
+
+    kind: ClassVar[str] = IC
+    part_id: int
+    mpn: str
+    manufacturer: str
+    package: str
+    package_case: str
+    pins: Optional[int]
+    digikey_pn: Optional[str]
+    lcsc: Optional[str]
+    jlc_library: Optional[str]
+    usage_count: int
+    description: str = ""
+    datasheet_url: str = ""
+
+
+@dataclass(frozen=True)
 class DbPart:
     """An accepted part read back from the database. ``usage_count`` is
     the number of (board, reference) pairs recorded against it."""
@@ -206,8 +287,9 @@ class PartsDb:
     (tests). *now* returns the ISO-8601 timestamp written to ``decided_at``,
     ``verified_at`` and ``used_at``; the default is UTC now to the second.
 
-    Raises :class:`ValueError` when the file was stamped with a different
-    schema version.
+    A version-1 file is migrated to version 2 on open (see the module
+    docstring). Raises :class:`ValueError` when the file was stamped with any
+    other version.
     """
 
     def __init__(
@@ -225,13 +307,15 @@ class PartsDb:
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         try:
             self.conn.execute("PRAGMA foreign_keys = ON")
+            # find_ics compares stored MPNs through the same function as its
+            # argument, so both sides are normalized alike.
+            self.conn.create_function("norm_mpn", 1, norm_mpn,
+                                      deterministic=True)
             # The version is checked before the schema is applied, so a file of
             # another version is refused without tables added to it.
-            has_meta = self.conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
-            ).fetchone()
-            if has_meta:
-                self._check_version(path)
+            if self._stored_version() == str(_MIGRATABLE_VERSION):
+                self._migrate_v1()
+            self._check_version(path)
             self.conn.executescript(_SCHEMA)
             with self.conn:
                 self.conn.execute(
@@ -244,27 +328,60 @@ class PartsDb:
             self.conn.close()
             raise
 
-    def _check_version(self, path: Path | str) -> None:
+    def _stored_version(self) -> Optional[str]:
+        """``meta.schema_version`` of the open file; ``None`` for a new file
+        (no ``meta`` table, or no version row in it)."""
+        has_meta = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+        ).fetchone()
+        if not has_meta:
+            return None
         row = self.conn.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
-        if row is not None and row[0] != str(SCHEMA_VERSION):
+        return None if row is None else row[0]
+
+    def _check_version(self, path: Path | str) -> None:
+        version = self._stored_version()
+        if version is not None and version != str(SCHEMA_VERSION):
             raise ValueError(
-                f"parts database {path} has schema version {row[0]}; "
+                f"parts database {path} has schema version {version}; "
                 f"this KicadTools reads version {SCHEMA_VERSION}"
             )
 
+    def _migrate_v1(self) -> None:
+        """Version 1 -> 2: add the ``ic`` table (and any other table the
+        version-1 file lacks) and stamp version 2, in one transaction, so an
+        interrupted migration leaves a version-1 file. No row is changed but
+        ``meta.schema_version``."""
+        # The schema text holds only CREATE ... IF NOT EXISTS, so it adds the
+        # ic table and leaves the version-1 tables as they are. It is run
+        # statement by statement because executescript commits first.
+        self.conn.execute("BEGIN")
+        try:
+            for statement in _SCHEMA.split(";"):
+                if statement.strip():
+                    self.conn.execute(statement)
+            self.conn.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
     # ----- decisions -------------------------------------------------------
 
-    def accept_part(self, choice: PartChoice) -> int:
-        """Record *choice* as accepted and return its part id. An existing row
-        for the same (manufacturer, MPN) is updated in place, including one
-        previously rejected."""
+    def accept_part(self, choice: Union[PartChoice, IcChoice]) -> int:
+        """Record *choice* (a capacitor, resistor or IC) as accepted and
+        return its part id. An existing row for the same (manufacturer, MPN)
+        is updated in place, including one previously rejected."""
         return self._upsert(choice, ACCEPTED)
 
-    def reject_part(self, choice: PartChoice) -> int:
+    def reject_part(self, choice: Union[PartChoice, IcChoice]) -> int:
         """Record *choice* as rejected and return its part id. A rejected part
-        is excluded from :meth:`find_parts`."""
+        is excluded from :meth:`find_parts` and :meth:`find_ics`."""
         return self._upsert(choice, REJECTED)
 
     def is_rejected(self, manufacturer: str, mpn: str) -> bool:
@@ -276,14 +393,14 @@ class PartsDb:
             ).fetchone()
         return row is not None and row[0] == REJECTED
 
-    def _upsert(self, choice: PartChoice, status: str) -> int:
-        table = _table(choice.kind)
+    def _upsert(self, choice: Union[PartChoice, IcChoice], status: str) -> int:
+        is_ic = isinstance(choice, IcChoice)
+        table_name = IC if is_ic else _table(choice.kind).name
         mpn = (choice.mpn or "").strip()
         manufacturer = (choice.manufacturer or "").strip()
         if not mpn:
             raise ValueError(f"a {choice.kind} choice needs an MPN")
         stamp = self._now()
-        p = choice.params
         digikey_pn = _opt_text(choice.digikey_pn)
         lcsc = _opt_text(choice.lcsc)
         jlc_library = _opt_text(choice.jlc_library)
@@ -306,20 +423,17 @@ class PartsDb:
                 "SELECT id FROM part WHERE manufacturer = ? AND mpn = ?",
                 (manufacturer, mpn),
             ).fetchone()[0]
-            # A part whose type changed keeps no row in the other table.
-            for other in _TABLES.values():
-                if other.name != table.name:
+            # A part whose type changed keeps no row in the other tables.
+            for other in _PARAM_TABLES:
+                if other != table_name:
                     self.conn.execute(
-                        f"DELETE FROM {other.name} WHERE part_id = ?", (part_id,))
-            cols = ["part_id", table.nominal, table.rating, "tolerance_pct"]
-            values: list = [part_id, float(p.nominal),
-                            None if p.rating is None else float(p.rating),
-                            None if p.tolerance_pct is None else float(p.tolerance_pct)]
-            if table.dielectric:
-                cols.append(table.dielectric)
-                values.append(_norm_dielectric_field(p.dielectric))
+                        f"DELETE FROM {other} WHERE part_id = ?", (part_id,))
+            if is_ic:
+                cols, values = self._ic_row(part_id, choice)
+            else:
+                cols, values = self._param_row(part_id, choice)
             self.conn.execute(
-                f"INSERT OR REPLACE INTO {table.name}({', '.join(cols)})"
+                f"INSERT OR REPLACE INTO {table_name}({', '.join(cols)})"
                 f" VALUES ({', '.join('?' * len(cols))})",
                 values,
             )
@@ -334,6 +448,27 @@ class PartsDb:
             if lcsc:
                 self._replace_pn(part_id, "lcsc", lcsc, None, jlc_library, stamp)
         return int(part_id)
+
+    @staticmethod
+    def _param_row(part_id: int, choice: PartChoice) -> tuple:
+        """Columns and values of a capacitor or resistor row."""
+        table = _table(choice.kind)
+        p = choice.params
+        cols = ["part_id", table.nominal, table.rating, "tolerance_pct"]
+        values: list = [part_id, float(p.nominal),
+                        None if p.rating is None else float(p.rating),
+                        None if p.tolerance_pct is None else float(p.tolerance_pct)]
+        if table.dielectric:
+            cols.append(table.dielectric)
+            values.append(_norm_dielectric_field(p.dielectric))
+        return cols, values
+
+    @staticmethod
+    def _ic_row(part_id: int, choice: IcChoice) -> tuple:
+        """Columns and values of an ic row."""
+        pins = None if choice.pins is None else int(choice.pins)
+        return (["part_id", "package", "pins"],
+                [part_id, _opt_text(choice.package_case), pins])
 
     def _replace_pn(self, part_id: int, supplier: str, pn: str,
                     packaging: Optional[str], jlc_library: Optional[str],
@@ -421,6 +556,45 @@ class PartsDb:
                 description=desc or "", datasheet_url=url or "",
             ))
         return out
+
+    def find_ics(self, mpn: str) -> List[DbIc]:
+        """Accepted ICs whose MPN equals *mpn* after :func:`norm_mpn` (any
+        manufacturer). Ordered as :meth:`find_parts`: usage count (highest
+        first), then JLCPCB Basic before Extended (a part with no LCSC row
+        last), then manufacturer. An empty *mpn* finds nothing."""
+        key = norm_mpn(mpn)
+        if not key:
+            return []
+        sql = (
+            "SELECT p.id, p.mpn, p.manufacturer, p.package, p.description,"
+            " p.datasheet_url, i.package, i.pins,"
+            " (SELECT pn FROM supplier_pn WHERE part_id = p.id"
+            "   AND supplier = 'digikey' ORDER BY pn LIMIT 1),"
+            " (SELECT pn FROM supplier_pn WHERE part_id = p.id"
+            "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS lcsc,"
+            " (SELECT jlc_library FROM supplier_pn WHERE part_id = p.id"
+            "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS jlc_library,"
+            " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
+            " FROM part p JOIN ic i ON i.part_id = p.id"
+            " WHERE p.status = ? AND p.type = ?"
+            # Stored MPNs are stripped but may hold inner whitespace; the
+            # stored side goes through the same norm_mpn as the argument.
+            " AND norm_mpn(p.mpn) = ?"
+            " ORDER BY usage_count DESC,"
+            " CASE WHEN LOWER(jlc_library) = 'basic' THEN 0"
+            "      WHEN lcsc IS NOT NULL THEN 1 ELSE 2 END,"
+            " p.manufacturer"
+        )
+        with self._lock:
+            rows = self.conn.execute(sql, (ACCEPTED, IC, key)).fetchall()
+        return [
+            DbIc(part_id=int(pid), mpn=m, manufacturer=mfr, package=pkg or "",
+                 package_case=case or "", pins=None if pins is None else int(pins),
+                 digikey_pn=dk, lcsc=lcsc, jlc_library=lib, usage_count=int(uses),
+                 description=desc or "", datasheet_url=url or "")
+            for (pid, m, mfr, pkg, desc, url, case, pins, dk, lcsc, lib, uses)
+            in rows
+        ]
 
     # ----- usage -----------------------------------------------------------
 

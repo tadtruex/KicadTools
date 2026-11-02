@@ -1,6 +1,7 @@
 """
-Parts tab: one row per capacitor or resistor requirement group, plus the
-background worker that searches for candidate parts for one group.
+Parts tab: one row per capacitor or resistor requirement group and one per
+IC group (``IC_PLAN.md`` step 8), plus the background workers that search for
+candidate parts for one group.
 
 Each row shows the group's requirement (Value, Package, Rating — the voltage
 floor of a capacitor, the power floor of a resistor —, Dielectric for a
@@ -26,19 +27,46 @@ The existing-part lookup of a group (from the assign dialog) is kept per row
 and warnings after the dialog closes, :meth:`PartsTableModel.set_defaults`
 keeps them, and a reopened dialog reuses the lookup.
 
+An IC row (:class:`~kicadtools.icrequirement.IcGroup`) shows the MPN field,
+else the Value, under Value; the package parsed from the footprint name (or
+the queued part's DigiKey package) under Package; Rating, Dielectric and
+Tolerance empty. Every row shows its footprint under Footprint (the name
+without the library; the full lib id in the tooltip). On an IC row that cell
+is coloured by the footprint check (:func:`kicadtools.icsearch.check_footprint`)
+of the queued part, or, before one is queued, of the part the symbol names in
+the last search recorded for the row (:meth:`PartsTableModel.record_ic_result`):
+red for a mismatch, amber when the footprint cannot be verified. An IC row is
+``conflict`` when that search found identifiers naming different parts,
+``not searchable`` when it has no part number or no footprint. An assigned
+IC row can be opened again to see the footprint check.
+
 :class:`CandidateWorker` opens its own parts-database and LCSC-cache
 connections on the worker thread and runs :func:`kicadtools.partsearch.assess`
-there (existing-part lookup, then the candidate search).
+there (existing-part lookup, then the candidate search);
+:class:`IcCandidateWorker` does the same for an IC group with
+:func:`kicadtools.icsearch.assess_ic`, reading the footprint's pad count from
+the board there.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence, Union
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor
 
+from kicadtools.icrequirement import IcGroup, IcRequirement
+from kicadtools.icsearch import (
+    MISMATCH,
+    UNVERIFIED,
+    FootprintCheck,
+    IcCandidate,
+    IcSearchResult,
+    assess_ic,
+    board_pads,
+)
+from kicadtools.package import PackageInfo, parse_footprint
 from kicadtools.partnum import extract_part_numbers
 from kicadtools.partsdb import PartsDb
 from kicadtools.partsearch import Candidate, ExistingLookup, assess, requirement_from_lookup
@@ -62,10 +90,11 @@ from kicadtools.resolve import Cache, cached_jlcpcb_part
 from kicadtools.suppliers import DigiKeyClient, jlcpcb_category_search, jlcpcb_search
 from kicadtools.units import fmt_percent
 
-PARTS_COLUMNS = ["Value", "Package", "Rating", "Dielectric", "Tolerance", "Qty",
-                 "References", "Current part", "Status", "Chosen MPN"]
+PARTS_COLUMNS = ["Value", "Package", "Footprint", "Rating", "Dielectric", "Tolerance",
+                 "Qty", "References", "Current part", "Status", "Chosen MPN"]
 COL_VALUE = PARTS_COLUMNS.index("Value")
 COL_PACKAGE = PARTS_COLUMNS.index("Package")
+COL_FOOTPRINT = PARTS_COLUMNS.index("Footprint")
 COL_RATING = PARTS_COLUMNS.index("Rating")
 COL_DIELECTRIC = PARTS_COLUMNS.index("Dielectric")
 COL_TOLERANCE = PARTS_COLUMNS.index("Tolerance")
@@ -92,6 +121,12 @@ DASH = "—"
 _UNASSIGNED_TINT = QColor(230, 160, 0, 40)
 # A conflict row needs a schematic change before a search.
 _CONFLICT_TINT = QColor(220, 50, 50, 50)
+# The Footprint cell of an IC whose footprint does not match its part (red),
+# or cannot be checked against it (amber). Stronger than the row tints, so
+# the cell stands out on an unassigned row.
+MISMATCH_TINT = QColor(220, 50, 50, 110)
+UNVERIFIED_TINT = QColor(230, 160, 0, 110)
+CHECK_TINTS = {MISMATCH: MISMATCH_TINT, UNVERIFIED: UNVERIFIED_TINT}
 
 # The cell suffix per source; a value stated on the schematic has none.
 _SOURCE_MARKERS = {
@@ -104,6 +139,9 @@ _SOURCE_MARKERS = {
 
 # The plan shape: {source_file: {symbol_uuid: {property_key: value or None}}}.
 Plan = Dict[Path, Dict[str, Dict[str, Optional[str]]]]
+
+# A Parts-tab row: a capacitor/resistor group or an IC group.
+Group = Union[RequirementGroup, IcGroup]
 
 
 # --------------------------------------------------------------------------- #
@@ -220,6 +258,71 @@ def merge_plans(plans: Sequence[Plan]) -> Plan:
     return merged
 
 
+def is_ic(group: object) -> bool:
+    """True for an IC group (a row searched by part number)."""
+    return isinstance(group, IcGroup)
+
+
+def footprint_name(footprint: str) -> str:
+    """A KiCad lib id without its library: ``"SOT-23-5"`` for
+    ``"Package_TO_SOT_SMD:SOT-23-5"``; ``""`` stays ``""``."""
+    return footprint.split(":", 1)[1] if ":" in footprint else footprint
+
+
+def package_text(info: Optional[PackageInfo]) -> str:
+    """A parsed package as one short line: ``"QFN-24 EP, 4x4 mm, 0.5 mm
+    pitch"``; ``""`` when nothing is known. The family carries the pin count
+    when both are known; a pin count alone reads ``"24 pins"``."""
+    if info is None or not info.known:
+        return ""
+    head = info.family or ""
+    if info.pins is not None:
+        head = f"{head}-{info.pins}" if head else f"{info.pins} pins"
+    if info.ep:
+        head = f"{head} EP" if head else "exposed pad"
+    parts = [head] if head else []
+    if info.body_mm:
+        a, b = info.body_mm
+        parts.append(f"{a:g}x{b:g} mm")
+    if info.pitch_mm is not None:
+        parts.append(f"{info.pitch_mm:g} mm pitch")
+    return ", ".join(parts)
+
+
+def ic_value_cell(req: IcRequirement) -> str:
+    """An IC row's Value cell: the MPN field, else the Value as written, else
+    a dash."""
+    return req.identifiers.mpn or req.value_text or DASH
+
+
+def ic_package_cell(req: IcRequirement, candidate: Optional[IcCandidate] = None) -> str:
+    """An IC row's Package cell: the queued *candidate*'s DigiKey package
+    (Supplier Device Package, else Package / Case); else the package parsed
+    from the footprint name, marked ``(footprint)``; else a dash."""
+    if candidate is not None and (candidate.package or candidate.package_case):
+        return candidate.package or candidate.package_case
+    info = req.package if req.package is not None else parse_footprint(req.footprint)
+    text = package_text(info)
+    return f"{text} (footprint)" if text else DASH
+
+
+def check_cell(check: Optional[FootprintCheck]) -> str:
+    """The short footprint-check text: ``"match"``, ``"mismatch"``,
+    ``"cannot verify"``; ``""`` before a check."""
+    return check.result if check is not None else ""
+
+
+def identifiers_text(req: IcRequirement) -> str:
+    """The identifiers an IC symbol carries, one per field: ``"DigiKeyPN
+    497-19548-2-ND, Value LDL212PV33R"``; ``"none"`` when there are none."""
+    ids = req.identifiers
+    parts = [f"{name} {v}" for name, v in (
+        ("MPN", ids.mpn), ("DigiKeyPN", ids.digikey_pn), ("LCSC", ids.lcsc)) if v]
+    if ids.value_mpns:
+        parts.append("Value " + ", ".join(ids.value_mpns))
+    return ", ".join(parts) if parts else "none"
+
+
 # --------------------------------------------------------------------------- #
 # Table model
 # --------------------------------------------------------------------------- #
@@ -227,30 +330,34 @@ def merge_plans(plans: Sequence[Plan]) -> Plan:
 @dataclass
 class _Queued:
     """An accepted candidate for one group, waiting for File > Save."""
-    requirement: PartRequirement
-    candidate: Candidate
+    requirement: Union[PartRequirement, IcRequirement]
+    candidate: Union[Candidate, IcCandidate]
     plan: Plan
 
 
 class PartsTableModel(QAbstractTableModel):
-    """Value · Package · Rating · Dielectric · Tolerance · Qty · References ·
-    Current part · Status · Chosen MPN, one row per :class:`RequirementGroup`."""
+    """Value · Package · Footprint · Rating · Dielectric · Tolerance · Qty ·
+    References · Current part · Status · Chosen MPN, one row per
+    :class:`RequirementGroup` or :class:`~kicadtools.icrequirement.IcGroup`."""
 
-    def __init__(self, groups: Optional[Sequence[RequirementGroup]] = None):
+    def __init__(self, groups: Optional[Sequence[Group]] = None):
         super().__init__()
-        self._groups: List[RequirementGroup] = list(groups or [])
+        self._groups: List[Group] = list(groups or [])
         self._queued: Dict[int, _Queued] = {}
         # Existing-part lookups by row, recorded when an assign dialog closes.
         self._lookups: Dict[int, ExistingLookup] = {}
+        # The last IC search by row, recorded when an IC assign dialog closes.
+        self._ic_results: Dict[int, IcSearchResult] = {}
 
     # ---- loading -----------------------------------------------------
-    def load(self, groups: Sequence[RequirementGroup]) -> None:
-        """Replace the rows; the queued choices and recorded lookups are
-        cleared."""
+    def load(self, groups: Sequence[Group]) -> None:
+        """Replace the rows; the queued choices, recorded lookups and
+        recorded IC searches are cleared."""
         self.beginResetModel()
         self._groups = list(groups)
         self._queued.clear()
         self._lookups.clear()
+        self._ic_results.clear()
         self.endResetModel()
 
     def set_defaults(self, defaults: Mapping[str, str]) -> None:
@@ -269,6 +376,8 @@ class PartsTableModel(QAbstractTableModel):
 
     def _recompute(self, row: int, defaults: Mapping[str, str]) -> None:
         group = self._groups[row]
+        if is_ic(group):
+            return      # an IC requirement has no defaults
         lookup = self._lookups.get(row)
         group.requirement = requirement_from_lookup(group, lookup, defaults)[0]
 
@@ -284,18 +393,31 @@ class PartsTableModel(QAbstractTableModel):
         """The lookup recorded for *row*, ``None`` before one."""
         return self._lookups.get(row)
 
-    def group_at(self, row: int) -> RequirementGroup:
+    def record_ic_result(self, row: int, result: IcSearchResult) -> None:
+        """Keep *result* (the last search an IC assign dialog showed) for
+        IC *row*: the row then shows its conflicts and the footprint check of
+        the part the symbol names, and a reopened dialog starts from its
+        requirement (package and pad count already read)."""
+        self._ic_results[row] = result
+        self.dataChanged.emit(self.index(row, 0), self.index(row, self.columnCount() - 1))
+
+    def ic_result_at(self, row: int) -> Optional[IcSearchResult]:
+        """The IC search recorded for *row*, ``None`` before one."""
+        return self._ic_results.get(row)
+
+    def group_at(self, row: int) -> Group:
         """The group backing *row* (a source-model row index)."""
         return self._groups[row]
 
-    def groups(self) -> List[RequirementGroup]:
+    def groups(self) -> List[Group]:
         return list(self._groups)
 
     # ---- queue -------------------------------------------------------
-    def queue(self, row: int, req: PartRequirement, candidate: Candidate,
-              plan: Plan) -> None:
+    def queue(self, row: int, req: Union[PartRequirement, IcRequirement],
+              candidate: Union[Candidate, IcCandidate], plan: Plan) -> None:
         """Record *candidate* as the choice for *row*, with the requirement as
-        accepted and the write plan from :func:`kicadtools.assign.assignment_plan`.
+        accepted and the write plan from :func:`kicadtools.assign.assignment_plan`
+        (:func:`kicadtools.icsearch.ic_assignment_plan` for an IC).
         Queueing a row again replaces its earlier choice."""
         self._queued[row] = _Queued(req, candidate, plan)
         self.dataChanged.emit(self.index(row, 0), self.index(row, self.columnCount() - 1))
@@ -303,10 +425,44 @@ class PartsTableModel(QAbstractTableModel):
     def is_queued(self, row: int) -> bool:
         return row in self._queued
 
-    def requirement_at(self, row: int) -> PartRequirement:
-        """The requirement as accepted for a queued row, else the group's."""
+    def requirement_at(self, row: int) -> Union[PartRequirement, IcRequirement]:
+        """The requirement as accepted for a queued row; for an IC row, the
+        requirement of its recorded search (with the package and pad count);
+        else the group's."""
         q = self._queued.get(row)
-        return q.requirement if q else self._groups[row].requirement
+        if q:
+            return q.requirement
+        res = self._ic_results.get(row)
+        if res is not None and res.requirement is not None:
+            return res.requirement
+        return self._groups[row].requirement
+
+    def footprint_check(self, row: int) -> Optional[FootprintCheck]:
+        """The footprint check shown on IC *row*: the queued candidate's;
+        else that of the first candidate the symbol names exactly in the
+        recorded search (the only candidate when there is one); ``None``
+        before either, and for a capacitor or resistor row."""
+        if not is_ic(self._groups[row]):
+            return None
+        q = self._queued.get(row)
+        if q is not None:
+            return q.candidate.footprint
+        res = self._ic_results.get(row)
+        if res is None or not res.candidates:
+            return None
+        named = [c for c in res.candidates if c.current]
+        if named:
+            return named[0].footprint
+        return res.candidates[0].footprint if len(res.candidates) == 1 else None
+
+    def conflicts(self, row: int) -> List[str]:
+        """The row's conflict lines: a capacitor or resistor requirement's
+        conflicts; an IC's from its recorded search."""
+        group = self._groups[row]
+        if is_ic(group):
+            res = self._ic_results.get(row)
+            return list(res.conflicts) if res is not None else []
+        return list(group.requirement.conflicts)
 
     def accepted_edits(self) -> Plan:
         """Every queued plan merged into one ``{file: {uuid: {key: value}}}``
@@ -317,11 +473,14 @@ class PartsTableModel(QAbstractTableModel):
     def status(self, row: int) -> str:
         if row in self._queued:
             return STATUS_QUEUED
-        req = self._groups[row].requirement
-        if req.conflicts:
+        group = self._groups[row]
+        req = group.requirement
+        if self.conflicts(row):
             return STATUS_CONFLICT
-        if self._groups[row].assigned:
+        if group.assigned:
             return STATUS_ASSIGNED
+        if is_ic(group):
+            return STATUS_NOT_SEARCHABLE if not req.searchable else STATUS_UNASSIGNED
         if req.footprint and not req.package.value:
             return STATUS_NOT_SEARCHABLE
         return STATUS_UNASSIGNED
@@ -362,6 +521,9 @@ class PartsTableModel(QAbstractTableModel):
             return PARTS_COLUMNS[section]
         if role == Qt.ToolTipRole and section == COL_RATING:
             return "Voltage:Min for a capacitor, Power:Min for a resistor"
+        if role == Qt.ToolTipRole and section == COL_FOOTPRINT:
+            return ("For an IC: red when the footprint does not match the part, "
+                    "amber when it cannot be checked against it")
         return None
 
     def flags(self, index: QModelIndex):
@@ -372,6 +534,10 @@ class PartsTableModel(QAbstractTableModel):
     def cell_text(self, row: int, col: int) -> str:
         group = self._groups[row]
         req = self.requirement_at(row)
+        if col == COL_FOOTPRINT:
+            return footprint_name(req.footprint) or DASH
+        if is_ic(group):
+            return self._ic_cell_text(row, col, group, req)
         if col == COL_VALUE:
             return value_cell(req)
         t = req.ptype
@@ -395,6 +561,56 @@ class PartsTableModel(QAbstractTableModel):
             return self.chosen_mpn(row)
         return ""
 
+    def _ic_cell_text(self, row: int, col: int, group: IcGroup,
+                      req: IcRequirement) -> str:
+        if col == COL_VALUE:
+            return ic_value_cell(req)
+        if col == COL_PACKAGE:
+            q = self._queued.get(row)
+            return ic_package_cell(req, q.candidate if q is not None else None)
+        if col in (COL_RATING, COL_DIELECTRIC, COL_TOLERANCE):
+            return ""
+        if col == COL_QTY:
+            return str(group.quantity)
+        if col == COL_REFERENCES:
+            return ", ".join(group.references)
+        if col == COL_CURRENT:
+            return current_part_cell(group)
+        if col == COL_STATUS:
+            return self.status(row)
+        if col == COL_MPN:
+            return self.chosen_mpn(row)
+        return ""
+
+    def _ic_tooltip(self, row: int, col: int) -> Optional[str]:
+        group = self._groups[row]
+        req = self.requirement_at(row)
+        status = self.status(row)
+        if col == COL_FOOTPRINT:
+            lines = [req.footprint or "No footprint."]
+            check = self.footprint_check(row)
+            if check is not None:
+                lines.append(check.message or "Footprint matches the part's package.")
+            elif status == STATUS_NOT_SEARCHABLE:
+                lines.append(f"Not checked: {req.problem()}.")
+            elif req.footprint:
+                lines.append("Not checked yet. Double-click to search.")
+            return "\n".join(lines)
+        if col == COL_REFERENCES:
+            return ", ".join(group.references)
+        if status == STATUS_CONFLICT:
+            return ("Identifiers name different parts:\n" + "\n".join(self.conflicts(row))
+                    + "\nDouble-click to choose one; fix the other on the schematic.")
+        if col == COL_CURRENT:
+            return f"Identifiers: {identifiers_text(req)}."
+        if status == STATUS_NOT_SEARCHABLE:
+            return f"Not searchable: {req.problem()}."
+        if status == STATUS_ASSIGNED:
+            return "Part numbers on the schematic. Double-click to check the footprint."
+        if status == STATUS_UNASSIGNED:
+            return "Double-click to assign a part."
+        return None
+
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
         if not index.isValid():
             return None
@@ -402,12 +618,20 @@ class PartsTableModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return self.cell_text(r, col)
         if role == Qt.BackgroundRole:
+            if col == COL_FOOTPRINT:
+                check = self.footprint_check(r)
+                if check is not None and check.result in CHECK_TINTS:
+                    return CHECK_TINTS[check.result]
             status = self.status(r)
             if status == STATUS_UNASSIGNED:
                 return _UNASSIGNED_TINT
             return _CONFLICT_TINT if status == STATUS_CONFLICT else None
         if role == Qt.ToolTipRole:
+            if is_ic(self._groups[r]):
+                return self._ic_tooltip(r, col)
             req = self.requirement_at(r)
+            if col == COL_FOOTPRINT and req.footprint:
+                return req.footprint
             if col == COL_REFERENCES:
                 return ", ".join(self._groups[r].references)
             if self.status(r) == STATUS_CONFLICT:
@@ -492,6 +716,67 @@ class CandidateWorker(QObject):
                 search_suppliers=self._search_suppliers,
                 requirement=self._req,
                 existing=self._existing,
+            )
+            self.found.emit(result)
+        except Exception as exc:  # noqa: BLE001 — report any failure in the dialog
+            self.failed.emit(str(exc))
+        finally:
+            if cache is not None:
+                cache.close()
+            if db is not None:
+                db.close()
+            QThread.currentThread().quit()
+
+
+class IcCandidateWorker(QObject):
+    """Runs :func:`kicadtools.icsearch.assess_ic` for one IC group off the GUI
+    thread; emits ``found`` (an ``IcSearchResult``) or ``failed``.
+
+    *requirement* is the requirement of an earlier result (package and pad
+    count already read), or ``None`` for the first request: the pad count is
+    then read here, from *board*'s ``.kicad_pcb`` and the footprint libraries
+    (:func:`kicadtools.icsearch.board_pads`). The parts database and the LCSC
+    cache are opened on the worker thread and closed before the thread's event
+    loop is ended."""
+
+    found = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        group: IcGroup,
+        requirement: Optional[IcRequirement],
+        needed: int,
+        db_path: Path,
+        board: Optional[Path] = None,
+        cache_path: Optional[Path] = None,
+    ):
+        super().__init__()
+        self._group = group
+        self._req = requirement
+        self._needed = needed
+        self._db_path = db_path
+        self._board = board
+        self._cache_path = cache_path
+
+    def run(self) -> None:
+        db: Optional[PartsDb] = None
+        cache: Optional[Cache] = None
+        try:
+            db = PartsDb(self._db_path)
+            if self._cache_path is not None:
+                self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache = Cache(self._cache_path)
+            result = assess_ic(
+                self._group,
+                db=db,
+                digikey=DigiKeyClient(),
+                jlc_search=jlcpcb_search,
+                jlc_part=lambda code: cached_jlcpcb_part(code, cache),
+                needed=self._needed,
+                pads=board_pads(self._board) if self._req is None else None,
+                requirement=self._req,
             )
             self.found.emit(result)
         except Exception as exc:  # noqa: BLE001 — report any failure in the dialog

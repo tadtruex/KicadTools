@@ -213,3 +213,75 @@ def test_capacitor_empty_tolerance_preferred_is_empty_list():
         "Intent:Type": "capacitor", "Value": "1nF", "Tolerance:Preferred": " , ",
     })
     assert c.tolerance_preferred == []
+
+
+def _ic(**extra):
+    return {"Reference": "U1", "dnp": False, "in_bom": True,
+            "Intent:Type": "ic", **extra}
+
+
+def test_ic_registered_under_intent_type():
+    from kicadtools.intent import IcIntent
+
+    u = ElectricalIntent.from_dict(_ic(Value="LMC7101BYM5"))
+    assert isinstance(u, IcIntent)
+    assert u.classification_note is None
+    assert u.value == "LMC7101BYM5"
+    assert u.mpn is None and u.digikey_pn is None and u.lcsc is None
+    assert u.description() == "U1: LMC7101BYM5 IC"
+
+
+def test_ic_intent_type_is_case_insensitive():
+    from kicadtools.intent import IcIntent
+
+    assert isinstance(ElectricalIntent.from_dict(_ic(**{"Intent:Type": "IC"})), IcIntent)
+
+
+def test_ic_without_part_number_or_value_still_builds():
+    # A missing part number is reported by the requirement, not the intent.
+    from kicadtools.intent import IcIntent
+
+    u = ElectricalIntent.from_dict(_ic())
+    assert isinstance(u, IcIntent)
+    assert u.value is None
+    assert u.description() == "U1: IC"
+
+
+def test_ic_blank_value_is_none():
+    u = ElectricalIntent.from_dict(_ic(Value="  "))
+    assert u.value is None
+
+
+@pytest.mark.parametrize(
+    "props, field, expected",
+    [
+        ({"DigiKey PN": "497-19548-2-ND"}, "digikey_pn", "497-19548-2-ND"),
+        ({"Digi-Key_PN": "497-19548-2-ND"}, "digikey_pn", "497-19548-2-ND"),
+        ({"DigikeyPartNumber": "497-19548-2-ND"}, "digikey_pn", "497-19548-2-ND"),
+        ({"Manufacturer_PN": "LDL212PV33R"}, "mpn", "LDL212PV33R"),
+        ({"MPN": "LDL212PV33R"}, "mpn", "LDL212PV33R"),
+        ({"JLCPCB": "C165154"}, "lcsc", "C165154"),
+        ({"LCSC Part": "C165154"}, "lcsc", "C165154"),
+        ({"Mfr": "STMicroelectronics"}, "manufacturer", "STMicroelectronics"),
+    ],
+)
+def test_ic_reads_part_numbers_under_any_alias(props, field, expected):
+    u = ElectricalIntent.from_dict(_ic(**props))
+    assert getattr(u, field) == expected
+
+
+def test_ic_empty_alias_does_not_hide_populated_one():
+    u = ElectricalIntent.from_dict(
+        _ic(DigikeyPN="", **{"DigiKey PN": "296-44591-2-ND"})
+    )
+    assert u.digikey_pn == "296-44591-2-ND"
+
+
+def test_ic_description_prefers_mpn_and_lists_supplier_numbers():
+    u = ElectricalIntent.from_dict(_ic(
+        Value="MotorControl_STM32L552CCT6_V2", MPN="STM32L552CCT6",
+        DigiKeyPN="497-STM32L552CCT6-ND", LCSC="C123",
+    ))
+    assert u.description() == (
+        "U1: STM32L552CCT6 IC, DigiKey 497-STM32L552CCT6-ND, LCSC C123"
+    )

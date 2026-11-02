@@ -3,20 +3,44 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
-## Parts tab: capacitor and resistor assignment (through 2026-10-30)
+## Parts tab: capacitor, resistor and IC assignment (through 2026-10-30)
 
-The design, decisions, revisions and open items are in `CAPACITOR_PLAN.md`
-(revision 4 added resistors on the same code path; the TBD list there is the
-to-do list). State on 2026-10-30:
+Capacitors and resistors: the design, decisions, revisions and open items are
+in `CAPACITOR_PLAN.md` (revision 4 added resistors on the same code path; the
+TBD list there is the to-do list). ICs: `IC_PLAN.md`, with an "As built"
+section listing where the code differs from the plan; its TBD list is the IC
+to-do list. State on 2026-10-30:
 
 - Revision 3 (filtered JLCPCB search, manufacturer lists, cleared fields,
   values popup) is pushed; revision 4 (resistors) is pushed as 236a4dc.
-- Neither revision has been tried in the Cockpit GUI yet; scripted live
-  checks on BarrelJackAdapter, ECG, MotorDriver and BuckConverter give every
+- The IC plan is committed as dd3a467. The IC code (steps 1–8) is in the
+  working tree, not committed: new modules `icrequirement.py`, `package.py`,
+  `footprints.py`, `icsearch.py`, `gui/ic_assign_dialog.py`; changes to
+  `intent.py` (`IcIntent`), `pcb.py` (pad numbers), `partsdb.py` (schema
+  version 2, `ic` table), `suppliers.py` (DigiKey keyword search, unit price,
+  manufacturer), `gui/parts.py` and `gui/main_window.py`. Suite 1378 passing.
+- Step 9 (live check) ran on scratch copies of ECG, MotorDriver,
+  BarrelJackAdapter and BuckConverter (script
+  `/private/tmp/claude-501/ic-work/live_check.py`). Of 11 IC groups, 3 get a
+  candidate (ECG U1, ECG U2, MotorDriver U3); the other 8 are rejected on
+  DigiKey stock against the build + 1000 floor, each with a one-line reason.
+  Details in `IC_PLAN.md`, "As built".
+- 2026-11-01: the IC floor now only warns; the hard limit is 10 × the build
+  quantity. From the recorded stock that adds BuckConverter U1 (4 of 11);
+  not re-run live.
+- None of capacitor, resistor or IC assignment has been tried in the Cockpit
+  GUI yet; scripted live checks on the same four boards give every
   chip-capacitor and resistor group a candidate (MotorDriver's radial 47 µF
-  is not searchable, TBD 2).
-- The DigiKey token was blocked once for too many requests (TBD 7); live
-  checks make a few hundred DigiKey calls.
+  is not searchable, `CAPACITOR_PLAN.md` TBD 2).
+- The parts database migrates from version 1 to 2 the next time the Cockpit
+  opens `~/Code/Boards/parts.sqlite`. The migration only adds the `ic` table
+  and runs in one transaction; no backup is made.
+- The DigiKey token was blocked once for too many requests
+  (`CAPACITOR_PLAN.md` TBD 7); capacitor and resistor live checks make a few
+  hundred DigiKey calls.
+- Board finding from the IC live check: ECG U1 (AD8232ACPZ-R7) has an exposed
+  pad, and `ECG/Library/footprints.pretty/CP_20_10_ADI_NOTH.kicad_mod` has 20
+  pads and none. Check the datasheet's exposed-pad recommendation.
 
 ## JLCPCB stock check + parametric substitutes (2026-10-15)
 

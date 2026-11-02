@@ -1,4 +1,13 @@
-"""The BOM Cockpit main window."""
+"""The BOM Cockpit main window.
+
+The Parts tab holds capacitor and resistor groups and, after them, IC groups
+(``IC_PLAN.md`` step 8). Double-clicking a row opens the assign dialog for its
+kind (:class:`AssignDialog` or :class:`IcAssignDialog`); both run their
+searches through the same one-worker-at-a-time queue
+(:class:`CandidateWorker` or :class:`IcCandidateWorker`), and an accepted part
+is recorded in the parts database and its write plan queued on the model, so
+File > Save writes it merged with the other tabs' edits.
+"""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -55,6 +64,7 @@ from kicadtools.gui.lcsc import (
     _COL_ROTATION,
 )
 from kicadtools.gui.assign_dialog import AssignDialog
+from kicadtools.gui.ic_assign_dialog import IcAssignDialog
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.gui.parts import (
     STATUS_ASSIGNED,
@@ -62,12 +72,16 @@ from kicadtools.gui.parts import (
     STATUS_NOT_SEARCHABLE,
     STATUS_UNASSIGNED,
     CandidateWorker,
+    IcCandidateWorker,
     PartsTableModel,
     board_label,
+    is_ic,
     requirement_settings,
 )
 from kicadtools.gui.param_editor import ElectricalParamsDialog
 from kicadtools.gui.substitute_dialog import SubstituteDialog, describe_part
+from kicadtools.icrequirement import group_ics
+from kicadtools.icsearch import MATCH, ic_assignment_plan
 from kicadtools.naturalsort import natural_key
 from kicadtools.partrotation import PartRotationStore
 from kicadtools.partsdb import PartsDb
@@ -102,7 +116,7 @@ class MainWindow(QMainWindow):
         self._threads: list = []
         # The Parts tab's candidate search: one worker at a time. A request made
         # while one runs is kept in _search_next; only the latest is kept.
-        self._assign_dialog: Optional[AssignDialog] = None
+        self._assign_dialog: Optional["AssignDialog | IcAssignDialog"] = None
         self._search_running = False
         # The dialog and request number of the running search, so an outcome is
         # shown only in the dialog (and for the request) it was made for.
@@ -190,8 +204,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.addWidget(self.parts_table)
         hint = QLabel(
-            "Double-click a capacitor or resistor group to choose its part. Stock is checked "
-            "against the Boards count on the LCSC tab."
+            "Double-click a capacitor, resistor or IC group to choose its part. Stock is "
+            "checked against the Boards count on the LCSC tab. An IC's Footprint cell is "
+            "red when the footprint does not match the part, amber when it cannot be checked."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -293,7 +308,9 @@ class MainWindow(QMainWindow):
         self.table.resizeColumnsToContents()  # sensible initial widths; still draggable
         self.lcsc_model.load(self._records)
         self.lcsc_table.resizeColumnsToContents()
-        self.parts_model.load(group_parts(self._records, self._part_defaults()))
+        # Capacitor and resistor groups first, then ICs, each in reference order.
+        self.parts_model.load(group_parts(self._records, self._part_defaults())
+                              + group_ics(self._records))
         self.parts_table.resizeColumnsToContents()
         self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
         self.setWindowModified(False)  # a fresh load matches disk → clean
@@ -608,6 +625,17 @@ class MainWindow(QMainWindow):
 
     def _parts_double_clicked(self, index) -> None:
         row = self.parts_proxy.mapToSource(index).row()
+        group = self.parts_model.group_at(row)
+        if is_ic(group):
+            # An assigned IC opens too: the dialog shows its footprint check.
+            if self.parts_model.status(row) == STATUS_NOT_SEARCHABLE:
+                self.statusBar().showMessage(
+                    f"Not searchable: {group.requirement.problem()}. An IC needs an MPN, "
+                    "DigiKeyPN, LCSC or an MPN in its Value, and a footprint."
+                )
+                return
+            self._assign_group(row)
+            return
         if self.parts_model.status(row) == STATUS_ASSIGNED:
             self.statusBar().showMessage(
                 "That group already has its part numbers and footprint on the schematic."
@@ -630,6 +658,9 @@ class MainWindow(QMainWindow):
                 f"The parts database {self._parts_db_path} could not be opened.",
             )
             return
+        if is_ic(self.parts_model.group_at(row)):
+            self._assign_ic_group(row)
+            return
         # Re-read the remembered settings, so a defaulted field starts with the
         # last value used (an earlier accept this session may have changed it).
         defaults = self._part_defaults()
@@ -642,6 +673,26 @@ class MainWindow(QMainWindow):
         # the existing part is looked up once per session.
         dialog = AssignDialog(group, req, build_qty, self, defaults=defaults,
                               existing=self.parts_model.lookup_at(row))
+        cand, final_req = self._run_assign_dialog(dialog)
+        lookup = dialog.existing_lookup
+        dialog.deleteLater()
+        # A save while the dialog was open reloads the rows; the lookup is then
+        # recorded only when the row still holds this group.
+        still_here = (row < self.parts_model.rowCount()
+                      and self.parts_model.group_at(row) is group)
+        if (still_here and lookup is not None
+                and lookup is not self.parts_model.lookup_at(row)):
+            # The row now shows the part's evidence and any warning it gave.
+            self.parts_model.record_lookup(row, lookup, self._part_defaults())
+            self._refresh_status()
+        if cand is None or final_req is None:
+            return
+        self._accept_candidate(row, group, final_req, cand)
+
+    def _run_assign_dialog(self, dialog) -> tuple:
+        """Show *dialog* (an :class:`AssignDialog` or :class:`IcAssignDialog`)
+        with its searches routed through the window's worker queue. Returns
+        (chosen candidate, its requirement), both ``None`` unless accepted."""
         self._assign_dialog = dialog
         self._search_next = None
         dialog.search_requested.connect(self._request_candidates)
@@ -662,16 +713,25 @@ class MainWindow(QMainWindow):
                 pass
         self._assign_dialog = None
         self._search_next = None
-        lookup = dialog.existing_lookup
+        return cand, final_req
+
+    def _assign_ic_group(self, row: int) -> None:
+        """The IC counterpart of :meth:`_assign_group`. The dialog starts from
+        the requirement of a search recorded for the row (pad count already
+        read), and its last result is recorded on the row when it closes."""
+        group = self.parts_model.group_at(row)
+        req = self.parts_model.requirement_at(row)
+        dialog = IcAssignDialog(group, req, self.build_qty.value(), self)
+        cand, final_req = self._run_assign_dialog(dialog)
+        result = dialog.result
         dialog.deleteLater()
-        # A save while the dialog was open reloads the rows; the lookup is then
-        # recorded only when the row still holds this group.
         still_here = (row < self.parts_model.rowCount()
                       and self.parts_model.group_at(row) is group)
-        if (still_here and lookup is not None
-                and lookup is not self.parts_model.lookup_at(row)):
-            # The row now shows the part's evidence and any warning it gave.
-            self.parts_model.record_lookup(row, lookup, self._part_defaults())
+        if not still_here:
+            return
+        if result is not None:
+            # The row now shows the footprint check and any conflict.
+            self.parts_model.record_ic_result(row, result)
             self._refresh_status()
         if cand is None or final_req is None:
             return
@@ -679,31 +739,42 @@ class MainWindow(QMainWindow):
 
     def _accept_candidate(self, row: int, group, req, cand) -> None:
         """Record *cand* for *group*: database accept and usage, remembered
-        settings, and the queued write plan."""
+        settings (capacitors and resistors only), and the queued write plan
+        (:func:`assignment_plan`, or
+        :func:`kicadtools.icsearch.ic_assignment_plan` for an IC)."""
+        ic = is_ic(group)
         try:
-            plan = assignment_plan(group, req, cand)
+            plan = ic_assignment_plan(group, cand) if ic else assignment_plan(group, req, cand)
         except ValueError as exc:
             QMessageBox.warning(self, "Can't assign", str(exc))
             return
         db = self._parts_db
         if db is None:
             return
+        # An IC has no rating or dielectric to remember as a default.
+        settings = {} if ic else requirement_settings(req)
         try:
             part_id = db.accept_part(cand.choice())
             if self._board is not None:
                 db.record_usage(part_id, board_label(self._board), group.references)
-            for key, value in requirement_settings(req).items():
+            for key, value in settings.items():
                 db.set_setting(key, value)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Parts database", f"Could not record the part:\n{exc}")
             return
         self.parts_model.queue(row, req, cand, plan)
-        # The settings written above are the new defaults for the other groups.
-        self.parts_model.set_defaults(self._part_defaults())
+        if not ic:
+            # The settings written above are the new defaults for the other groups.
+            self.parts_model.set_defaults(self._part_defaults())
         self._mark_dirty()
+        if ic:
+            check = "" if cand.footprint.result == MATCH else f" Footprint: {cand.footprint.result}."
+            jlc = cand.jlc_text
+        else:
+            check, jlc = "", cand.lcsc
         self.statusBar().showMessage(
-            f"{', '.join(group.references)} → {cand.mpn} ({cand.lcsc}, "
-            f"{cand.digikey_pn}). Save to write it."
+            f"{', '.join(group.references)} → {cand.mpn} ({jlc}, "
+            f"{cand.digikey_pn}).{check} Save to write it."
         )
 
     def _request_candidates(self, req, search_suppliers: bool) -> None:
@@ -724,6 +795,25 @@ class MainWindow(QMainWindow):
         needed = dialog.needed if dialog is not None else 1
         self._search_running = True
         self._search_for = (dialog, tag)
+        if isinstance(dialog, IcAssignDialog):
+            # The pad count is read on the worker from the board's .kicad_pcb
+            # and the footprint libraries (first request only). A request
+            # queued before the first result arrived holds None; the dialog's
+            # requirement is resolved by then, so the files are not read again.
+            if req is None:
+                req = dialog.search_requirement
+            ic_worker = IcCandidateWorker(
+                group=dialog.group,
+                requirement=req,
+                needed=needed,
+                db_path=self._parts_db_path,
+                board=self._board,
+                cache_path=_LCSC_CACHE,
+            )
+            ic_worker.found.connect(self._on_candidates)
+            ic_worker.failed.connect(self._on_candidates_failed)
+            self._start(ic_worker)
+            return
         # The group, defaults and existing-part lookup are read when the
         # search starts, so a request queued behind the first one reuses the
         # lookup that the first one returned.
@@ -750,7 +840,7 @@ class MainWindow(QMainWindow):
         if nxt is not None and self._assign_dialog is not None:
             self._run_search(nxt)
 
-    def _search_target(self) -> "tuple[Optional[AssignDialog], Optional[int]]":
+    def _search_target(self) -> "tuple[Optional[AssignDialog | IcAssignDialog], Optional[int]]":
         """The open dialog and the request number of the finished search, or
         ``(None, None)`` when that dialog has closed."""
         dialog, tag = self._search_for or (None, None)
