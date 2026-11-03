@@ -10,11 +10,11 @@ open items are in `CAPACITOR_PLAN.md` (revision 4 added resistors and
 revision 5 inductors on the same code path; the TBD list there is the to-do
 list). ICs: `IC_PLAN.md`, with an "As built"
 section listing where the code differs from the plan; its TBD list is the IC
-to-do list. State on 2026-10-30:
+to-do list. State on 2026-11-03:
 
 - Revision 3 (filtered JLCPCB search, manufacturer lists, cleared fields,
   values popup) is pushed; revision 4 (resistors) is pushed as 236a4dc.
-- 2026-11-03: revision 5 (inductors) is in the working tree, not committed:
+- Revision 5 (inductors) is committed as 877a058:
   `InductorIntent` (`intent.py`), `INDUCTOR` and the package and class hooks
   (`parttypes.py`), inductance, current, body-size and shielding parsers
   (`units.py`), the `inductor` table (`partsdb.py`), ferrite beads on
@@ -23,8 +23,8 @@ to-do list. State on 2026-10-30:
   live check: see `CAPACITOR_PLAN.md`, revision 5. The Coilcraft parts on
   BuckConverter, BarrelJackAdapter and MotorDriver are no longer listed at
   DigiKey.
-- The IC plan is committed as dd3a467. The IC code (steps 1–8) is in the
-  working tree, not committed: new modules `icrequirement.py`, `package.py`,
+- The IC plan is committed as dd3a467 and the IC code (steps 1–8) as
+  2e0bbcc: new modules `icrequirement.py`, `package.py`,
   `footprints.py`, `icsearch.py`, `gui/ic_assign_dialog.py`; changes to
   `intent.py` (`IcIntent`), `pcb.py` (pad numbers), `partsdb.py` (schema
   version 2, `ic` table), `suppliers.py` (DigiKey keyword search, unit price,
