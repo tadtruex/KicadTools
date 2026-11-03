@@ -91,6 +91,21 @@ _FOOTPRINT_LIB_TYPES: List[Tuple[str, str]] = [
 ]
 
 
+def _ferrite_signal(props: Dict[str, object]) -> Optional[str]:
+    """Why a symbol drawn with an inductor footprint is a ferrite bead: an
+    ``FB`` reference prefix, or ``ferrite`` / ``bead`` in the Value or
+    Description; ``None`` when neither says so. Ferrite beads use the KiCad
+    ``Inductor_SMD`` chip footprints."""
+    reference = props.get("Reference")
+    if isinstance(reference, str) and re.match(r"^FB[0-9]", reference.upper()):
+        return "the reference prefix 'FB'"
+    for key in ("Value", "Description"):
+        text = props.get(key)
+        if isinstance(text, str) and re.search(r"\b(ferrite|bead)\b", text.lower()):
+            return f"the {key} mentions a ferrite bead"
+    return None
+
+
 def _by_footprint(props: Dict[str, object]) -> Optional[IntentGuess]:
     footprint = props.get("Footprint")
     if not isinstance(footprint, str) or ":" not in footprint:
@@ -105,6 +120,13 @@ def _by_footprint(props: Dict[str, object]) -> Optional[IntentGuess]:
                 if led is not None:
                     return IntentGuess(
                         "led", f"diode-style footprint {library!r} but {led}", "footprint"
+                    )
+            if intent_type == "inductor":
+                ferrite = _ferrite_signal(props)
+                if ferrite is not None:
+                    return IntentGuess(
+                        "ferrite", f"inductor footprint {library!r} but {ferrite}",
+                        "footprint"
                     )
             return IntentGuess(intent_type, f"footprint library {library!r}", "footprint")
     return None

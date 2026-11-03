@@ -259,8 +259,8 @@ def test_capacitor_groups_contain_only_capacitors_motordriver():
     assert all(isinstance(m.intent, CapacitorIntent) for m in members)
     assert sorted(m.reference for m in members) == sorted(r.reference for r in caps)
     assert sum(g.quantity for g in cap_groups) == len(caps)
-    # Every other group is a resistor group.
-    assert {g.requirement.kind for g in groups} == {"capacitor", "resistor"}
+    # Every other group is a resistor or inductor group.
+    assert {g.requirement.kind for g in groups} == {"capacitor", "resistor", "inductor"}
 
 
 def test_group_splits_on_stated_voltage_motordriver():

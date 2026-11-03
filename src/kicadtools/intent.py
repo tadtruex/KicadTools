@@ -250,6 +250,47 @@ class CapacitorIntent(ElectricalIntent):
         return f"{self.reference}: {self.value}{tol} capacitor{vm}"
 
 
+@intent_subclass("inductor")
+@dataclass(kw_only=True)
+class InductorIntent(ElectricalIntent):
+    """Inductor – requires ``Value``; optional ``Current:Min`` (the
+    saturation-current floor), ``Shielding:Preferred`` & ``Tolerance:Preferred``."""
+    value: str
+    current_min: str | None = None
+    shielding_preferred: List[str] = field(default_factory=list)
+    tolerance_preferred: List[str] = field(default_factory=list)
+
+    @classmethod
+    def _from_dict_impl(cls, data: Dict[str, Any]) -> "InductorIntent":
+        try:
+            value = data["Value"]
+        except KeyError as exc:
+            raise KeyError(
+                f"Inductor '{data['Reference']}' missing required key 'Value'"
+            ) from exc
+
+        shielding_preferred: List[str] = []
+        if "Shielding:Preferred" in data:
+            shielding_preferred = _parse_preferred(data["Shielding:Preferred"])
+
+        tolerance_preferred: List[str] = []
+        if "Tolerance:Preferred" in data:
+            tolerance_preferred = _parse_preferred(data["Tolerance:Preferred"])
+
+        return cls(
+            **cls._base_kwargs(data),
+            value=value,
+            current_min=data.get("Current:Min"),
+            shielding_preferred=shielding_preferred,
+            tolerance_preferred=tolerance_preferred,
+        )
+
+    def description(self) -> str:
+        tol = f" ±{self.tolerance_preferred[0]}" if self.tolerance_preferred else ""
+        cur = f", min-Isat {self.current_min}" if self.current_min else ""
+        return f"{self.reference}: {self.value}{tol} inductor{cur}"
+
+
 @intent_subclass("diode")
 @dataclass(kw_only=True)
 class DiodeIntent(ElectricalIntent):

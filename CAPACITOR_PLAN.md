@@ -8,8 +8,8 @@ parts are recorded in a local SQLite database that later runs search first.
 Target workflow: **Schematic Capture → Cockpit → PCB with footprints for
 everything.**
 
-Scope was capacitors first; resistors were added in revision 4 on the same
-code path. Inductors and other types follow the same shape.
+Scope was capacitors first; resistors were added in revision 4 and inductors
+in revision 5 on the same code path.
 
 ## Decisions already made
 
@@ -443,6 +443,70 @@ keep their current part. 10 are searched: the current part does not fit the
 schematic (MotorDriver R3/R6 `102K` with a 100 kΩ part, R17 0603 footprint
 with an 0402 part), or it fails the requirement or the stock floor.
 
+## Revision 5: inductors (2026-11-03)
+
+Inductors use the same code path. Decisions (user, 2026-11-03):
+
+- **Scope:** chip inductors (0402–1210) and power inductors. Every inductor
+  on the boards is a power inductor (Coilcraft XGL4040 on BuckConverter and
+  BarrelJackAdapter, XGL3520 on MotorDriver) with a part-specific footprint.
+- **Current floor** (`Current:Min`) is compared with the saturation current
+  only. A part whose supplier lists no saturation current (`-`, most chip
+  inductors) is compared on its rated current. With no stated or remembered
+  floor it is `any`, as a resistor's power floor, and the chosen part's
+  current is written.
+- **Shielding** takes the dielectric's place (`Shielding:Preferred`, default
+  `ind.shielding` = `Shielded`): `Shielded`, `Semi-Shielded` or
+  `Unshielded`, each accepting the better-shielded classes.
+- **Tolerance:** default `ind.tolerance` = 20 %.
+- **Manufacturers** (`ind.manufacturers`): Coilcraft, Murata, TDK, Taiyo
+  Yuden, Bourns, Wurth, Vishay, Sunlord, Samsung, Eaton, Pulse, Abracon.
+- **Package:** a chip size or a body size in millimetres (`4x4mm`). The plan
+  was for the footprint to fix the body size. Neither the footprint name nor
+  the footprint file gives it: Coilcraft's and Bourns' digits are length and
+  height (XGL3520 is 3.5 × 3.2 mm, 2.0 mm high), and the KiCad fab outline is
+  drawn larger than the body (`L_Coilcraft_XxL4040` measures 4.5 × 4.5 mm,
+  `IND_XGL3520_COC` 4.2 × 3.9 mm). So a footprint with no chip size leaves the
+  body size to `Package:Preferred`, the existing part or the Description,
+  and the dialog's Package field takes one. Body sizes within 0.25 mm per
+  side match. The footprint is kept as it is; none is written for a body
+  size, and a power inductor without one stays `unassigned` with a tooltip
+  saying to add one in KiCad. `Package:Preferred` is written for a body size
+  so the next open reads it from the schematic.
+- **JLCPCB search:** a chip size is searched in `Inductors (SMD)` and in
+  `Power Inductors` with the size as the package filter; a body size in
+  `Power Inductors` with no package filter (JLCPCB writes sizes as
+  `SMD,4x4mm`, `SMD,4.1x4.1mm` and so on), compared after the search.
+  JLCPCB lists no shielding for most chip inductors; such a hit is not
+  rejected for it, DigiKey's `Shielding` decides, and the candidate takes
+  DigiKey's value so the parts database records it.
+- **Ferrite beads:** a symbol with an `Inductor_SMD` footprint is a ferrite
+  bead when its reference starts with `FB` or its Value or Description says
+  ferrite or bead (BuckConverter FB1, `FB_120_100MHz` on
+  `L_0603_1608Metric`). Ferrite beads are not assigned yet (TBD 11).
+- **Parts database:** an `inductor` table (inductance, saturation current,
+  shielding, tolerance), created on open within schema version 2.
+- **Parts tab:** the Dielectric column became Class (dielectric or
+  shielding).
+
+Live check (scripted, five inductor groups on BuckConverter,
+BarrelJackAdapter, MotorDriver and NeoPMOD):
+
+- BuckConverter L1 (XGL4040-223MEC) and BarrelJackAdapter L1 (XGL4040-103MEC):
+  DigiKey no longer lists either part (exact lookup and keyword search; the
+  XGL4040-151MEC sibling resolves), so the body size is not known until it
+  is entered. With `4x4mm` entered, BarrelJackAdapter L1 (10 µH, 1 A from the
+  Description, shielded) gives three candidates: Abracon ASPI-4030S-100M-T
+  (1.95 A), Bourns SRN4018TA-100M (1.5 A) and SRN4018-100M (1.4 A). The
+  search checked 1000 JLCPCB hits in 34 s; 596 were from manufacturers not
+  in the list.
+- MotorDriver L1 (XGL3520-472MEC, LCSC C6616438): the body size 3.5x3.2mm
+  and a 2.3 A floor come from the JLCPCB part, which DigiKey does not list,
+  so it is not a candidate; no JLCPCB part of that size from a listed maker
+  is in stock.
+- NeoPMOD L1 (`1u`, no footprint): needs a package. With `0805`, five TDK and
+  Murata candidates.
+
 ## TBD (after the main loop is working)
 
 Decisions from the review of the first build (2026-10-29):
@@ -489,10 +553,25 @@ Decisions from the review of the first build (2026-10-29):
    temperature coefficient are not part of the requirement; a precision
    divider that needs thin film states it on the schematic today only by
    MPN.
-10. **Manufacturer lists in the Cockpit** (2026-10-30): `cap.manufacturers`
-    and `res.manufacturers` are settings with built-in values; there is no
-    editor for them yet, so a change means editing the `settings` table in
-    `parts.sqlite`.
+10. **Manufacturer lists in the Cockpit** (2026-10-30): `cap.manufacturers`,
+    `res.manufacturers` and `ind.manufacturers` are settings with built-in
+    values; there is no editor for them yet, so a change means editing the
+    `settings` table in `parts.sqlite`.
+11. **Ferrite beads** (2026-11-03): classified as `ferrite` but not assigned.
+    Their requirement is impedance at a frequency (`120 Ω @ 100 MHz`) and a
+    current, not an inductance.
+12. **Power-inductor footprints** (2026-11-03): a candidate of the same body
+    size can have a different pad layout from the footprint on the symbol.
+    The dialog does not compare them; reading the footprint's pads (as the
+    IC footprint check does) and the part's land pattern would.
+13. **Current in an inductor Value** (2026-11-03): `L_10U_1A` and
+    `L_4p7U_13p5A` state a current that is not read; the Description's is.
+    MotorDriver L1's Value and Description say 13.5 A, while its part's
+    saturation current is 2.3 A.
+14. **Power-inductor search speed** (2026-11-03): a body size has no
+    package filter, so the search reads ten pages of the value in
+    `Power Inductors` (about 30 s for 10 µH). Candidate: filter on JLCPCB's
+    own size strings once they are known for the size.
 
 Done in the same review: when no part meets a **default** tolerance limit, the
 search drops the limit, the dialog shows an amber note naming it, and the
@@ -512,6 +591,7 @@ plan, so the code has one way to do each thing:
   `supplier_pn` (LCSC rows). Gitignoring `parts.sqlite` keeps it machine-local.
 - The LCSC tab's Resolve for capacitors and resistors, which the Parts tab
   supersedes.
-- Inductors and other types (resistors: revision 4).
+- Other types (resistors: revision 4; inductors: revision 5; ICs:
+  `IC_PLAN.md`).
 - Seeding the database from capacitors and resistors already assigned on
   existing boards.

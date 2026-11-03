@@ -18,6 +18,8 @@ Tables (see ``CAPACITOR_PLAN.md`` and ``IC_PLAN.md`` step 7):
   status;
 - ``capacitor`` — capacitance, voltage, dielectric and tolerance of a part;
 - ``resistor`` — resistance, power and tolerance of a part;
+- ``inductor`` — inductance, saturation current, shielding and tolerance of
+  a part;
 - ``ic`` — DigiKey's package/case and pin count of an IC (``part.type`` =
   ``"ic"``; modules are ICs here);
 - ``supplier_pn`` — DigiKey and LCSC part numbers of a part. An IC first
@@ -29,7 +31,10 @@ Tables (see ``CAPACITOR_PLAN.md`` and ``IC_PLAN.md`` step 7):
 Schema version 2 added the ``ic`` table. A version-1 file is migrated in place
 when it is opened: the table is added and ``meta.schema_version`` is set to 2
 in one transaction, and every existing row is kept. A file of any other
-version is refused without being changed.
+version is refused without being changed. The ``inductor`` table was added
+within version 2: the schema text is run on every open and holds only
+``CREATE TABLE IF NOT EXISTS``, so a version-2 file without the table gains
+it and keeps every row.
 
 Stock and price are not stored; they change by the hour and are fetched from
 the suppliers (through the existing JLCPCB cache) when candidates are listed.
@@ -49,8 +54,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, ClassVar, Dict, List, Optional, Sequence, Union
 
-from kicadtools.parttypes import CAPACITOR, RESISTOR
-from kicadtools.units import dielectric_tokens
+from kicadtools.parttypes import CAPACITOR, INDUCTOR, RESISTOR, part_type
 
 SCHEMA_VERSION = 2
 
@@ -100,6 +104,16 @@ CREATE TABLE IF NOT EXISTS resistor (
   power_w        REAL,
   tolerance_pct  REAL
 );
+-- current_a is the saturation current, or the rated current where the
+-- supplier lists none. shielding is "Shielded", "Semi-Shielded" or
+-- "Unshielded".
+CREATE TABLE IF NOT EXISTS inductor (
+  part_id        INTEGER PRIMARY KEY REFERENCES part(id) ON DELETE CASCADE,
+  inductance_h   REAL NOT NULL,
+  current_a      REAL,
+  shielding      TEXT NOT NULL,
+  tolerance_pct  REAL
+);
 -- ic.package is DigiKey's Package / Case (IcChoice.package_case). The
 -- Supplier Device Package is part.package, as for every part type.
 CREATE TABLE IF NOT EXISTS ic (
@@ -129,7 +143,8 @@ CREATE TABLE IF NOT EXISTS usage (
 @dataclass(frozen=True)
 class _Table:
     """The parameter table of one part type: its name and the columns that
-    hold the value, the rating and (capacitors) the dielectric."""
+    hold the value, the rating and the class (a capacitor's dielectric, an
+    inductor's shielding; ``None`` for a resistor)."""
     name: str
     nominal: str
     rating: str
@@ -139,6 +154,7 @@ class _Table:
 _TABLES: Dict[str, _Table] = {
     CAPACITOR.name: _Table("capacitor", "capacitance_f", "voltage_v", "dielectric"),
     RESISTOR.name: _Table("resistor", "resistance_ohm", "power_w", None),
+    INDUCTOR.name: _Table("inductor", "inductance_h", "current_a", "shielding"),
 }
 
 
@@ -165,12 +181,13 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _norm_dielectric_field(text: object) -> str:
-    """A dielectric as stored: each code normalized (``units.norm_dielectric``)
-    and joined with ``", "``. A single code is stored as that code
-    (``"x7r"`` -> ``"X7R"``); a supplier string naming two codes is stored as
-    both (``"C0G/NP0"`` -> ``"C0G, NP0"``) rather than run together."""
-    return ", ".join(dielectric_tokens(text))
+def _norm_class_field(kind: str, text: object) -> str:
+    """A class (dielectric, shielding) as stored: each code normalized by the
+    type's tokenizer and joined with ``", "``. A single code is stored as that
+    code (``"x7r"`` -> ``"X7R"``); a supplier string naming two codes is
+    stored as both (``"C0G/NP0"`` -> ``"C0G, NP0"``) rather than run
+    together."""
+    return ", ".join(part_type(kind).class_tokens(text))
 
 
 def _opt_text(text: Optional[str]) -> Optional[str]:
@@ -190,8 +207,9 @@ def norm_mpn(mpn: object) -> str:
 @dataclass(frozen=True)
 class PartParams:
     """The parameters that make two parts of one type interchangeable on a
-    footprint: the value (farads, ohms), the rating (volts, watts), the
-    dielectric (capacitors; ``""`` otherwise) and the tolerance."""
+    footprint: the value (farads, ohms, henries), the rating (volts, watts,
+    saturation amps), the class (a capacitor's dielectric, an inductor's
+    shielding; ``""`` otherwise) and the tolerance."""
 
     nominal: float
     rating: Optional[float]
@@ -451,7 +469,7 @@ class PartsDb:
 
     @staticmethod
     def _param_row(part_id: int, choice: PartChoice) -> tuple:
-        """Columns and values of a capacitor or resistor row."""
+        """Columns and values of a capacitor, resistor or inductor row."""
         table = _table(choice.kind)
         p = choice.params
         cols = ["part_id", table.nominal, table.rating, "tolerance_pct"]
@@ -460,7 +478,7 @@ class PartsDb:
                         None if p.tolerance_pct is None else float(p.tolerance_pct)]
         if table.dielectric:
             cols.append(table.dielectric)
-            values.append(_norm_dielectric_field(p.dielectric))
+            values.append(_norm_class_field(choice.kind, p.dielectric))
         return cols, values
 
     @staticmethod
@@ -497,9 +515,11 @@ class PartsDb:
         tolerance_max_pct: Optional[float],
     ) -> List[DbPart]:
         """Accepted parts of type *kind* meeting a requirement: value within
-        0.1 % of *nominal*, the same *package*, a rating of at least
-        *rating_min* (any rating when ``None``), a dielectric in *dielectrics*
-        (capacitors; compared normalized; any dielectric when empty), and,
+        0.1 % of *nominal*, the same *package* (a body size within 0.25 mm per
+        side, :meth:`~kicadtools.parttypes.PartType.same_package`), a rating of
+        at least *rating_min* (any rating when ``None``), a class in
+        *dielectrics* (a capacitor's dielectric, an inductor's shielding;
+        compared normalized; any class when empty), and,
         when *tolerance_max_pct* is given, a stated tolerance no looser than
         it. Ordered by usage count (highest first), then JLCPCB Basic
         before Extended, then MPN.
@@ -507,7 +527,11 @@ class PartsDb:
         Each entry of *dielectrics* may itself list codes (``"C0G, NP0"``); a
         stored part matches when any of its codes is allowed."""
         table = _table(kind)
-        allowed = {t for d in dielectrics for t in dielectric_tokens(d)}
+        ptype = part_type(kind)
+        allowed = {t for d in dielectrics for t in ptype.class_tokens(d)}
+        # A body size is compared after the query: suppliers round one part's
+        # size differently, so the stored text need not equal the requested.
+        by_body = ptype.is_body_size(package)
         band = abs(float(nominal)) * VALUE_REL_TOL
         diel_col = f"c.{table.dielectric}" if table.dielectric else "''"
         sql = (
@@ -522,10 +546,14 @@ class PartsDb:
             "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS jlc_library,"
             " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
             f" FROM part p JOIN {table.name} c ON c.part_id = p.id"
-            " WHERE p.status = ? AND p.package = ?"
-            f" AND ABS(c.{table.nominal} - ?) <= ?"
+            " WHERE p.status = ?"
+            + ("" if by_body else " AND p.package = ?")
+            + f" AND ABS(c.{table.nominal} - ?) <= ?"
         )
-        args: list = [ACCEPTED, (package or "").strip(), float(nominal), band]
+        args: list = [ACCEPTED]
+        if not by_body:
+            args.append((package or "").strip())
+        args += [float(nominal), band]
         if rating_min is not None:
             sql += f" AND c.{table.rating} >= ?"
             args.append(float(rating_min))
@@ -546,7 +574,9 @@ class PartsDb:
              dk, lcsc, lib, uses) = row
             # The dielectric filter runs here: a stored value can list two
             # codes, which an SQL IN test would compare as one string.
-            if allowed and not allowed.intersection(dielectric_tokens(diel)):
+            if allowed and not allowed.intersection(ptype.class_tokens(diel)):
+                continue
+            if by_body and not ptype.same_package(pkg, package):
                 continue
             out.append(DbPart(
                 kind=kind, part_id=int(pid), mpn=mpn, manufacturer=mfr, package=pkg,

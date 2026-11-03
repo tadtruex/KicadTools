@@ -149,7 +149,7 @@ def test_candidate_cells():
     assert row["Unit price"] == "$0.0021"
     assert row["Value"] == "100nF"
     assert row["Rating"] == "50V"
-    assert row["Dielectric"] == "X7R"
+    assert row["Class"] == "X7R"
     assert row["Tolerance"] == "10%"
 
 

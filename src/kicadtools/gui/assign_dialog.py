@@ -1,15 +1,18 @@
-"""The "Assign Part" dialog for one capacitor or resistor requirement group.
+"""The "Assign Part" dialog for one capacitor, resistor or inductor requirement group.
 
 The header lists the group's references, its quantity, the build quantity, the
 units the build needs and the part already on the schematic (what the
 existing-part lookup found). Below it the editable requirement fields
 (Package, the rating floor — Voltage:Min for a capacitor, Power:Min for a
-resistor —, Dielectric for a capacitor, Tolerance) each name their source; a value
+resistor, Current:Min for an inductor —, the class — Dielectric for a
+capacitor, Shielding for an inductor —, Tolerance) each name their source; a value
 from a default, an edit, the existing part or the Description is written to
 the group's symbols on accept, and its label says so. A field stated on the schematic is read-only: the write plan
 never overwrites a stated value, so it is changed on the schematic (or with
 *Edit Electrical Parameters* on the Intents tab). Package is also fixed by the
-footprint when the symbol has one.
+footprint when the symbol has one, except an inductor footprint with no chip
+size: a power inductor's footprint does not give its body size, which is
+entered here (``4x4mm``) when the existing part does not state it.
 
 The dialog runs no network code. A search is requested with the
 ``search_requested(requirement, search_suppliers)`` signal; the window runs it
@@ -97,20 +100,15 @@ from kicadtools.requirement import (
     PartRequirement,
     RequirementGroup,
     Sourced,
+    package_editable,
 )
 from kicadtools.suppliers import digikey_url, lcsc_url
-from kicadtools.units import (
-    chip_size,
-    dielectric_tokens,
-    fmt_percent,
-    package_code,
-    parse_percent,
-)
+from kicadtools.units import fmt_percent, parse_percent
 
 CANDIDATE_COLUMNS = [
     "MPN", "Manufacturer", "Source", "LCSC", "JLC library", "JLC stock",
     "DigiKey PN", "DigiKey stock", "Unit price",
-    "Value", "Rating", "Dielectric", "Tolerance",
+    "Value", "Rating", "Class", "Tolerance",
 ]
 COL_LCSC = CANDIDATE_COLUMNS.index("LCSC")
 COL_DIGIKEY = CANDIDATE_COLUMNS.index("DigiKey PN")
@@ -201,14 +199,20 @@ def parse_field_values(
         return not text and sourced.value not in (None, "", ()) or (
             not text and sourced.source == ANY)
 
-    if not original.footprint and original.package.source != SCHEMATIC:
+    if (package_editable(t, original.footprint)
+            and original.package.source != SCHEMATIC):
         text = package.strip()
         if text:
-            code = package_code(text) or chip_size(text)
+            code = t.package_of(text)
             if code is None:
+                if t.body_sizes:
+                    return (f"Package '{text}' is not a chip size such as 0603 "
+                            "or a body size such as 4x4mm")
                 return f"Package '{text}' is not a chip size such as 0603"
             if code != original.package.value:
                 kwargs["package"] = code
+        elif not original.package.value:
+            return "Enter the package (a chip size or a body size such as 4x4mm) to search"
 
     text = rating.strip()
     prop = t.rating_property
@@ -229,22 +233,24 @@ def parse_field_values(
         return f"Enter {prop} (or 'any') to search"
 
     text = dielectric.strip()
-    if not t.has_dielectric or original.dielectrics.source == SCHEMATIC:
+    if not t.has_class or original.dielectrics.source == SCHEMATIC:
         pass
     elif is_any(text, original.dielectrics):
         if original.dielectrics.source != ANY:
             clear.append("dielectrics")
     elif text:
         codes = []
-        for code in dielectric_tokens(text):
+        for code in t.class_tokens(text):
             if code not in codes:
                 codes.append(code)
         if not codes:
-            return f"Dielectric '{text}' names no dielectric such as X7R"
+            example = "X7R" if t.class_setting == "" else "Shielded"
+            return (f"{t.class_title} '{text}' names no "
+                    f"{t.class_title.lower()} such as {example}")
         if tuple(codes) != tuple(original.dielectrics.value or ()):
             kwargs["dielectrics"] = tuple(codes)
     elif not original.dielectrics.value and original.nominal:
-        return "Enter a dielectric (or 'any') to search"
+        return f"Enter a {t.class_title.lower()} (or 'any') to search"
 
     text = tolerance.strip()
     if original.tolerance_max_pct.source == SCHEMATIC:
@@ -267,10 +273,14 @@ def parse_field_values(
 
 def facet_title(key: str, ptype: PartType) -> str:
     """The title of a values-popup section: the rating property for
-    ``"rating"`` (``"Voltage:Min"``, ``"Power:Min"``), else the field name."""
+    ``"rating"`` (``"Voltage:Min"``, ``"Power:Min"``, ``"Current:Min"``), the
+    class title for ``"dielectric"`` (``"Dielectric"``, ``"Shielding"``),
+    else the field name."""
     if key == "rating":
         return ptype.rating_property
-    return {"dielectric": "Dielectric", "tolerance": "Tolerance"}.get(key, key)
+    if key == "dielectric":
+        return ptype.class_title
+    return {"tolerance": "Tolerance"}.get(key, key)
 
 
 def facet_rows(result: SearchResult, req: Optional[PartRequirement]
@@ -528,7 +538,7 @@ class AssignDialog(QDialog):
         specs = [
             ("package", "Package"),
             ("rating", t.rating_property),
-            ("dielectric", "Dielectric"),
+            ("dielectric", t.class_title),
             ("tolerance", "Tolerance"),
         ]
         for kind, label in specs:
@@ -543,11 +553,16 @@ class AssignDialog(QDialog):
             edit.textEdited.connect(self._field_edited)
             self._fields[kind] = edit
             self._notes[kind] = note
-            if kind == "dielectric" and not t.has_dielectric:
+            if kind == "dielectric" and not t.has_class:
                 form.setRowVisible(row, False)
         self._fields["rating"].setPlaceholderText(
-            "e.g. 16V" if t.rating_required else "e.g. 100mW, or any")
-        self._fields["dielectric"].setPlaceholderText("comma-separated, e.g. X7R, X5R")
+            "e.g. 16V" if t.rating_required
+            else f"e.g. {t.fmt_rating(0.1 if t.rating_setting == 'power_min' else 1.5)}, or any")
+        self._fields["dielectric"].setPlaceholderText(
+            "comma-separated, e.g. X7R, X5R" if not t.class_setting
+            else "e.g. Shielded, or any")
+        if t.body_sizes:
+            self._fields["package"].setPlaceholderText("e.g. 0603, or 4x4mm")
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -636,9 +651,13 @@ class AssignDialog(QDialog):
                 "Electrical Parameters on the Intents tab." if stated else ""
             )
         pkg = self._fields["package"]
-        pkg.setEnabled(not req.footprint)
-        if req.footprint:
+        editable = package_editable(self._ptype, req.footprint)
+        pkg.setEnabled(editable)
+        if req.footprint and not editable:
             pkg.setToolTip(f"Set by the footprint {req.footprint}.")
+        elif req.footprint:
+            pkg.setToolTip(f"The footprint {req.footprint} names no body size; "
+                           "the candidates must match the size entered here.")
         self._value_label.setText(value_header(req))
         self._show_conflicts(req)
         self._refresh_notes()
@@ -672,7 +691,9 @@ class AssignDialog(QDialog):
         keep: Dict[str, str] = {}
         for kind, edit in self._fields.items():
             was = self._field_value(old, kind)
-            if was.source == SCHEMATIC or (kind == "package" and old.footprint):
+            if was.source == SCHEMATIC or (
+                    kind == "package"
+                    and not package_editable(self._ptype, old.footprint)):
                 continue
             if edit.text() != field_text(was, kind, self._ptype) or was.source == EDITED:
                 keep[kind] = edit.text()
@@ -681,7 +702,7 @@ class AssignDialog(QDialog):
         for kind, text in keep.items():
             if self._field_value(req, kind).source == SCHEMATIC:
                 continue
-            if kind == "package" and req.footprint:
+            if kind == "package" and not package_editable(self._ptype, req.footprint):
                 continue
             self._fields[kind].setText(text)
         self._refresh_notes()

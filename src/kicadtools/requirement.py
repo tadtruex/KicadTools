@@ -1,16 +1,17 @@
 """
-Part requirements and grouping, for capacitors and resistors.
+Part requirements and grouping, for capacitors, resistors and inductors.
 
 A :class:`PartRequirement` is what any acceptable part for a symbol must meet:
-its value (``nominal``, in farads or ohms), package, minimum rating (volts for
-a capacitor, watts for a resistor), allowed dielectrics (capacitors only) and
-maximum tolerance. What differs between the types is in
+its value (``nominal``, in farads, ohms or henries), package, minimum rating
+(volts for a capacitor, watts for a resistor, saturation amps for an
+inductor), allowed classes (``dielectrics``: a capacitor's dielectrics, an
+inductor's shielding classes; none for a resistor) and maximum tolerance. What differs between the types is in
 :mod:`kicadtools.parttypes`; ``kind`` names the type. Each field except the
 value is a :class:`Sourced` value that records where it came from:
 
 * ``schematic`` — stated on the symbol (``Footprint``, ``Package:Preferred``,
-  ``Voltage:Min`` / ``Power:Min``, ``Class:Preferred``,
-  ``Tolerance:Preferred``);
+  ``Voltage:Min`` / ``Power:Min`` / ``Current:Min``, ``Class:Preferred`` /
+  ``Shielding:Preferred``, ``Tolerance:Preferred``);
 * ``default``   — taken from the remembered settings or the built-in defaults;
 * ``edited``    — changed in the Cockpit's assign dialog;
 * ``relaxed``   — a default tolerance limit dropped because no part met it;
@@ -23,8 +24,8 @@ value is a :class:`Sourced` value that records where it came from:
   other source states;
 * ``unset``     — no value from any source (the dialog prompts for one);
 * ``any``       — no limit on the field: cleared in the Cockpit's assign
-  dialog, or a resistor's power floor with no stated or remembered value; the
-  chosen part's own value is written.
+  dialog, or a resistor's power floor or an inductor's current floor with no
+  stated or remembered value; the chosen part's own value is written.
 
 Each field takes the first source that states it; the order per field is in
 :func:`part_requirement`. When two sources state a value or a package and
@@ -38,7 +39,7 @@ value of ``None``. The write plan fills only fields tagged ``default``,
 never overwritten. Only ``default`` and ``edited`` values update the
 remembered settings.
 
-:func:`group_parts` collects the BOM's capacitors and resistors into
+:func:`group_parts` collects the BOM's capacitors, resistors and inductors into
 :class:`RequirementGroup` s keyed on the values stated on the schematic, so a
 symbol with a stated 50 V floor is never merged with one that states none.
 
@@ -56,13 +57,7 @@ from kicadtools.evidence import DescriptionEvidence, ExistingPart, PartEvidence
 from kicadtools.naturalsort import natural_key
 from kicadtools.partnum import extract_part_numbers
 from kicadtools.parttypes import CAPACITOR, PartType, part_type, type_of_intent
-from kicadtools.units import (
-    chip_size,
-    dielectric_tokens,
-    dielectric_upgrades,
-    package_code,
-    parse_percent,
-)
+from kicadtools.units import package_code, parse_percent
 
 # Source tags for a Sourced value.
 SCHEMATIC = "schematic"
@@ -79,10 +74,12 @@ ANY = "any"
 # Two values within this relative difference are the same value.
 _VALUE_MATCH_REL = 1e-3
 
-# Built-in defaults, overlaid by the settings table. "cap.voltage_min" and
-# "res.power_min" have no built-in value: a capacitor's voltage floor is a
-# design decision, so it is unset until one has been used; a resistor with no
-# power floor is searched with none.
+# Built-in defaults, overlaid by the settings table. "cap.voltage_min",
+# "res.power_min" and "ind.current_min" have no built-in value: a capacitor's
+# voltage floor is a design decision, so it is unset until one has been used;
+# a resistor with no power floor and an inductor with no current floor are
+# searched with none. "ind.package" has no built-in value either: most
+# inductors are power inductors, whose body size is not a default.
 BUILTIN_DEFAULTS: Dict[str, str] = {
     "cap.package": "0603",
     "cap.dielectric.small": "C0G, NP0",
@@ -102,6 +99,12 @@ BUILTIN_DEFAULTS: Dict[str, str] = {
     "res.manufacturers": (
         "Yageo, Vishay, Panasonic, Stackpole, Rohm, TE Connectivity, Bourns"
     ),
+    "ind.shielding": "Shielded",
+    "ind.tolerance": "20%",
+    "ind.manufacturers": (
+        "Coilcraft, Murata, TDK, Taiyo Yuden, Bourns, Wurth, Vishay, Sunlord, "
+        "Samsung, Eaton, Pulse, Abracon"
+    ),
 }
 
 # Dielectric band boundaries (farads): small at or below 1 nF, bulk at or
@@ -120,7 +123,9 @@ _GROUP_PROPS = (
     "Footprint",
     "Voltage:Min",
     "Power:Min",
+    "Current:Min",
     "Class:Preferred",
+    "Shielding:Preferred",
     "Tolerance:Preferred",
     "Package:Preferred",
 )
@@ -146,7 +151,7 @@ def tolerance_class(dielectrics: Sequence[str]) -> str:
     """``"class1"`` when every entry is C0G/NP0, else ``"class2"``. An empty
     sequence is ``"class2"``: the looser tolerance applies until a dielectric
     is known."""
-    codes = _codes(dielectrics)
+    codes = _codes(CAPACITOR, dielectrics)
     if codes and all(c in _CLASS1 for c in codes):
         return "class1"
     return "class2"
@@ -155,8 +160,8 @@ def tolerance_class(dielectrics: Sequence[str]) -> str:
 def tolerance_key(ptype: PartType, dielectrics: Sequence[str]) -> str:
     """The settings key of the default tolerance: per dielectric class for a
     capacitor (``"cap.tolerance.class2"``), else one per type
-    (``"res.tolerance"``)."""
-    if ptype.has_dielectric:
+    (``"res.tolerance"``, ``"ind.tolerance"``)."""
+    if ptype.tolerance_by_class:
         return ptype.key("tolerance." + tolerance_class(dielectrics))
     return ptype.key("tolerance")
 
@@ -171,12 +176,12 @@ class Sourced:
 @dataclass(frozen=True)
 class PartRequirement:
     """The parameters any acceptable part for one symbol must meet."""
-    kind: str                            # PartType name: "capacitor", "resistor"
+    kind: str                            # PartType name: "capacitor", "resistor", "inductor"
     value_text: str                      # the symbol's Value, as written
-    nominal: Optional[float]             # farads / ohms; None when Value doesn't parse
-    package: Sourced                     # Optional[str], e.g. "0603"
-    rating_min: Sourced                  # Optional[float], volts / watts
-    dielectrics: Sourced                 # Tuple[str, ...], normalized; () for a resistor
+    nominal: Optional[float]             # farads / ohms / henries; None when Value doesn't parse
+    package: Sourced                     # Optional[str], e.g. "0603", "4x4mm"
+    rating_min: Sourced                  # Optional[float], volts / watts / amps
+    dielectrics: Sourced                 # Tuple[str, ...], the class codes; () for a resistor
     tolerance_max_pct: Sourced           # Optional[float]
     footprint: str = ""                  # the symbol's Footprint, "" when empty
     nominal_source: str = SCHEMATIC      # SCHEMATIC | DESCRIPTION | PART | UNSET
@@ -191,7 +196,8 @@ class PartRequirement:
     @property
     def searchable(self) -> bool:
         """No conflicts; value, package and (for a capacitor) rating floor
-        are all known, and the package is an imperial chip size."""
+        are all known, and the package is a chip size or, for an inductor, a
+        body size."""
         return not self.problem()
 
     def problem(self) -> str:
@@ -206,11 +212,15 @@ class PartRequirement:
             return f"Value '{self.value_text}' is not a {t.nominal_title.lower()}"
         pkg = self.package.value
         if not pkg:
+            if self.footprint and t.body_sizes:
+                return (f"footprint '{self.footprint}' names no chip size; enter "
+                        "the body size (4x4mm)")
             if self.footprint:
                 return f"footprint '{self.footprint}' is not a chip size"
             return "no package"
-        if package_code(pkg) != pkg:
-            return f"package '{pkg}' is not a known chip size"
+        why = t.package_problem(pkg)
+        if why:
+            return why
         if self.rating_min.value is None and self.rating_min.source != ANY:
             noun = t.rating_title.lower()
             if self.rating_min.source == SCHEMATIC:
@@ -231,24 +241,27 @@ class PartRequirement:
         tagged :data:`EDITED`, and each field named in *clear*
         (``"rating_min"``, ``"dielectrics"``, ``"tolerance_max_pct"``) has
         no value, tagged :data:`ANY`. The package of a symbol with a footprint
-        is fixed by that footprint, so editing it raises ``ValueError``."""
+        is fixed by that footprint, so editing it raises ``ValueError``; a
+        footprint with no chip size on a type with body sizes (a power
+        inductor) fixes none, and its body size can be edited."""
         changes: Dict[str, Sourced] = {}
         for name in clear:
             if name not in _CLEARABLE:
                 raise ValueError(f"{name} cannot be cleared")
             changes[name] = Sourced(_CLEARABLE[name], ANY)
+        t = self.ptype
         if package is not None:
-            if self.footprint:
+            if not package_editable(t, self.footprint):
                 raise ValueError(
                     f"package is set by the footprint '{self.footprint}' "
                     "and cannot be edited"
                 )
             text = str(package).strip()
-            changes["package"] = Sourced(_chip(text) or text, EDITED)
+            changes["package"] = Sourced(t.package_of(text) or text, EDITED)
         if rating_min is not None:
             changes["rating_min"] = Sourced(float(rating_min), EDITED)
         if dielectrics is not None:
-            changes["dielectrics"] = Sourced(_codes(dielectrics), EDITED)
+            changes["dielectrics"] = Sourced(_codes(t, dielectrics), EDITED)
         if tolerance_max_pct is not None:
             changes["tolerance_max_pct"] = Sourced(
                 float(tolerance_max_pct), EDITED
@@ -264,26 +277,28 @@ _CLEARABLE: Dict[str, Any] = {
 }
 
 
-def _codes(entries: Sequence[str] | str) -> Tuple[str, ...]:
-    """Normalized dielectric codes from *entries*, in order, without repeats.
-    Each entry is split with :func:`dielectric_tokens`, so ``"C0G/NP0"`` as one
-    entry gives two codes rather than ``"C0GNP0"``."""
+def package_editable(ptype: PartType, footprint: str) -> bool:
+    """True when the package of a symbol with *footprint* can be edited: it
+    has no footprint, or the type has body sizes and the footprint names no
+    chip size (a power inductor's footprint does not give its body size)."""
+    if not footprint:
+        return True
+    return ptype.body_sizes and package_code(footprint) is None
+
+
+def _codes(ptype: PartType, entries: Sequence[str] | str) -> Tuple[str, ...]:
+    """Normalized class codes of *ptype* from *entries*, in order, without
+    repeats. Each entry is split with the type's tokenizer
+    (:attr:`~kicadtools.parttypes.PartType.class_tokens`), so ``"C0G/NP0"``
+    as one entry gives two codes rather than ``"C0GNP0"``."""
     if isinstance(entries, str):
         entries = [entries]
     out: List[str] = []
     for entry in entries:
-        for code in dielectric_tokens(entry):
+        for code in ptype.class_tokens(entry):
             if code not in out:
                 out.append(code)
     return tuple(out)
-
-
-def _chip(text: object) -> Optional[str]:
-    """The chip-size code in *text*: a four- or five-digit code anywhere in a
-    footprint or supplier string (:func:`kicadtools.units.package_code`), else
-    the whole text as a bare token, which accepts the three-digit shorthand
-    (``"402"`` -> ``"0402"``, :func:`kicadtools.units.chip_size`)."""
-    return package_code(text) or chip_size(text)
 
 
 def _default(defaults: Mapping[str, str], key: str) -> str:
@@ -301,20 +316,31 @@ def _package(ptype: PartType, intent: Any, footprint: str,
     Value's size suffix (``C_10U_805``), else the existing part, else the
     description, else the ``<prefix>.package`` default. A footprint with no
     chip-size code (a radial electrolytic, say) gives ``None``: the footprint
-    fixes the package, so the other sources do not apply."""
-    if footprint:
-        return Sourced(package_code(footprint), SCHEMATIC)
+    fixes the package, so the other sources do not apply. For a type with
+    body sizes such a footprint fixes nothing that can be read: the body size
+    comes from ``Package:Preferred``, the existing part or the description,
+    and no default applies (the default is a chip size, which the footprint
+    rules out)."""
+    code = package_code(footprint) if footprint else None
+    if code:
+        return Sourced(code, SCHEMATIC)
+    if footprint and not ptype.body_sizes:
+        return Sourced(None, SCHEMATIC)
     if intent.package_preferred:
         pref = intent.package_preferred[0]
-        return Sourced(_chip(pref) or pref, SCHEMATIC)
+        return Sourced(ptype.package_of(pref) or pref, SCHEMATIC)
     if value_package:
         return Sourced(value_package, SCHEMATIC)
     if part is not None and part.package:
-        return Sourced(_chip(part.package) or part.package, PART)
+        return Sourced(ptype.package_of(part.package) or part.package, PART)
     if description.package:
         return Sourced(description.package, DESCRIPTION)
+    if footprint:
+        return Sourced(None, UNSET)
     pkg = _default(defaults, ptype.key("package"))
-    return Sourced(_chip(pkg) or pkg, DEFAULT)
+    if not pkg:
+        return Sourced(None, UNSET)
+    return Sourced(ptype.package_of(pkg) or pkg, DEFAULT)
 
 
 def _rating(ptype: PartType, intent: Any, defaults: Mapping[str, str],
@@ -339,12 +365,13 @@ def _rating(ptype: PartType, intent: Any, defaults: Mapping[str, str],
     return Sourced(None, UNSET if ptype.rating_required else ANY)
 
 
-def _upgraded(codes: Sequence[str]) -> Tuple[str, ...]:
+def _upgraded(ptype: PartType, codes: Sequence[str]) -> Tuple[str, ...]:
     """Each normalized code in *codes* followed by its accepted upgrades
-    (:func:`kicadtools.units.dielectric_upgrades`), in order, without repeats."""
+    (:attr:`~kicadtools.parttypes.PartType.class_upgrades`: X5R -> X5R, X7R;
+    Semi-Shielded -> Semi-Shielded, Shielded), in order, without repeats."""
     out: List[str] = []
-    for code in _codes(codes):
-        for c in dielectric_upgrades(code):
+    for code in _codes(ptype, codes):
+        for c in ptype.class_upgrades(code):
             if c not in out:
                 out.append(c)
     return tuple(out)
@@ -354,29 +381,33 @@ def _dielectrics(ptype: PartType, intent: Any, nominal: Optional[float],
                  defaults: Mapping[str, str],
                  description: DescriptionEvidence,
                  part: Optional[PartEvidence]) -> Sourced:
-    """``Class:Preferred``, else the existing part's dielectric, else the
-    description's (each with its upgrades, X5R -> X5R, X7R), else the
-    ``cap.dielectric.<band>`` default for the capacitance; unset when none is
-    available, and always for a type without a dielectric. A stated value is
-    tagged ``schematic`` even when it holds no dielectric code, so it is never
-    replaced by a default."""
-    if not ptype.has_dielectric:
+    """The class field: ``Class:Preferred`` / ``Shielding:Preferred``, else
+    the existing part's class, else the description's (each with its
+    upgrades, X5R -> X5R, X7R), else the default: ``cap.dielectric.<band>``
+    for the capacitance, ``ind.shielding`` for an inductor; unset when none is
+    available, and always for a type without a class. A stated value is
+    tagged ``schematic`` even when it holds no code, so it is never replaced
+    by a default."""
+    if not ptype.has_class:
         return Sourced((), UNSET)
-    stated = getattr(intent, "class_preferred", None)
+    stated = ptype.class_text(intent)
     if stated:
-        return Sourced(_codes(stated), SCHEMATIC)
+        return Sourced(_codes(ptype, stated), SCHEMATIC)
     if part is not None and part.dielectrics:
-        codes = _upgraded(part.dielectrics)
+        codes = _upgraded(ptype, part.dielectrics)
         if codes:
             return Sourced(codes, PART)
     if description.dielectrics:
-        codes = _upgraded(description.dielectrics)
+        codes = _upgraded(ptype, description.dielectrics)
         if codes:
             return Sourced(codes, DESCRIPTION)
-    if nominal is None or nominal <= 0:
+    if ptype.class_setting:
+        key = ptype.key(ptype.class_setting)
+    elif nominal is None or nominal <= 0:
         return Sourced((), UNSET)
-    key = ptype.key("dielectric." + dielectric_band(nominal))
-    codes = _codes(_default(defaults, key))
+    else:
+        key = ptype.key("dielectric." + dielectric_band(nominal))
+    codes = _codes(ptype, _default(defaults, key))
     return Sourced(codes, DEFAULT) if codes else Sourced((), UNSET)
 
 
@@ -419,16 +450,19 @@ def _nominal_conflicts(ptype: PartType,
     return out
 
 
-def _package_conflicts(stated: Sequence[Tuple[str, Optional[str]]]) -> List[str]:
+def _package_conflicts(ptype: PartType,
+                       stated: Sequence[Tuple[str, Optional[str]]]) -> List[str]:
     """A line for every pair of ``(source name, package)`` entries that both
-    state a chip size and differ. An entry with no chip-size code (a radial
-    footprint, an unparseable ``Package:Preferred``) states none."""
-    known = [(name, _chip(p)) for name, p in stated if p]
+    state a package (:meth:`~kicadtools.parttypes.PartType.package_of`) and
+    differ (:meth:`~kicadtools.parttypes.PartType.same_package`). An entry
+    with no package in it (a radial footprint, an unparseable
+    ``Package:Preferred``) states none."""
+    known = [(name, ptype.package_of(p)) for name, p in stated if p]
     known = [(name, p) for name, p in known if p]
     out: List[str] = []
     for i, (name_a, a) in enumerate(known):
         for name_b, b in known[i + 1:]:
-            if a != b:
+            if not ptype.same_package(a, b):
                 out.append(f"{name_a} says {a}; {name_b} says {b}")
     return out
 
@@ -440,8 +474,8 @@ def _description_gaps(ptype: PartType, intent: Any, footprint: str,
     """The fields of *description* that no other source states: the value
     when there is no Value and no part value, the package when there is no
     footprint, ``Package:Preferred``, Value size suffix or part package, the
-    rating when there is no stated floor and no part rating, the dielectrics
-    when there is no ``Class:Preferred`` and no part dielectric, the tolerance
+    rating when there is no stated floor and no part rating, the classes
+    when there is no stated class and no part class, the tolerance
     when there is no ``Tolerance:Preferred`` and no part tolerance. A symbol
     described completely by its other properties and its part gives an empty
     result."""
@@ -449,13 +483,15 @@ def _description_gaps(ptype: PartType, intent: Any, footprint: str,
     return DescriptionEvidence(
         nominal=None if value_text or (has_part and part.nominal is not None)
         else description.nominal,
-        package=None if (footprint or intent.package_preferred or value_package
+        package=None if ((footprint and not ptype.body_sizes)
+                         or package_code(footprint)
+                         or intent.package_preferred or value_package
                          or (has_part and part.package))
         else description.package,
         rating=None if (ptype.rating_text(intent)
                         or (has_part and part.rating is not None))
         else description.rating,
-        dielectrics=() if (getattr(intent, "class_preferred", None)
+        dielectrics=() if (ptype.class_text(intent)
                            or (has_part and part.dielectrics))
         else description.dielectrics,
         tolerance_pct=None if (intent.tolerance_preferred
@@ -492,7 +528,7 @@ def part_requirement(
     description: Optional[DescriptionEvidence] = None,
     part: Optional[PartEvidence] = None,
 ) -> PartRequirement:
-    """Build the requirement for one capacitor or resistor from its *intent*
+    """Build the requirement for one capacitor, resistor or inductor from its *intent*
     (whose class gives the part type), its ``Footprint`` text, the *defaults*
     mapping (see :func:`part_defaults`), and the evidence of its
     *description* and existing *part*.
@@ -504,12 +540,13 @@ def part_requirement(
     * package — footprint, ``Package:Preferred``, the Value's size suffix
       [schematic], existing part [part], description [description], the
       ``<prefix>.package`` setting [default];
-    * rating floor — ``Voltage:Min`` / ``Power:Min`` [schematic], existing
-      part [part], description [description], the remembered setting
-      [default]; then unset for a capacitor, ``any`` for a resistor;
-    * dielectrics (capacitors) — ``Class:Preferred`` [schematic], existing
-      part [part], description [description] (each with its upgrades), band
-      default [default];
+    * rating floor — ``Voltage:Min`` / ``Power:Min`` / ``Current:Min``
+      [schematic], existing part [part], description [description], the
+      remembered setting [default]; then unset for a capacitor, ``any`` for a
+      resistor or an inductor;
+    * class (capacitors, inductors) — ``Class:Preferred`` /
+      ``Shielding:Preferred`` [schematic], existing part [part], description
+      [description] (each with its upgrades), the default [default];
     * tolerance — ``Tolerance:Preferred`` [schematic], existing part [part],
       description [description], default [default].
 
@@ -525,7 +562,7 @@ def part_requirement(
     symbol do not block a search."""
     ptype = type_of_intent(intent)
     if ptype is None:
-        raise TypeError(f"{type(intent).__name__} is not a capacitor or resistor intent")
+        raise TypeError(f"{type(intent).__name__} is not a capacitor, resistor or inductor intent")
     stated = description or DescriptionEvidence()
     footprint = (footprint or "").strip()
     value_text = str(intent.value or "").strip()
@@ -547,7 +584,7 @@ def part_requirement(
         ("Value", value_n),
         (part_label, part.nominal if part is not None else None),
     ])
-    conflicts += _package_conflicts([
+    conflicts += _package_conflicts(ptype, [
         ("Footprint", footprint),
         ("Package:Preferred",
          intent.package_preferred[0] if intent.package_preferred else None),
@@ -565,7 +602,7 @@ def part_requirement(
     if package.source != DESCRIPTION:
         warnings += [
             f"{line} (Description not used)"
-            for line in _package_conflicts([
+            for line in _package_conflicts(ptype, [
                 ("Description", stated.package),
                 (_used_label(package.source, part_label, footprint), package.value),
             ])
@@ -606,7 +643,7 @@ class Member:
     source_file: Optional[Path]
     symbol_uuid: Optional[str]
     props: Dict[str, object]
-    intent: Any  # a CapacitorIntent or ResistorIntent
+    intent: Any  # a CapacitorIntent, ResistorIntent or InductorIntent
 
     @property
     def existing(self) -> ExistingPart:
@@ -695,7 +732,7 @@ class RequirementGroup:
 
 def group_parts(records: Sequence[Any],
                 defaults: Mapping[str, str]) -> List[RequirementGroup]:
-    """Group the capacitor and resistor records (from
+    """Group the capacitor, resistor and inductor records (from
     :func:`kicadtools.resolve.iter_bom_part_records`) by part type, the values
     stated on the schematic, the Description fields those values leave open
     (:func:`description_key`; none for a symbol with a part number) and the

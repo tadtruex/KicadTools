@@ -31,17 +31,21 @@ suppliers:
    *jlc_part* and its DigiKey stock through *digikey* when DigiKey credentials
    are set. Source ``database``; always listed.
 2. **Supplier search** — when neither the current part nor the database gives
-   a candidate, or when *search_suppliers* is true. One filtered JLCPCB search
-   (*jlc_filtered*): the value as the keyword (``"4.7uF"``, ``"10kΩ"``), the
-   part type's category, the package and in-stock as filters, every page.
+   a candidate, or when *search_suppliers* is true. Filtered JLCPCB searches
+   (*jlc_filtered*): the value as the keyword (``"4.7uF"``, ``"10kΩ"``,
+   ``"10uH"``), in-stock as a filter, and per
+   :meth:`~kicadtools.parttypes.PartType.jlc_searches` each of the part
+   type's categories with the chip size as the package filter (a chip
+   inductor is searched under both JLCPCB inductor categories), or, for a
+   body size, the power-inductor category with no package filter.
    Hits from a manufacturer not in *manufacturers* are dropped. Each remaining
    hit is checked against its catalog attributes: value equal within 0.1 %,
-   rating (voltage, power) at or above the floor, dielectric in the allowed
-   set (capacitors), tolerance at or below the maximum, and the same chip
-   package. A field
-   cleared in the dialog (source ``any``) is not checked. A hit lacking a
-   constrained attribute is rejected, since an unknown rating is not an
-   acceptable one. Hits that are rejected in the database, or already listed,
+   rating (voltage, power, saturation current) at or above the floor,
+   dielectric in the allowed set (capacitors; shielding for inductors),
+   tolerance at or below the maximum, and the same package (a body size
+   within 0.25 mm per side). A field cleared in the dialog (source ``any``)
+   is not checked. A hit lacking a constrained attribute is rejected, since an
+   unknown rating is not an acceptable one. Hits that are rejected in the database, or already listed,
    are dropped. The survivors are ranked and looked up at DigiKey by MPN until
    *limit* are confirmed; a candidate is kept only when DigiKey lists the same
    MPN, as an active product, with parameters that also meet the
@@ -75,7 +79,13 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from kicadtools.evidence import ExistingPart, PartEvidence
 from kicadtools.partsdb import DbPart, PartChoice, PartParams, PartsDb
-from kicadtools.parttypes import DK_PACKAGE, PartType, SupplierNames
+from kicadtools.parttypes import (
+    DK_PACKAGE,
+    PartType,
+    SupplierNames,
+    name_title,
+    supplier_value,
+)
 from kicadtools.requirement import (
     ANY,
     DEFAULT,
@@ -91,12 +101,7 @@ from kicadtools.suppliers import (
     _norm_mpn,
     preferred_digikey_pn,
 )
-from kicadtools.units import (
-    dielectric_tokens,
-    fmt_percent,
-    package_code,
-    parse_percent,
-)
+from kicadtools.units import fmt_percent, parse_percent
 
 DATABASE = "database"
 SEARCH = "search"
@@ -249,39 +254,43 @@ def _check_params(
     get: Callable[[str], Optional[str]],
     names: SupplierNames,
 ) -> Tuple[Optional[PartParams], str]:
-    """Parse and check value, rating, dielectric (capacitors) and tolerance
-    read through *get* under the supplier's parameter *names*. Returns the
-    parsed parameters and ``""`` when every check passes, else ``None`` and
-    the reason. Rating, dielectric and tolerance are checked only when the
-    requirement constrains them; the value always."""
+    """Parse and check value, rating, class (dielectric, shielding) and
+    tolerance read through *get* under the supplier's parameter *names* (the
+    first of several alternative names that holds a value,
+    :func:`~kicadtools.parttypes.supplier_value`). Returns the parsed
+    parameters and ``""`` when every check passes, else ``None`` and the
+    reason. Rating, class and tolerance are checked only when the requirement
+    constrains them; the value always. A JLCPCB hit that lists no class is
+    not rejected for it when the type says JLCPCB omits it
+    (:attr:`~kicadtools.parttypes.PartType.jlc_class_optional`)."""
     t = req.ptype
     want = float(req.nominal)
     want_r = req.rating_min.value
     allowed: Tuple[str, ...] = tuple(
-        code for d in (req.dielectrics.value or ()) for code in dielectric_tokens(d)
+        code for d in (req.dielectrics.value or ()) for code in t.class_tokens(d)
     )
     max_tol: Optional[float] = req.tolerance_max_pct.value
 
-    raw = get(names.nominal)
+    raw = supplier_value(get, names.nominal)
     if raw is None:
-        return None, f"{supplier} lists no {names.nominal}"
+        return None, f"{supplier} lists no {name_title(names.nominal)}"
     n = t.parse_nominal(raw)
     if n is None:
-        return None, f"{supplier} {names.nominal} '{raw}' does not parse"
+        return None, f"{supplier} {name_title(names.nominal)} '{raw}' does not parse"
     if abs(n - want) > _VALUE_REL_TOL * max(abs(n), abs(want)):
         return None, (
             f"{supplier} {t.nominal_title.lower()} {t.fmt_nominal(n)}, "
             f"need {t.fmt_nominal(want)}"
         )
 
-    raw = get(names.rating)
+    raw = supplier_value(get, names.rating)
     r = t.parse_rating(raw)
     if want_r is None:
         pass
     elif raw is None:
-        return None, f"{supplier} lists no {names.rating}"
+        return None, f"{supplier} lists no {name_title(names.rating)}"
     elif r is None:
-        return None, f"{supplier} {names.rating} '{raw}' does not parse"
+        return None, f"{supplier} {name_title(names.rating)} '{raw}' does not parse"
     elif r < float(want_r) * (1 - _LIMIT_EPS):
         return None, (
             f"{supplier} rating {t.fmt_rating(r)}, "
@@ -290,24 +299,25 @@ def _check_params(
 
     codes: Tuple[str, ...] = ()
     if names.dielectric:
-        raw = get(names.dielectric)
-        codes = dielectric_tokens(raw)
-        if allowed:
+        raw = supplier_value(get, names.dielectric)
+        codes = t.class_tokens(raw)
+        optional = supplier == "JLCPCB" and t.jlc_class_optional
+        if allowed and not (optional and not codes):
             if raw is None or not codes:
-                return None, f"{supplier} lists no {names.dielectric}"
+                return None, f"{supplier} lists no {name_title(names.dielectric)}"
             if not set(codes).intersection(allowed):
                 return None, (
-                    f"{supplier} dielectric {', '.join(codes)} is not one of "
-                    f"{', '.join(allowed)}"
+                    f"{supplier} {t.class_title.lower()} {', '.join(codes)} is "
+                    f"not one of {', '.join(allowed)}"
                 )
 
-    raw = get(names.tolerance)
+    raw = supplier_value(get, names.tolerance)
     tol = t.parse_tolerance(raw, n)
     if max_tol is not None:
         if raw is None:
-            return None, f"{supplier} lists no {names.tolerance}"
+            return None, f"{supplier} lists no {name_title(names.tolerance)}"
         if tol is None:
-            return None, f"{supplier} {names.tolerance} '{raw}' does not parse"
+            return None, f"{supplier} {name_title(names.tolerance)} '{raw}' does not parse"
         if tol > max_tol * (1 + _LIMIT_EPS):
             return None, (
                 f"{supplier} tolerance {fmt_percent(tol)}, need at most "
@@ -424,9 +434,9 @@ FACET_FIELDS = (
 
 def facet_fields(ptype: PartType) -> Tuple[Tuple[str, str], ...]:
     """The :data:`FACET_FIELDS` that apply to *ptype*: every one for a
-    capacitor, rating and tolerance for a resistor."""
+    capacitor or an inductor, rating and tolerance for a resistor."""
     return tuple(f for f in FACET_FIELDS
-                 if f[0] != "dielectric" or ptype.has_dielectric)
+                 if f[0] != "dielectric" or ptype.has_class)
 
 
 def facets(req: PartRequirement,
@@ -477,8 +487,8 @@ def _jlc_check(req: PartRequirement, part: JlcPart) -> Tuple[Optional[Candidate]
     if not part.orderable:
         why = part.no_buy_reason or "out of stock"
         return None, f"not orderable at JLCPCB ({why})"
-    pkg = package_code(part.package)
-    if pkg != req.package.value:
+    pkg = req.ptype.package_of(part.package)
+    if not req.ptype.same_package(pkg, req.package.value):
         return None, (
             f"JLCPCB package '{part.package}', need {req.package.value}"
         )
@@ -507,7 +517,7 @@ def _digikey_check(req: PartRequirement, cand: Candidate,
                    product: Optional[DigiKeyProduct]) -> str:
     """``""`` when *product* confirms *cand* (same MPN, active, parameters
     meeting *req*, a DigiKey PN), after filling in the DigiKey PN, stock and
-    datasheet; else the reason."""
+    datasheet, and the class when JLCPCB listed none; else the reason."""
     if product is None:
         return "not found at DigiKey"
     if _norm_mpn(product.mpn or "") != _norm_mpn(cand.mpn):
@@ -518,11 +528,19 @@ def _digikey_check(req: PartRequirement, cand: Candidate,
     params, why = _check_params(req, "DigiKey", product.param, req.ptype.digikey)
     if params is None:
         return why
+    if not cand.params.dielectric and params.dielectric:
+        # JLCPCB omits the shielding of most inductors; DigiKey's is kept, so
+        # the parts database records it.
+        cand.params = replace(cand.params, dielectric=params.dielectric)
     raw_pkg = product.param(DK_PACKAGE)
     if raw_pkg is None:
         return f"DigiKey lists no {DK_PACKAGE}"
-    if package_code(raw_pkg) != req.package.value:
-        return f"DigiKey package '{raw_pkg}', need {req.package.value}"
+    t = req.ptype
+    if not t.same_package(t.digikey_package(product.param), req.package.value):
+        shown = raw_pkg
+        if t.is_body_size(req.package.value):
+            shown = t.digikey_package(product.param) or raw_pkg
+        return f"DigiKey package '{shown}', need {req.package.value}"
     pn = preferred_digikey_pn(list(product.digikey_pns or []))
     if not pn:
         return "DigiKey lists no part number"
@@ -616,7 +634,7 @@ def requirement_for(
     if req.rating_min.source == ANY:
         changes["rating_min"] = Sourced(cand.params.rating, RELAXED)
     if req.dielectrics.source == ANY:
-        codes = dielectric_tokens(cand.params.dielectric)
+        codes = req.ptype.class_tokens(cand.params.dielectric)
         changes["dielectrics"] = Sourced(tuple(codes), RELAXED)
     return replace(req, **changes) if changes else req
 
@@ -693,8 +711,9 @@ def _find(
     pool: List[JlcPart] = []
     t = req.ptype
     open_req = req.edited(clear=[name for _, name in facet_fields(t)])
-    for part in jlc_filtered(t.search_text(float(req.nominal)), req.package.value,
-                             t.jlc_category):
+    jlc_hits = [part for category, pkg in t.jlc_searches(req.package.value)
+                for part in jlc_filtered(t.search_text(float(req.nominal)), pkg, category)]
+    for part in jlc_hits:
         code = (part.lcsc or "").strip().upper()
         key = code or f"mpn:{_norm_mpn(part.mpn)}"
         if key in seen_lcsc:
@@ -771,17 +790,18 @@ def _current_check(req: PartRequirement, cand: Candidate, db: PartsDb,
     with the same rules as a search hit's."""
     if cand.unavailable_reason:
         return cand.unavailable_reason
-    if cand.package != req.package.value:
-        return f"DigiKey package '{cand.package or 'unknown'}', need {req.package.value}"
     p = cand.params
     t = req.ptype
+    if not t.same_package(cand.package, req.package.value):
+        return f"DigiKey package '{cand.package or 'unknown'}', need {req.package.value}"
     names = t.digikey
     shown = {
-        names.nominal: t.fmt_nominal(p.nominal) if p.nominal else None,
-        names.rating: t.fmt_rating(p.rating) if p.rating is not None else None,
-        names.dielectric: p.dielectric or None,
-        names.tolerance: (fmt_percent(p.tolerance_pct)
-                          if p.tolerance_pct is not None else None),
+        name_title(names.nominal): t.fmt_nominal(p.nominal) if p.nominal else None,
+        name_title(names.rating): (t.fmt_rating(p.rating)
+                                   if p.rating is not None else None),
+        name_title(names.dielectric): p.dielectric or None,
+        name_title(names.tolerance): (fmt_percent(p.tolerance_pct)
+                                      if p.tolerance_pct is not None else None),
     }
     params, why = _check_params(req, "DigiKey", shown.get, names)
     if params is None:
@@ -836,19 +856,20 @@ def _try(fn: Callable, arg: str, notes: List[str], what: str) -> Tuple[object, b
 
 
 def _evidence(ptype: PartType, label: str, get: Callable[[str], Optional[str]],
-              names: SupplierNames, raw_package: Optional[str]) -> PartEvidence:
+              names: SupplierNames, package: Optional[str]) -> PartEvidence:
     """:class:`PartEvidence` from supplier parameters read through *get*
-    under *names*."""
-    n = ptype.parse_nominal(get(names.nominal))
-    tol_raw = get(names.tolerance)
+    under *names*, with *package* as the supplier's package, normalized."""
+    n = ptype.parse_nominal(supplier_value(get, names.nominal))
+    tol_raw = supplier_value(get, names.tolerance)
     tol = ptype.parse_tolerance(tol_raw, n) if n else parse_percent(tol_raw)
     return PartEvidence(
         label=label,
         nominal=n,
-        rating=ptype.parse_rating(get(names.rating)),
-        dielectrics=dielectric_tokens(get(names.dielectric)) if names.dielectric else (),
+        rating=ptype.parse_rating(supplier_value(get, names.rating)),
+        dielectrics=(ptype.class_tokens(supplier_value(get, names.dielectric))
+                     if names.dielectric else ()),
         tolerance_pct=tol,
-        package=package_code(raw_package),
+        package=package,
     )
 
 
@@ -1043,12 +1064,12 @@ def _option(ptype: PartType, f: _Found, existing: ExistingPart,
         ev = _evidence(
             ptype,
             f"current part {_label_digikey_pn(product, existing, f.dk_text)} (DigiKey)",
-            product.param, ptype.digikey, product.param(DK_PACKAGE),
+            product.param, ptype.digikey, ptype.digikey_package(product.param),
         )
     else:
         ev = _evidence(
             ptype, f"current part {part.lcsc or f.lcsc} (JLCPCB)",
-            part.attributes.get, ptype.jlc, part.package,
+            part.attributes.get, ptype.jlc, ptype.package_of(part.package),
         )
     option = CurrentOption(tuple(f.fields), ev)
     if product is None or part is None:
@@ -1066,7 +1087,7 @@ def _option(ptype: PartType, f: _Found, existing: ExistingPart,
         kind=ptype.name,
         mpn=mpn or part.mpn.strip(),
         manufacturer=part.manufacturer.strip() or (existing.manufacturer or "").strip(),
-        package=ev.package or package_code(part.package) or "",
+        package=ev.package or ptype.package_of(part.package) or "",
         params=PartParams(ev.nominal, ev.rating,
                           ", ".join(ev.dielectrics), ev.tolerance_pct),
         lcsc=part.lcsc or f.lcsc or None,

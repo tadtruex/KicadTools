@@ -261,7 +261,7 @@ def test_resistor_search_uses_resistor_category_and_keyword():
     jlc = FakeJlc([_jlc()])
     result = find_candidates(req, db=_db(), jlc_filtered=jlc.filtered, jlc_part=jlc.part,
                              digikey=FakeDigiKey({"RC0603FR-0710KL": _dk()}), needed=10)
-    assert jlc.calls == [("10kΩ", "0603", RESISTOR.jlc_category)]
+    assert jlc.calls == [("10kΩ", "0603", RESISTOR.jlc_categories[0])]
     assert [c.mpn for c in result.candidates] == ["RC0603FR-0710KL"]
     cand = result.candidates[0]
     assert (cand.kind, cand.source) == ("resistor", SEARCH)

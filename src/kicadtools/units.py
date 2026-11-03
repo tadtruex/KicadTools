@@ -457,3 +457,265 @@ def parse_res_description(text: object) -> DescriptionEvidence:
         package=package,
         tolerance_pct=tolerance,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Inductors: inductance, current, body size and shielding.
+# --------------------------------------------------------------------------- #
+
+# Inductance multipliers. A bare number is not an inductance (it could be
+# henries or microhenries), so a letter or an "H" is required.
+_IND_MULT = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "μ": 1e-6, "m": 1e-3,
+             "R": 1e-6, "r": 1e-6, "": 1.0}
+
+
+def parse_inductance(text: object) -> Optional[float]:
+    """Henries from an inductance rendering (``"10uH"``, ``"150 nH"``,
+    ``"4.7µH"``, ``"4u7"``, ``"1u"``, ``"1mH"``, ``"4R7"`` = 4.7 µH), or
+    ``None``. A bare number without a unit letter or ``H`` gives ``None``."""
+    if text is None:
+        return None
+    s = "".join(str(text).split())
+    has_h = s[-1:] in ("H", "h")
+    if has_h:
+        s = s[:-1]
+    m = re.fullmatch(r"([0-9.]*)([pnuµμmRr])?([0-9.]*)", s)
+    if not m or not (m.group(1) or m.group(3)):
+        return None
+    head, letter, tail = m.group(1), m.group(2) or "", m.group(3)
+    if not letter and not has_h:
+        return None
+    if letter in ("R", "r") and has_h:
+        return None  # "4R7H" is not a rendering any supplier uses
+    num = f"{head or '0'}.{tail}" if tail else head
+    try:
+        return float(num) * _IND_MULT[letter]
+    except ValueError:
+        return None
+
+
+def fmt_henries(v: float) -> str:
+    """``"10uH"``, ``"150nH"``, ``"1mH"``."""
+    for scale, suffix in ((1e-3, "mH"), (1e-6, "uH")):
+        if v >= scale * (1 - 1e-9):
+            return f"{round(v / scale, 6):g}{suffix}"
+    return f"{round(v / 1e-9, 6):g}nH"
+
+
+def parse_amps(text: object) -> Optional[float]:
+    """Amps from a current rendering (``"1.3A"``, ``"840mA"``, ``"22.3 A"``,
+    ``"13p5A"``), or ``None``. JLCPCB's ``"-"`` (not listed) gives ``None``."""
+    if text is None:
+        return None
+    s = "".join(str(text).split())
+    s = re.sub(r"(?i)amps?$", "", s)
+    if s[-1:] in ("A", "a"):
+        s = s[:-1]
+    scale = 1.0
+    if s.endswith("m"):
+        s, scale = s[:-1], 1e-3
+    m = re.fullmatch(r"([0-9]*)[pP]([0-9]+)", s)
+    if m:
+        s = f"{m.group(1) or '0'}.{m.group(2)}"
+    try:
+        return float(s) * scale
+    except ValueError:
+        return None
+
+
+def fmt_amps(v: float) -> str:
+    """``"840mA"`` below one amp, ``"1.3A"`` at or above."""
+    return f"{round(v * 1000, 6):g}mA" if v < 1 else f"{round(v, 6):g}A"
+
+
+# A body size in millimetres: "SMD,4x4mm", "4.00mm x 4.00mm", "5.8x5.2mm",
+# "4 x 4 mm". The unit is required after the second number, so DigiKey's
+# inch rendering ('0.157" L x 0.157" W (4.00mm x 4.00mm)') matches only at
+# its millimetre part.
+_BODY_RE = re.compile(
+    r"(?<![0-9.])([0-9]+(?:\.[0-9]+)?)\s*(?:mm)?\s*[xX×*]\s*([0-9]+(?:\.[0-9]+)?)\s*mm",
+)
+# The same without the unit, for a size typed in the dialog ("4x4").
+_BODY_BARE_RE = re.compile(r"\s*([0-9]+(?:\.[0-9]+)?)\s*[xX×*]\s*([0-9]+(?:\.[0-9]+)?)\s*")
+
+# Two body sizes within this much per side (mm) are the same size: suppliers
+# round the same part differently ("4x4mm", "4.10mm x 4.10mm").
+BODY_MATCH_MM = 0.25
+
+
+def _fmt_body(a: float, b: float) -> str:
+    big, small = max(a, b), min(a, b)
+    return f"{round(big, 1):g}x{round(small, 1):g}mm"
+
+
+def body_size(text: object) -> Optional[str]:
+    """A body size in normalized form, longer side first (``"4x4mm"``,
+    ``"5.8x5.2mm"``), from a supplier package (``"SMD,4x4mm"``), DigiKey's
+    ``Size / Dimension`` or a typed size (``"4x4"``, ``"4 x 4 mm"``); ``None``
+    when *text* states none."""
+    s = str(text or "")
+    m = _BODY_RE.search(s) or _BODY_BARE_RE.fullmatch(s)
+    if not m:
+        return None
+    try:
+        a, b = float(m.group(1)), float(m.group(2))
+    except ValueError:
+        return None
+    if a <= 0 or b <= 0:
+        return None
+    return _fmt_body(a, b)
+
+
+def body_dims(size: object) -> Optional[Tuple[float, float]]:
+    """The two sides of a normalized body size, longer first."""
+    m = _BODY_RE.fullmatch(str(size or ""))
+    if not m:
+        return None
+    a, b = float(m.group(1)), float(m.group(2))
+    return max(a, b), min(a, b)
+
+
+def same_body(a: object, b: object) -> bool:
+    """True when two body sizes are within :data:`BODY_MATCH_MM` per side."""
+    da, db = body_dims(a), body_dims(b)
+    if da is None or db is None:
+        return False
+    return all(abs(x - y) <= BODY_MATCH_MM + 1e-9 for x, y in zip(da, db))
+
+
+SHIELDED = "Shielded"
+SEMI_SHIELDED = "Semi-Shielded"
+UNSHIELDED = "Unshielded"
+
+
+def shielding_tokens(text: object) -> Tuple[str, ...]:
+    """The shielding classes a string names, in order, without repeats:
+    ``"Shielded"``, ``"Semi-Shielded"`` or ``"Unshielded"``. Reads DigiKey's
+    ``Shielding`` (``"Semi-Shielded"``), JLCPCB's ``Type`` (``"Magnetic
+    Shielded Inductor"``, ``"Unshielded Inductor"``) and a typed list
+    (``"shielded, semi"``). Text naming none (JLCPCB's ``"Multilayer
+    inductor"``) gives ``()``."""
+    out: List[str] = []
+    for piece in re.split(r"[,;/]", str(text or "")):
+        p = piece.strip().lower()
+        if not p:
+            continue
+        if "semi" in p:
+            code = SEMI_SHIELDED
+        elif re.search(r"\b(un|non)[\s-]?shield", p):
+            code = UNSHIELDED
+        elif "shield" in p:
+            code = SHIELDED
+        else:
+            continue
+        if code not in out:
+            out.append(code)
+    return tuple(out)
+
+
+# The shielding classes acceptable in place of a stated one: the same or
+# better.
+_SHIELDING_UPGRADES: Dict[str, Tuple[str, ...]] = {
+    UNSHIELDED: (UNSHIELDED, SEMI_SHIELDED, SHIELDED),
+    SEMI_SHIELDED: (SEMI_SHIELDED, SHIELDED),
+    SHIELDED: (SHIELDED,),
+}
+
+
+def shielding_upgrades(code: object) -> Tuple[str, ...]:
+    """*code* followed by the better-shielded classes: ``"Semi-Shielded"`` ->
+    ``("Semi-Shielded", "Shielded")``. Text naming no class gives ``()``."""
+    codes = shielding_tokens(code)
+    return _SHIELDING_UPGRADES[codes[0]] if codes else ()
+
+
+_IND_P_DECIMAL_RE = re.compile(r"([0-9]*)[pP]([0-9]+)([nNuUµμmM])[hH]?")
+
+
+def _ind_value_text(text: str) -> str:
+    """*text* rewritten for :func:`parse_inductance`: the 'p' decimal point
+    replaced by '.', and an upper-case unit letter lower-cased (``"4p7U"`` ->
+    ``"4.7u"``)."""
+    m = _IND_P_DECIMAL_RE.fullmatch(text)
+    if m:
+        return f"{m.group(1) or '0'}.{m.group(2)}{m.group(3).lower()}"
+    if re.fullmatch(r"[0-9.]+[NU]H?", text):
+        return text[:-1].lower() + text[-1] if text.endswith(("H", "h")) else text.lower()
+    return text
+
+
+def parse_ind_value(text: object) -> Tuple[Optional[float], Optional[str]]:
+    """``(henries, package)`` from an inductor Value. A plain Value
+    (``"22uH"``, ``"1u"``) has no package. Library style takes an optional
+    ``"L_"`` / ``"L-"`` prefix and ``_``-separated parts: the first is the
+    value, with ``p`` as a decimal point (``"L_4p7U_13p5A"`` = 4.7 µH), a later
+    part accepted by :func:`chip_size` is the package (``"L_10U_0805"``). A
+    current part (``"1A"``) is read by :func:`parse_ind_description`, not
+    here. Either element is ``None`` when it is not stated or does not
+    parse."""
+    if text is None:
+        return None, None
+    s = str(text).strip()
+    henries = parse_inductance(s)
+    if henries is not None:
+        return henries, None
+    if s[:2] in ("L_", "L-", "l_", "l-"):
+        s = s[2:]
+    parts = [p for p in s.split("_") if p]
+    if not parts:
+        return None, None
+    if chip_size(parts[0]):
+        return None, chip_size(parts[0])
+    package = next((chip_size(p) for p in parts[1:] if chip_size(p)), None)
+    return parse_inductance(_ind_value_text(parts[0])), package
+
+
+_DESC_IND_RE = re.compile(
+    r"(?<![A-Za-z0-9.])([0-9]+(?:\.[0-9]+)?)\s?([nuµμm])\s?H(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_DESC_AMPS_RE = re.compile(
+    r"(?<![A-Za-z0-9.])([0-9]+(?:\.[0-9]+)?)\s?(m?)A(?:mps?)?(?![A-Za-z0-9])",
+)
+
+
+def parse_ind_description(text: object) -> DescriptionEvidence:
+    """The facts an inductor Description states (``"Inductor 10 uH, 1A"``):
+    inductance from the first value with a henry unit, current from the first
+    amps value (taken as the saturation-current floor), tolerance from the
+    first percentage, package from the first chip-size token or millimetre
+    body size, and shielding from a shielding word. ``dielectrics`` holds the
+    shielding classes. Text stating none of these (``"Inductor, small
+    symbol"``) gives empty evidence."""
+    s = str(text or "")
+
+    henries: Optional[float] = None
+    m = _DESC_IND_RE.search(s)
+    if m:
+        henries = parse_inductance(m.group(1) + m.group(2).lower() + "H")
+
+    amps: Optional[float] = None
+    m = _DESC_AMPS_RE.search(s)
+    if m:
+        amps = parse_amps(m.group(1) + m.group(2) + "A")
+
+    tolerance: Optional[float] = None
+    m = _DESC_PERCENT_RE.search(s)
+    if m:
+        tolerance = float(m.group(1))
+
+    package = body_size(s)
+    if package is None:
+        masked = _DESC_METRIC_RE.sub(" ", s)
+        for token in re.split(r"[\s,;]+", masked):
+            if chip_size(token.strip("()[]")):
+                package = chip_size(token.strip("()[]"))
+                break
+
+    return DescriptionEvidence(
+        nominal=henries,
+        rating=amps,
+        dielectrics=shielding_tokens(s),
+        package=package,
+        tolerance_pct=tolerance,
+    )

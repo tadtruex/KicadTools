@@ -1,5 +1,6 @@
 """
-Write plan for assigning a chosen capacitor or resistor to a requirement group.
+Write plan for assigning a chosen capacitor, resistor or inductor to a
+requirement group.
 
 :func:`assignment_plan` turns one :class:`~kicadtools.requirement.RequirementGroup`,
 its (possibly edited) :class:`~kicadtools.requirement.PartRequirement` and
@@ -9,26 +10,30 @@ shape that :func:`kicadtools.writer.write_properties` applies. A value of
 
 Per symbol the plan holds:
 
-* ``Intent:Type`` = the part type (``capacitor``, ``resistor``) when the type
-  was guessed;
+* ``Intent:Type`` = the part type (``capacitor``, ``resistor``,
+  ``inductor``) when the type was guessed;
 * ``Value`` when the symbol's Value is empty and the value came from the
   existing part or the Description (a stated Value is never replaced);
-* the rating floor (``Voltage:Min`` / ``Power:Min``), ``Class:Preferred``
-  (capacitors) and ``Tolerance:Preferred`` when that field's value came from
-  a default, an edit, a relaxed limit, the existing part or the Description
-  (a value stated on the schematic is left as written);
+* the rating floor (``Voltage:Min`` / ``Power:Min`` / ``Current:Min``), the
+  class (``Class:Preferred`` for a capacitor, ``Shielding:Preferred`` for an
+  inductor) and ``Tolerance:Preferred`` when that field's value came from a
+  default, an edit, a relaxed limit, the existing part or the Description (a
+  value stated on the schematic is left as written);
 * ``Package:Preferred`` when the package was edited and the symbol has no
-  footprint;
+  footprint, and for a body size (a power inductor) whenever it is not
+  stated on the schematic: the footprint does not give the size;
 * ``MPN``, ``Manufacturer``, ``DigiKeyPN`` and ``LCSC`` from the candidate,
   under the canonical keys of :data:`kicadtools.partnum.CANONICAL_KEYS`;
 * ``Footprint`` from the part type's footprint table
   (:attr:`kicadtools.parttypes.PartType.footprints`) when the symbol's
-  footprint is empty;
+  footprint is empty and the package is a chip size. A body size has no
+  footprint in the table, so none is written, and the group stays
+  unassigned until one is added in KiCad;
 * ``None`` for every other spelling of the four part-number fields present on
   the symbol, so the symbol ends with the canonical keys only.
 
-Values are written in the terse form: ``16V``, ``100mW``, ``10%``,
-``X7R, X5R``.
+Values are written in the terse form: ``16V``, ``100mW``, ``1.5A``,
+``10%``, ``X7R, X5R``, ``Shielded``.
 
 Pure: no schematic I/O and no network I/O.
 """
@@ -44,11 +49,13 @@ from kicadtools.requirement import (
     EDITED,
     PART,
     RELAXED,
+    SCHEMATIC,
     PartRequirement,
     RequirementGroup,
     Sourced,
 )
-from kicadtools.units import dielectric_tokens, fmt_percent
+from kicadtools.parttypes import PartType
+from kicadtools.units import fmt_percent
 
 if TYPE_CHECKING:  # partsearch imports partsdb; the plan reads four attributes only
     from kicadtools.partsearch import Candidate
@@ -77,20 +84,23 @@ def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _dielectric_text(codes) -> str:
-    """``"X7R, X5R"``: the codes normalized, in order, without repeats."""
+def _class_text(ptype: PartType, codes) -> str:
+    """``"X7R, X5R"``, ``"Shielded"``: the codes normalized, in order,
+    without repeats."""
     out = []
     for entry in codes:
-        for code in dielectric_tokens(str(entry)):
+        for code in ptype.class_tokens(str(entry)):
             if code not in out:
                 out.append(code)
     return ", ".join(out)
 
 
-def _footprint_for(req: PartRequirement) -> str:
+def _footprint_for(req: PartRequirement) -> Optional[str]:
     """The footprint for the requirement's package, from its part type's
-    table."""
+    table; ``None`` for a body size, which has no entry."""
     pkg = req.package.value
+    if req.ptype.is_body_size(pkg):
+        return None
     footprints = req.ptype.footprints
     try:
         return footprints[pkg]
@@ -125,7 +135,7 @@ def assignment_plan(
     part-number values is empty on *cand* (a partial write would remove alias
     spellings and leave the group unassigned), when *req* lists conflicts
     between its sources, or when a member has no footprint and the package
-    has no footprint in the part type's table.
+    is a chip size with no footprint in the part type's table.
     """
     if req.conflicts:
         raise ValueError(
@@ -143,8 +153,8 @@ def assignment_plan(
     req_props: Dict[str, str] = {}
     if _written(req.rating_min):
         req_props[ptype.rating_property] = ptype.fmt_rating(req.rating_min.value)
-    if ptype.has_dielectric and _written(req.dielectrics):
-        req_props["Class:Preferred"] = _dielectric_text(req.dielectrics.value)
+    if ptype.has_class and _written(req.dielectrics):
+        req_props[ptype.class_property] = _class_text(ptype, req.dielectrics.value)
     if _written(req.tolerance_max_pct):
         req_props["Tolerance:Preferred"] = fmt_percent(req.tolerance_max_pct.value)
 
@@ -173,9 +183,14 @@ def assignment_plan(
         props.update(req_props)
         if req.package.source == EDITED and not has_footprint:
             props["Package:Preferred"] = req.package.value
+        elif (ptype.is_body_size(req.package.value)
+              and req.package.source != SCHEMATIC):
+            props["Package:Preferred"] = req.package.value
         props.update(part_props)
         if not has_footprint:
-            props["Footprint"] = _footprint_for(req)
+            footprint = _footprint_for(req)
+            if footprint:
+                props["Footprint"] = footprint
         props.update(_alias_removals(m.props))
 
         # A subsheet symbol instantiated twice appears as two members with

@@ -484,18 +484,20 @@ def jlcpcb_search(keyword: str, *, pages: int = 3, page_size: int = 100) -> List
 def jlcpcb_category_search(value: str, package: str, category: Tuple[str, str], *,
                            max_pages: int = 10, page_size: int = 100) -> List[JlcPart]:
     """The in-stock JLCPCB parts in *category* (``(firstSortName,
-    secondSortName)``, as :attr:`kicadtools.parttypes.PartType.jlc_category`
-    gives it) whose catalog text matches *value* (``"4.7uF"``, ``"10kΩ"``) in
-    *package* (``"0603"``), every page up to *max_pages*. The value is the
-    only keyword: JLCPCB ranks a longer text (``"4.7uF 0603 X7R"``) by loose
-    relevance, and most hits are then other values. Category, package and
-    stock are request filters, as on the JLCPCB parts page."""
+    secondSortName)``, one of
+    :attr:`kicadtools.parttypes.PartType.jlc_categories`) whose catalog text
+    matches *value* (``"4.7uF"``, ``"10kΩ"``) in *package* (``"0603"``; ``""`` for any package), every page up to
+    *max_pages*. The value is the only keyword: JLCPCB ranks a longer text
+    (``"4.7uF 0603 X7R"``) by loose relevance, and most hits are then other
+    values. Category, package and stock are request filters, as on the JLCPCB
+    parts page."""
     filters = {
         "stockFlag": True,
         "firstSortName": category[0],
         "secondSortName": category[1],
-        "componentSpecificationList": [package],
     }
+    if package:
+        filters["componentSpecificationList"] = [package]
     parts: List[JlcPart] = []
     for page in range(1, max_pages + 1):
         hits = _jlc_search_raw(value, page=page, page_size=page_size, filters=filters)

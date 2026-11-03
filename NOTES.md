@@ -3,16 +3,26 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
-## Parts tab: capacitor, resistor and IC assignment (through 2026-10-30)
+## Parts tab: capacitor, resistor, inductor and IC assignment (through 2026-11-03)
 
-Capacitors and resistors: the design, decisions, revisions and open items are
-in `CAPACITOR_PLAN.md` (revision 4 added resistors on the same code path; the
-TBD list there is the to-do list). ICs: `IC_PLAN.md`, with an "As built"
+Capacitors, resistors and inductors: the design, decisions, revisions and
+open items are in `CAPACITOR_PLAN.md` (revision 4 added resistors and
+revision 5 inductors on the same code path; the TBD list there is the to-do
+list). ICs: `IC_PLAN.md`, with an "As built"
 section listing where the code differs from the plan; its TBD list is the IC
 to-do list. State on 2026-10-30:
 
 - Revision 3 (filtered JLCPCB search, manufacturer lists, cleared fields,
   values popup) is pushed; revision 4 (resistors) is pushed as 236a4dc.
+- 2026-11-03: revision 5 (inductors) is in the working tree, not committed:
+  `InductorIntent` (`intent.py`), `INDUCTOR` and the package and class hooks
+  (`parttypes.py`), inductance, current, body-size and shielding parsers
+  (`units.py`), the `inductor` table (`partsdb.py`), ferrite beads on
+  inductor footprints (`classify.py`), and `tests/test_inductor.py`. Suite
+  1450 passing. The Parts tab's Dielectric column is now Class. Scripted
+  live check: see `CAPACITOR_PLAN.md`, revision 5. The Coilcraft parts on
+  BuckConverter, BarrelJackAdapter and MotorDriver are no longer listed at
+  DigiKey.
 - The IC plan is committed as dd3a467. The IC code (steps 1–8) is in the
   working tree, not committed: new modules `icrequirement.py`, `package.py`,
   `footprints.py`, `icsearch.py`, `gui/ic_assign_dialog.py`; changes to
@@ -28,8 +38,8 @@ to-do list. State on 2026-10-30:
 - 2026-11-01: the IC floor now only warns; the hard limit is 10 × the build
   quantity. From the recorded stock that adds BuckConverter U1 (4 of 11);
   not re-run live.
-- None of capacitor, resistor or IC assignment has been tried in the Cockpit
-  GUI yet; scripted live checks on the same four boards give every
+- None of capacitor, resistor, inductor or IC assignment has been tried in
+  the Cockpit GUI yet; scripted live checks on the same four boards give every
   chip-capacitor and resistor group a candidate (MotorDriver's radial 47 µF
   is not searchable, `CAPACITOR_PLAN.md` TBD 2).
 - The parts database migrates from version 1 to 2 the next time the Cockpit

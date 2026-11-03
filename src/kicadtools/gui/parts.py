@@ -1,12 +1,13 @@
 """
-Parts tab: one row per capacitor or resistor requirement group and one per
-IC group (``IC_PLAN.md`` step 8), plus the background workers that search for
-candidate parts for one group.
+Parts tab: one row per capacitor, resistor or inductor requirement group and
+one per IC group (``IC_PLAN.md`` step 8), plus the background workers that
+search for candidate parts for one group.
 
 Each row shows the group's requirement (Value, Package, Rating — the voltage
-floor of a capacitor, the power floor of a resistor —, Dielectric for a
-capacitor, Tolerance), its quantity and references, the part number already on the
-schematic, its status and the chosen MPN. A requirement cell whose value came
+floor of a capacitor, the power floor of a resistor, the saturation-current
+floor of an inductor —, Class — the dielectric of a capacitor, the shielding
+of an inductor —, Tolerance), its quantity and references, the part number
+already on the schematic, its status and the chosen MPN. A requirement cell whose value came
 from a default, an edit, the existing part or the Description is marked
 ``(default)`` / ``(edited)`` / ``(part)`` / ``(description)``; a field with no
 value shows a dash.
@@ -16,7 +17,8 @@ session (the write plan is held in the model until File > Save), ``conflict``
 when two sources state different values or packages or the part-number
 fields name different parts, ``assigned`` when every member already has its
 four part numbers and a footprint on the schematic, ``not searchable`` for a
-footprint with no chip size, else ``unassigned``. A conflict ranks above
+footprint with no chip size (an inductor's footprint is the exception: its
+body size can be entered), else ``unassigned``. A conflict ranks above
 ``assigned``: a fully numbered group whose Value disagrees with its part still
 needs a schematic fix. :meth:`PartsTableModel.accepted_edits` merges the queued
 plans into the ``{file: {uuid: {key: value}}}`` shape the writer applies; a
@@ -84,19 +86,20 @@ from kicadtools.requirement import (
     RequirementGroup,
     Sourced,
     dielectric_band,
+    package_editable,
     tolerance_key,
 )
 from kicadtools.resolve import Cache, cached_jlcpcb_part
 from kicadtools.suppliers import DigiKeyClient, jlcpcb_category_search, jlcpcb_search
 from kicadtools.units import fmt_percent
 
-PARTS_COLUMNS = ["Value", "Package", "Footprint", "Rating", "Dielectric", "Tolerance",
+PARTS_COLUMNS = ["Value", "Package", "Footprint", "Rating", "Class", "Tolerance",
                  "Qty", "References", "Current part", "Status", "Chosen MPN"]
 COL_VALUE = PARTS_COLUMNS.index("Value")
 COL_PACKAGE = PARTS_COLUMNS.index("Package")
 COL_FOOTPRINT = PARTS_COLUMNS.index("Footprint")
 COL_RATING = PARTS_COLUMNS.index("Rating")
-COL_DIELECTRIC = PARTS_COLUMNS.index("Dielectric")
+COL_DIELECTRIC = PARTS_COLUMNS.index("Class")
 COL_TOLERANCE = PARTS_COLUMNS.index("Tolerance")
 COL_QTY = PARTS_COLUMNS.index("Qty")
 COL_REFERENCES = PARTS_COLUMNS.index("References")
@@ -150,7 +153,7 @@ Group = Union[RequirementGroup, IcGroup]
 
 def _value_text(field: Sourced, kind: str, ptype: PartType) -> str:
     """The bare value of a requirement field: ``"16V"``, ``"100mW"``,
-    ``"X7R, X5R"``."""
+    ``"X7R, X5R"``, ``"Shielded"``."""
     v = field.value
     if kind == "rating":
         return ptype.fmt_rating(v)
@@ -163,14 +166,14 @@ def _value_text(field: Sourced, kind: str, ptype: PartType) -> str:
 
 def sourced_cell(field: Sourced, kind: str, ptype: PartType) -> str:
     """The cell text for a requirement field of a *ptype* part. *kind* is
-    ``"package"``, ``"rating"``, ``"dielectric"`` or ``"tolerance"``. A
-    dielectric cell of a type without one is empty. A value from a default,
+    ``"package"``, ``"rating"``, ``"dielectric"`` (the class field) or
+    ``"tolerance"``. A class cell of a type without one is empty. A value from a default,
     an edit, the existing part or the Description is suffixed ``(default)`` /
     ``(edited)`` / ``(part)`` / ``(description)``; an unset field is a
     dash; a value stated on the schematic that does not parse reads
     ``unreadable`` (``not a chip size`` for a package from a footprint such as
     a radial electrolytic)."""
-    if kind == "dielectric" and not ptype.has_dielectric:
+    if kind == "dielectric" and not ptype.has_class:
         return ""
     if field.source == ANY:
         return "any"
@@ -214,7 +217,8 @@ def requirement_settings(req: PartRequirement) -> Dict[str, str]:
     Values from the existing part, the Description or a dropped tolerance
     limit are written to the symbols but never become remembered settings. A
     capacitor's dielectrics are stored under the capacitance band's key and
-    its tolerance under the dielectric class's key, as
+    its tolerance under the dielectric class's key, an inductor's shielding
+    under ``ind.shielding``, as
     :func:`kicadtools.requirement.part_requirement` reads them."""
     t = req.ptype
     out: Dict[str, str] = {}
@@ -226,7 +230,9 @@ def requirement_settings(req: PartRequirement) -> Dict[str, str]:
         out[t.key("package")] = str(req.package.value)
     if written(req.rating_min):
         out[t.key(t.rating_setting)] = t.fmt_rating(req.rating_min.value)
-    if t.has_dielectric and written(req.dielectrics) and req.nominal:
+    if t.has_class and written(req.dielectrics) and t.class_setting:
+        out[t.key(t.class_setting)] = ", ".join(req.dielectrics.value)
+    elif t.has_class and written(req.dielectrics) and req.nominal:
         out[t.key("dielectric." + dielectric_band(req.nominal))] = ", ".join(
             req.dielectrics.value
         )
@@ -441,7 +447,7 @@ class PartsTableModel(QAbstractTableModel):
         """The footprint check shown on IC *row*: the queued candidate's;
         else that of the first candidate the symbol names exactly in the
         recorded search (the only candidate when there is one); ``None``
-        before either, and for a capacitor or resistor row."""
+        before either, and for a capacitor, resistor or inductor row."""
         if not is_ic(self._groups[row]):
             return None
         q = self._queued.get(row)
@@ -456,7 +462,7 @@ class PartsTableModel(QAbstractTableModel):
         return res.candidates[0].footprint if len(res.candidates) == 1 else None
 
     def conflicts(self, row: int) -> List[str]:
-        """The row's conflict lines: a capacitor or resistor requirement's
+        """The row's conflict lines: a capacitor, resistor or inductor requirement's
         conflicts; an IC's from its recorded search."""
         group = self._groups[row]
         if is_ic(group):
@@ -481,7 +487,8 @@ class PartsTableModel(QAbstractTableModel):
             return STATUS_ASSIGNED
         if is_ic(group):
             return STATUS_NOT_SEARCHABLE if not req.searchable else STATUS_UNASSIGNED
-        if req.footprint and not req.package.value:
+        if (req.footprint and not req.package.value
+                and not package_editable(req.ptype, req.footprint)):
             return STATUS_NOT_SEARCHABLE
         return STATUS_UNASSIGNED
 
@@ -520,7 +527,10 @@ class PartsTableModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return PARTS_COLUMNS[section]
         if role == Qt.ToolTipRole and section == COL_RATING:
-            return "Voltage:Min for a capacitor, Power:Min for a resistor"
+            return ("Voltage:Min for a capacitor, Power:Min for a resistor, "
+                    "Current:Min (saturation current) for an inductor")
+        if role == Qt.ToolTipRole and section == COL_DIELECTRIC:
+            return "Dielectric for a capacitor, shielding for an inductor"
         if role == Qt.ToolTipRole and section == COL_FOOTPRINT:
             return ("For an IC: red when the footprint does not match the part, "
                     "amber when it cannot be checked against it")
@@ -645,6 +655,11 @@ class PartsTableModel(QAbstractTableModel):
             if col == COL_PACKAGE and req.footprint:
                 return f"From the footprint {req.footprint}."
             problem = req.problem()
+            t = req.ptype
+            if (not req.footprint and t.is_body_size(req.package.value)
+                    and self.status(r) == STATUS_UNASSIGNED):
+                return (f"No footprint: add one for the {req.package.value} body in "
+                        "KiCad. Footprints are written for chip sizes only.")
             if self.status(r) == STATUS_NOT_SEARCHABLE:
                 return f"Not searchable: {problem}. Packages other than chip sizes are not supported yet."
             if problem and self.status(r) == STATUS_UNASSIGNED:

@@ -1,6 +1,6 @@
 """The BOM Cockpit main window.
 
-The Parts tab holds capacitor and resistor groups and, after them, IC groups
+The Parts tab holds capacitor, resistor and inductor groups and, after them, IC groups
 (``IC_PLAN.md`` step 8). Double-clicking a row opens the assign dialog for its
 kind (:class:`AssignDialog` or :class:`IcAssignDialog`); both run their
 searches through the same one-worker-at-a-time queue
@@ -204,7 +204,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.addWidget(self.parts_table)
         hint = QLabel(
-            "Double-click a capacitor, resistor or IC group to choose its part. Stock is "
+            "Double-click a capacitor, resistor, inductor or IC group to choose its part. Stock is "
             "checked against the Boards count on the LCSC tab. An IC's Footprint cell is "
             "red when the footprint does not match the part, amber when it cannot be checked."
         )
@@ -618,7 +618,7 @@ class MainWindow(QMainWindow):
 
     # ---- part assignment (Parts tab) ---------------------------------
     def _part_defaults(self) -> "dict[str, str]":
-        """The capacitor and resistor defaults: built-in values overlaid by the
+        """The capacitor, resistor and inductor defaults: built-in values overlaid by the
         database's remembered settings."""
         settings = self._parts_db.settings() if self._parts_db is not None else {}
         return part_defaults(settings)
@@ -739,7 +739,7 @@ class MainWindow(QMainWindow):
 
     def _accept_candidate(self, row: int, group, req, cand) -> None:
         """Record *cand* for *group*: database accept and usage, remembered
-        settings (capacitors and resistors only), and the queued write plan
+        settings (capacitors, resistors and inductors only), and the queued write plan
         (:func:`assignment_plan`, or
         :func:`kicadtools.icsearch.ic_assignment_plan` for an IC)."""
         ic = is_ic(group)

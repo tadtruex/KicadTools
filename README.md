@@ -178,7 +178,7 @@ different one). `JLCPCB_SPEC.md` §3 has the derivation.
 A PySide6 desktop app with three tabs. **Intents** reviews the intent-type
 guesses and writes the accepted ones back into the schematic (so the next read
 has fewer guesses). **Parts** chooses a manufacturer part for each group of
-capacitors, resistors or ICs and records it in a local parts database. **LCSC** resolves, checks
+capacitors, resistors, inductors or ICs and records it in a local parts database. **LCSC** resolves, checks
 stock for, and substitutes JLCPCB part numbers (see below). See `BOMCOCKPIT.md`
 for the full vision.
 
@@ -204,18 +204,21 @@ line. Rely on git as the backstop.
 
 ### Parts tab
 
-The table has one row per capacitor or resistor requirement group, and one
-per IC group (see **ICs** below). Capacitors and resistors: parts of
-one type whose `Value`, `Footprint`, `Voltage:Min`, `Power:Min`,
-`Class:Preferred`, `Tolerance:Preferred`, `Package:Preferred` and existing
+The table has one row per capacitor, resistor or inductor requirement group,
+and one per IC group (see **ICs** below). Capacitors, resistors and
+inductors: parts of one type whose `Value`, `Footprint`, `Voltage:Min`,
+`Power:Min`, `Current:Min`, `Class:Preferred`, `Shielding:Preferred`,
+`Tolerance:Preferred`, `Package:Preferred` and existing
 `MPN`, `DigiKeyPN` and `LCSC` numbers are identical on the schematic, and (for symbols with no part number) whose
 Descriptions state the same values for the fields those properties leave
 open, share a row and one part choice, so
 symbols with different existing parts are separate rows. Columns: Value ·
-Package · Footprint · Rating · Dielectric · Tolerance · Qty · References ·
+Package · Footprint · Rating · Class · Tolerance · Qty · References ·
 Current part · Status · Chosen MPN. Footprint is the footprint name without
-its library (the full lib id is in the tooltip). Rating is the voltage floor of a capacitor and the power
-floor of a resistor; Dielectric is empty for a resistor. A requirement cell whose value came from a default, an
+its library (the full lib id is in the tooltip). Rating is the voltage floor
+of a capacitor, the power floor of a resistor and the saturation-current
+floor of an inductor. Class is the dielectric of a capacitor and the
+shielding of an inductor, and is empty for a resistor. A requirement cell whose value came from a default, an
 edit, the existing part or the Description is marked `(default)` / `(edited)`
 / `(part)` / `(description)`; a dash means no value. A library-style Value is
 shown with its value (`C_4p7U (4.7uF)`, `R_49p9K (49.9k)`). Current part is the `MPN`
@@ -223,7 +226,8 @@ field, else the `DigiKeyPN` field, as written. Status is `queued` once a part
 has been accepted this session, `conflict` when two sources disagree (see
 below), `assigned` when every member already has `MPN`, `Manufacturer`,
 `DigiKeyPN`, `LCSC` and a `Footprint`, `not searchable` for a footprint with
-no chip size (radial and axial electrolytics), else `unassigned`.
+no chip size (radial and axial electrolytics; an inductor footprint is the
+exception, see below), else `unassigned`.
 
 Each requirement field is taken from the first source that has a value.
 Capacitors:
@@ -248,6 +252,50 @@ Resistors:
 A resistor with no power floor from any source is searched with none, and on
 Accept the chosen part's own rating is written to `Power:Min` (for example
 `100mW`). A floor typed in the dialog becomes the remembered `res.power_min`.
+
+Inductors:
+
+| Field | 1 | 2 | 3 | 4 | 5 |
+|-------|---|---|---|---|---|
+| Inductance | `Value` | existing part | Description | — | — |
+| Package | the `Footprint`'s chip size | `Package:Preferred` | the Value's size suffix (`L_10U_0805`) | existing part, then Description | `ind.package` (no built-in value; never for a symbol with a footprint) |
+| Current:Min | `Current:Min` | existing part's saturation current | Description (`Inductor 10 uH, 1A`) | `ind.current_min` (no built-in value) | `any`: no limit |
+| Shielding | `Shielding:Preferred` | existing part | Description | `ind.shielding` (`Shielded`) | — |
+| Tolerance | the loosest `Tolerance:Preferred` | existing part | Description | `ind.tolerance` (`20%`) | — |
+
+`Current:Min` is compared with the saturation current (Isat). A part whose
+supplier lists no saturation current (most chip inductors show `-` at JLCPCB
+and DigiKey) is compared on its rated current instead. As with a resistor's
+power floor, a group with no current floor is searched with none, and the
+chosen part's own current is written.
+
+Shielding is `Shielded`, `Semi-Shielded` or `Unshielded`, read from DigiKey's
+`Shielding` and JLCPCB's `Type` (`Magnetic Shielded Inductor`). A stated class
+accepts the better-shielded ones: `Semi-Shielded` also accepts `Shielded`,
+`Unshielded` accepts all three. JLCPCB lists no shielding for most chip
+inductors; such a hit is not rejected for it, and the DigiKey check decides.
+
+An inductor's package is a chip size (`0805`) or, for a power inductor, a
+body size in millimetres (`4x4mm`, longer side first). A power inductor's
+footprint (`Inductor_SMD:L_Coilcraft_XxL4040`, `IND_XGL3520_COC`) does not give
+the body size: the digits in such names are length and height, and the KiCad
+fab outline is drawn larger than the body. So a footprint with no chip size
+leaves the package to `Package:Preferred`, the existing part (DigiKey's
+`Size / Dimension`, JLCPCB's `SMD,4x4mm`) or the Description, and the row is
+`unassigned`, not `not searchable`: the dialog's Package field accepts a body
+size. Two body sizes within 0.25 mm per side are the same size, since the
+suppliers round one part differently. A candidate of the same body size need
+not fit the footprint's pads; check the pad layout before accepting a part
+from another series.
+
+An inductor `Value` is read in plain form (`22uH`, `1u`, `4R7` is 4.7 µH) and
+in library form (`L_10U_1A`, `L_4p7U_13p5A` with `p` as the decimal point, an
+optional size suffix `L_10U_0805`). A current in the Value (`_1A`) is not
+read; the Description's current is (`Inductor 4.7 uH, 13.5A`).
+
+A symbol drawn with an `Inductor_SMD` footprint is a ferrite bead, not an
+inductor, when its reference starts with `FB` or its Value or Description
+mentions a ferrite or a bead.
 
 `Value` is read in plain form (`100nF`, `0.1uF`, `4.7n`, `1u`) and in
 library form: an optional `C_` prefix, the value with `p` as the decimal
@@ -307,10 +355,11 @@ remembered `cap.voltage_min` can't be searched until one is entered.
 - Double-click an `unassigned` or `queued` row to open the **Assign Part**
   dialog. The header shows the references, the quantity per board and the units
   the build needs (quantity × **Boards** on the LCSC tab). Below it are the
-  Package, Voltage:Min (Power:Min for a resistor), Dielectric (capacitors
-  only) and Tolerance fields, each labelled with its source. A field stated on the schematic is read-only (change it on the
+  Package, Voltage:Min (Power:Min for a resistor, Current:Min for an
+  inductor), Dielectric (Shielding for an inductor; neither for a resistor)
+  and Tolerance fields, each labelled with its source. A field stated on the schematic is read-only (change it on the
   schematic, or with **Edit Electrical Parameters** on the Intents tab), and
-  Package is fixed when the symbol has a footprint. Editing a field reruns the
+  Package is fixed when the symbol has a footprint with a chip size. Editing a field reruns the
   search about 400 ms after the last keystroke.
 - The header's Current part line lists what the existing-part lookup found.
   Each distinct `MPN` and `DigiKeyPN` value is looked up at DigiKey by exact
@@ -330,16 +379,21 @@ remembered `cap.voltage_min` can't be searched until one is entered.
 - The other candidates come from the parts database: accepted parts that
   meet the requirement, with JLCPCB stock and price and DigiKey stock fetched
   fresh. When neither the existing part nor the database gives a candidate,
-  or on **Search suppliers**, JLCPCB is searched once, the way its parts page
-  filters: the value as the keyword (`4.7uF`, `10kΩ`), with the part type's
-  category (MLCC, chip resistor), the package and in-stock as filters, every
-  result page. (A longer keyword such as `4.7uF 0603 X7R` is ranked by loose
+  or on **Search suppliers**, JLCPCB is searched the way its parts page
+  filters: the value as the keyword (`4.7uF`, `10kΩ`, `10uH`), with the part
+  type's category (MLCC, chip resistor), the package and in-stock as filters,
+  every result page. A chip inductor is searched in both JLCPCB inductor
+  categories (`Inductors (SMD)` and `Power Inductors`); a body size is
+  searched in `Power Inductors` without a package filter, and each hit's
+  package is compared after the search. (A longer keyword such as `4.7uF 0603 X7R` is ranked by loose
   text relevance, and most hits are then other values.) Hits from a
-  manufacturer not in the `cap.manufacturers` / `res.manufacturers` setting
-  are dropped, each entry matched as text within the supplier's manufacturer
-  name. The built-in capacitor list is Murata, Samsung, Yageo, TDK, Taiyo
-  Yuden, KEMET, Vishay, Wurth, Kyocera and AVX; the resistor list is Yageo,
-  Vishay, Panasonic, Stackpole, Rohm, TE Connectivity and Bourns. Each maker
+  manufacturer not in the `cap.manufacturers` / `res.manufacturers` /
+  `ind.manufacturers` setting are dropped, each entry matched as text within
+  the supplier's manufacturer name. The built-in capacitor list is Murata,
+  Samsung, Yageo, TDK, Taiyo Yuden, KEMET, Vishay, Wurth, Kyocera and AVX; the
+  resistor list is Yageo, Vishay, Panasonic, Stackpole, Rohm, TE Connectivity
+  and Bourns; the inductor list is Coilcraft, Murata, TDK, Taiyo Yuden,
+  Bourns, Wurth, Vishay, Sunlord, Samsung, Eaton, Pulse and Abracon. Each maker
   is stocked at both suppliers; UNI-ROYAL, which supplies most JLCPCB Basic
   resistors, is not sold by DigiKey. Each remaining hit's attributes are checked
   against the requirement, and the best hits are confirmed at DigiKey: same
@@ -359,11 +413,11 @@ remembered `cap.voltage_min` can't be searched until one is entered.
 - When no part meets a tolerance limit that came from a default, the search
   runs again without it. An amber line under the status line names the limit
   that was dropped, and on Accept the chosen part's own tolerance is written to
-  `Tolerance:Preferred`; the remembered `cap.tolerance.*` / `res.tolerance`
-  default is left as it was. A tolerance stated on the schematic or edited in the dialog is always
+  `Tolerance:Preferred`; the remembered `cap.tolerance.*` / `res.tolerance` /
+  `ind.tolerance` default is left as it was. A tolerance stated on the schematic or edited in the dialog is always
   applied.
-- **Clearing a field.** Empty the Voltage:Min / Power:Min, Dielectric or
-  Tolerance field (or type `any`) to search without a limit on it; its note
+- **Clearing a field.** Empty the Voltage:Min / Power:Min / Current:Min,
+  Dielectric / Shielding or Tolerance field (or type `any`) to search without a limit on it; its note
   reads `any`. A capacitor field that had no value must be given one or
   `any`, so a voltage floor is never left out by accident. On Accept the chosen part's own value is written
   to the symbols for a cleared field, and the remembered default is left as it
@@ -384,16 +438,22 @@ remembered `cap.voltage_min` can't be searched until one is entered.
   to the symbols but never stored as a default. **File → Save** then writes,
   on every symbol in the group:
   `MPN`, `Manufacturer`, `DigiKeyPN` and `LCSC` under those canonical keys
-  (other spellings of the four keys are removed); `Voltage:Min` or
-  `Power:Min`, `Class:Preferred` (capacitors) and `Tolerance:Preferred` when
+  (other spellings of the four keys are removed); `Voltage:Min`,
+  `Power:Min` or `Current:Min`, `Class:Preferred` (capacitors) or
+  `Shielding:Preferred` (inductors), and `Tolerance:Preferred` when
   the value came from a default, an edit, a cleared field, the existing part
-  or the Description (in the form `16V`, `100mW`, `X7R, X5R`, `10%`); `Value`
+  or the Description (in the form `16V`, `100mW`, `1.5A`, `X7R, X5R`,
+  `Shielded`, `10%`); `Value`
   when the symbol has none and the value came from the existing part or the
   Description; `Package:Preferred` when the package was edited and the symbol
-  has no footprint; `Footprint` (`Capacitor_SMD:C_0603_1608Metric`,
-  `Resistor_SMD:R_0603_1608Metric` and the other KiCad standard chip sizes
-  0402–1210) when the symbol has none; and `Intent:Type` = `capacitor` /
-  `resistor` when the type was guessed. A value stated on the schematic is not overwritten. After
+  has no footprint, and for an inductor body size not stated on the
+  schematic; `Footprint` (`Capacitor_SMD:C_0603_1608Metric`,
+  `Resistor_SMD:R_0603_1608Metric`, `Inductor_SMD:L_0603_1608Metric` and the
+  other KiCad standard chip sizes 0402–1210) when the symbol has none and the
+  package is a chip size; and `Intent:Type` = `capacitor` / `resistor` /
+  `inductor` when the type was guessed. No footprint is written for a body
+  size: an inductor with none stays `unassigned`, and its tooltip says to add
+  one in KiCad. A value stated on the schematic is not overwritten. After
   the write the group reads as `assigned`, and the stated values give the same
   requirement on the next open. Accepting the current part writes its
   canonical numbers under the canonical keys, which also corrects swapped
@@ -413,7 +473,7 @@ values, so nothing in its dialog is editable.
   same identifiers and footprint share a row.
 - **Row.** Value is the `MPN` field, else the Value. Package is the chosen
   part's DigiKey package, else the package read from the footprint name,
-  marked `(footprint)`. Rating, Dielectric and Tolerance are empty. Status is
+  marked `(footprint)`. Rating, Class and Tolerance are empty. Status is
   `not searchable` without an identifier or a footprint, `conflict` after a
   search found identifiers that name different parts, `assigned` when every
   symbol has `MPN`, `Manufacturer`, `DigiKeyPN` and a `Footprint` (an `LCSC`
@@ -479,12 +539,16 @@ The parts database is a SQLite file at `~/Code/Boards/parts.sqlite` (the same
 path relative to the home directory on every machine); set
 `KICADTOOLS_PARTS_DB` to use another file. It holds each accepted or rejected
 part with its type, its parameters (capacitors: capacitance, voltage rating,
-dielectric, tolerance; resistors: resistance, power rating, tolerance; ICs:
-DigiKey's Package / Case and pin count), its package, its DigiKey and LCSC part numbers, and the board references that
+dielectric, tolerance; resistors: resistance, power rating, tolerance;
+inductors: inductance, saturation current, shielding, tolerance; ICs:
+DigiKey's Package / Case and pin count), its package (a chip size, or an
+inductor's body size such as `4x4mm`), its DigiKey and LCSC part numbers, and the board references that
 place it. Stock
 and price are not stored. The file is listed in `Boards/.gitignore`, so each
 machine has its own copy. The schema is version 2; a version-1 file is
-updated in place when it is opened (the `ic` table is added).
+updated in place when it is opened (the `ic` table is added). The
+`inductor` table was added within version 2 and is created when a file
+without it is opened.
 
 The `settings` table holds the remembered defaults under the `cap.*` and
 `res.*` keys in the tables above. A key absent from the table takes the built-in value shown in
@@ -566,8 +630,8 @@ Test schematics live in `tests/data/`.
 - `src/kicadtools/substitute.py` — parametric substitute search: spec, matching rules, ranking, `Alternates` merge
 - `src/kicadtools/units.py` — parse and format resistance, capacitance, voltage, tolerance and power; package and dielectric codes
 - `src/kicadtools/partsdb.py` — the SQLite parts database: accepted/rejected parts, supplier PNs, usage, settings
-- `src/kicadtools/parttypes.py` — what differs between capacitors and resistors: value and rating formats, property names, supplier parameter names, JLCPCB category, footprints
-- `src/kicadtools/requirement.py` — capacitor and resistor requirements (value + source per field), defaults, grouping
+- `src/kicadtools/parttypes.py` — what differs between capacitors, resistors and inductors: value and rating formats, property names, the class field (dielectric, shielding), packages (chip and body sizes), supplier parameter names, JLCPCB categories, footprints
+- `src/kicadtools/requirement.py` — capacitor, resistor and inductor requirements (value + source per field), defaults, grouping
 - `src/kicadtools/partsearch.py` — candidates: existing part, database, then filtered JLCPCB search confirmed at DigiKey
 - `src/kicadtools/assign.py` — the property write plan that assigns a chosen part to a group
 - `src/kicadtools/cli.py` — command-line entry point (`kicadtools`)
