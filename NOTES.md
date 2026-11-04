@@ -5,7 +5,7 @@ Not user docs (see `README.md` for those).
 
 ## Parts tab: capacitor, resistor, inductor and IC assignment (through 2026-11-03)
 
-Through-hole parts are planned separately; see the next section.
+Through-hole parts are a separate path; see the next section.
 
 Capacitors, resistors and inductors: the design, decisions, revisions and
 open items are in `CAPACITOR_PLAN.md` (revision 4 added resistors and
@@ -55,7 +55,7 @@ to-do list. State on 2026-11-03:
   pad, and `ECG/Library/footprints.pretty/CP_20_10_ADI_NOTH.kicad_mod` has 20
   pads and none. Check the datasheet's exposed-pad recommendation.
 
-## Through-hole part assignment: planned (2026-11-03)
+## Through-hole part assignment: steps 1–5 built (2026-11-03)
 
 `THT_PLAN.md` holds the decisions, the board survey, the DigiKey API test and
 ten build steps. Step 1 (mounting per part, `mounting.py`) is committed as
@@ -67,12 +67,20 @@ next step is step 6 (part-named footprints). See the "as built" sections in
 the plan. Suite 1546 passing.
 
 - DigiKey limits: 120 calls a minute, 1000 a day. Every DigiKey call now goes
-  through one limiter (0.6 s apart, stops at 50 left for the day).
+  through one limiter (0.6 s apart, stops at 50 left for the day, waits out a
+  short 429). Tests run without the real DigiKey credentials
+  (`tests/conftest.py`), so they cannot spend the daily limit.
+- Not done from steps 1–5: the Cockpit does not show the limiter's count
+  (`DIGIKEY_LIMITER.status()`); solder jumpers and net ties are "no part"
+  signatures but the exports still list them as SMD parts; the header maker
+  list (`hdr.manufacturers`) is not a setting yet. The Parts tab has no
+  through-hole rows until step 9.
 
 - Decisions: DigiKey only, no LCSC; the JLCPCB BOM and CPL keep their SMD-only
   choices (revised 2026-11-03); headers take one series per run, set by the
-  first header the user picks (manufacturer, finish, connector type, pin
-  lengths, MPN pattern), not stored between runs.
+  first header the user picks (manufacturer, finish, connector type, MPN
+  pattern, and contact lengths for groups of the same orientation), not
+  stored between runs; sockets have their own series.
 - Survey: `scripts/tht_survey.py` (run from `Code/KicadTools` with the venv;
   finds the boards itself). 58 through-hole parts have a DigiKey PN; 10 generic
   2.54 mm headers, 4 part-named footprints and 22 pads with no part do not.
