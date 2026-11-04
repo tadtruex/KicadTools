@@ -61,9 +61,10 @@ to-do list. State on 2026-11-03:
 ten build steps. Step 1 (mounting per part, `mounting.py`) is committed as
 7b6f779; step 2 is dropped; step 3 (footprint signatures, `thtfootprint.py`)
 as b349980; step 4 (DigiKey rate limiter and filtered search,
-`dkfilters.py`, `suppliers.py`) is built, not yet committed; the next step is
-step 5 (header search and the run's series). See the "as built" sections in
-the plan. Suite 1529 passing.
+`dkfilters.py`, `suppliers.py`) as e668722; step 5 (header and socket search
+and the run's series, `headersearch.py`) is built, not yet committed; the
+next step is step 6 (part-named footprints). See the "as built" sections in
+the plan. Suite 1546 passing.
 
 - DigiKey limits: 120 calls a minute, 1000 a day. Every DigiKey call now goes
   through one limiter (0.6 s apart, stops at 50 left for the day).

@@ -232,6 +232,43 @@ manufacturers, min_stock, limit)` returns a `CategorySearchResult`
    and shows the top one as the proposed part. The user can still pick
    another, which does not change the series.
 
+### Step 5 — as built (2026-11-03)
+
+`src/kicadtools/headersearch.py`: `HeaderRun(client, makers=HEADER_MAKERS)`
+with `search(signature, needed)` → `HeaderSearchResult` (ranked candidates,
+`proposed`, total, the series used, notes) and `pick(product, signature)`.
+`header_filters`, `series_from_pick`, `rank_for_series`, `stock_note`.
+Tests: `tests/test_headersearch.py`.
+
+- Sockets are leaf category 315 (Headers, Receptacles, Female Sockets),
+  contact type "Female Socket". Headers and sockets each get their own series
+  in a run.
+- Stock: the search asks for at least 10 × the build quantity
+  (`icsearch.stock_minimum`); a proposed part below build + 1000 gets a note,
+  as for ICs.
+- DigiKey's "Number of Rows" filter in category 315 (parameter 2172) returns
+  no hits for any value, though the parameter is on the parts. For sockets
+  the rows are checked on each hit after the search, with 50 hits asked.
+- Single-pin headers: no pitch filter (DigiKey lists them with pitch "-").
+- The series fixes manufacturer, Contact Finish – Mating and Connector Type
+  for every later group, and the two contact lengths only for groups with
+  the pick's orientation and mounting (right-angle lengths differ).
+- MPN pattern: the position digits are the longest suffix of the first digit
+  run that reads as the count per row or total (`PRPC004SAAN-RC`,
+  `TSW-104-07-G-S` → `04`), else the longest shorter prefix
+  (`PPTC041LFBN-RC` → `04`; the 1 is the row count). Hits are ranked: the
+  predicted MPN, then other pattern matches, then the rest, by price within
+  each.
+- A series search with no hit falls back to the maker list, with a note.
+- Live check (2026-11-03, 8 calls, build quantity 5), picking each proposed
+  part: 1×4 → `PREC004SAAN-RC` (maker list, 275 hits) sets the series; then
+  1×6 right angle `PREC006SBAN-M71RC`, 1×1 `PREC001SAAN-RC`, 1×7
+  `PREC007SAAN-RC`, 2×5 `PREC005DAAN-RC`, 2×12 right angle
+  `PREC012DBAN-M71RC` (stock 155, noted); sockets 1×4 → `PPTC041LFBN-RC`
+  sets the socket series; 1×8 `PPTC081LFBN-RC`, 1×15 `PPTC151LFBN-RC`.
+- Not done: `hdr.manufacturers` is not a setting yet (`HEADER_MAKERS` is the
+  default; the Cockpit wiring is step 9).
+
 ### Step 6 — part-named footprints
 
 Search the MPN token from the footprint (or the Value) with the IC search
@@ -261,8 +298,8 @@ BarrelJackAdapter J2/J4, SX1509 J5/J7, MiDi J1/J2, Breakout J101/J102/J5.
 
 ## TBD
 
-1. Female sockets, IDC and shrouded headers: their categories and parameters
-   are not checked yet.
+1. IDC and shrouded headers: their categories and parameters are not checked
+   yet. Female sockets are category 315 (step 5 as built).
 2. Mating parts (JST housings and crimp contacts) are not assigned.
 3. BlackBox and NeoPMOD footprints are not resolved (see "Evidence").
 4. Whether a series picked in one run is offered as the default for the next.
