@@ -351,11 +351,8 @@ search result does not carry it (TBD 2).
    `IcSearchResult.rejected` holds only (label, reason). Carry the
    `FootprintCheck` (or the `IcCandidate`) so the dialog can list rejected
    parts greyed out with their reason and footprint colour.
-3. Live check not yet re-run with the 10 × minimum (2026-11-01). From the
-   stock it recorded, BuckConverter U1 (LTC6992HS6-2, DigiKey 798 against a
-   minimum of 250) becomes a candidate with a warning, giving 4 of 11 groups;
-   the other 7 stay rejected (DigiKey stock 0, 90 for the Arduino Nano, 164
-   for DRV8313RHHR against 500).
+3. ~~Live check with the 10 × minimum.~~ Done (2026-11-03): the user ran a
+   live check before shipping a board.
 4. The LDL212 pair cannot show a mismatch from one board: DigiKey states no
    pitch and both footprints have 7 pads. Finding it needs a check across
    boards (one MPN or DigiKey PN placed on footprints of different pitch) or

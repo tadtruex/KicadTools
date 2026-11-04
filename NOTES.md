@@ -5,6 +5,8 @@ Not user docs (see `README.md` for those).
 
 ## Parts tab: capacitor, resistor, inductor and IC assignment (through 2026-11-03)
 
+Through-hole parts are planned separately; see the next section.
+
 Capacitors, resistors and inductors: the design, decisions, revisions and
 open items are in `CAPACITOR_PLAN.md` (revision 4 added resistors and
 revision 5 inductors on the same code path; the TBD list there is the to-do
@@ -36,8 +38,9 @@ to-do list. State on 2026-11-03:
   DigiKey stock against the build + 1000 floor, each with a one-line reason.
   Details in `IC_PLAN.md`, "As built".
 - 2026-11-01: the IC floor now only warns; the hard limit is 10 × the build
-  quantity. From the recorded stock that adds BuckConverter U1 (4 of 11);
-  not re-run live.
+  quantity. From the recorded stock that adds BuckConverter U1 (4 of 11).
+  2026-11-03: the user ran a live check before shipping a board (IC TBD 3
+  done).
 - None of capacitor, resistor, inductor or IC assignment has been tried in
   the Cockpit GUI yet; scripted live checks on the same four boards give every
   chip-capacitor and resistor group a candidate (MotorDriver's radial 47 µF
@@ -51,6 +54,25 @@ to-do list. State on 2026-11-03:
 - Board finding from the IC live check: ECG U1 (AD8232ACPZ-R7) has an exposed
   pad, and `ECG/Library/footprints.pretty/CP_20_10_ADI_NOTH.kicad_mod` has 20
   pads and none. Check the datasheet's exposed-pad recommendation.
+
+## Through-hole part assignment: planned (2026-11-03)
+
+`THT_PLAN.md` holds the decisions, the board survey, the DigiKey API test and
+ten build steps. No code yet; the next step is plan step 1 (mounting per part).
+
+- Decisions: DigiKey only, no LCSC; the JLCPCB BOM and CPL become SMD-only
+  with no prompt or `--smd` flag; headers take one series per run, set by the
+  first header the user picks (manufacturer, finish, connector type, pin
+  lengths, MPN pattern), not stored between runs.
+- Survey: `scripts/tht_survey.py` (run from `Code/KicadTools` with the venv;
+  finds the boards itself). 58 through-hole parts have a DigiKey PN; 10 generic
+  2.54 mm headers, 4 part-named footprints and 22 pads with no part do not.
+- DigiKey v4 keyword search filters by leaf category, parameter value IDs,
+  manufacturer, status and stock, about 2 s a call. Keywords must be short
+  ("header", "capacitor"); long descriptive keywords return nothing. The
+  category and parameter IDs found are listed in the plan.
+- The test scripts were scratch files and are not kept; the plan records what
+  they found.
 
 ## JLCPCB stock check + parametric substitutes (2026-10-15)
 
