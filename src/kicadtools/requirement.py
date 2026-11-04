@@ -743,11 +743,38 @@ class RequirementGroup:
         return True
 
 
+_RATING_PROPS = ("Voltage:Min", "Power:Min", "Current:Min")
+_CLASS_PROPS = ("Class:Preferred", "Shielding:Preferred")
+
+
+def _stated_key(ptype: PartType, name: str, text: str) -> Any:
+    """The group-key entry for stated property *name* holding *text*: what
+    the text means rather than how it is written, so ``X5R`` and ``X5R,
+    X7R`` (both X5R or better), ``25V`` and ``25 V``, ``10%`` and ``10 %``
+    give one group. A rating is its number, a tolerance the loosest
+    percentage of its entries, a class its allowed set
+    (:func:`allowed_classes`, order ignored). Text that does not parse, and
+    every other property, is compared as written."""
+    if not text:
+        return ""
+    if name in _RATING_PROPS:
+        value = ptype.parse_rating(text)
+        return ("rating", value) if value is not None else text
+    if name == "Tolerance:Preferred":
+        pcts = [p for p in (parse_percent(t) for t in text.split(",")) if p is not None]
+        return ("tolerance", max(pcts)) if pcts else text
+    if name in _CLASS_PROPS:
+        codes = _codes(ptype, text)
+        return ("class", tuple(sorted(allowed_classes(ptype, codes)))) if codes else text
+    return text
+
+
 def group_parts(records: Sequence[Any],
                 defaults: Mapping[str, str]) -> List[RequirementGroup]:
     """Group the capacitor, resistor and inductor records (from
     :func:`kicadtools.resolve.iter_bom_part_records`) by part type, the values
-    stated on the schematic, the Description fields those values leave open
+    stated on the schematic (compared by meaning, :func:`_stated_key`), the
+    Description fields those values leave open
     (:func:`description_key`; none for a symbol with a part number) and the
     existing MPN, DigiKey PN and LCSC number (compared upper-cased), so
     symbols with different existing parts are separate groups. Each group's
@@ -762,7 +789,8 @@ def group_parts(records: Sequence[Any],
             continue
         pn = extract_part_numbers(rec.props)
         has_pn = bool(pn.mpn or pn.digikey_pn or pn.lcsc)
-        key = (ptype.name,) + tuple(_prop(rec.props, k) for k in _GROUP_PROPS) + (
+        key = (ptype.name,) + tuple(_stated_key(ptype, k, _prop(rec.props, k))
+                                    for k in _GROUP_PROPS) + (
             description_key(intent, _prop(rec.props, "Footprint"),
                             ptype.parse_description(_prop(rec.props, "Description")),
                             has_pn),

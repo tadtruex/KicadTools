@@ -529,6 +529,11 @@ did only when it came from the existing part or the Description.
 - On the user's database and four boards no group gains a stored part from
   the change today (the stored parts are X5R and X7R against X5R or X7R
   requirements already); it applies to parts accepted from here on.
+- Grouping (`requirement._stated_key`): stated ratings, tolerance and class
+  are compared by meaning. After this revision, a save writes `X5R` where an
+  earlier one wrote `X5R, X7R`; MotorDriver C30/C34 (saved after) and
+  C13/C14/C29 (saved before) were two rows and are now one. Across every
+  board this was the only merge.
 
 ## TBD (after the main loop is working)
 

@@ -60,7 +60,9 @@ to-do list. State on 2026-11-03:
 A stated or default dielectric (or shielding) now means "this or better" in
 the database and supplier searches, as a class read from the part or the
 Description already did; X8R was added to the upgrade table.
-`CAPACITOR_PLAN.md`, revision 6. Committed, not pushed.
+`CAPACITOR_PLAN.md`, revision 6. Committed as d172a00, not pushed. Rows now
+group stated ratings, tolerance and class by meaning (`X5R` and `X5R, X7R`
+share a row); committed, not pushed.
 
 ## Through-hole part assignment: steps 1–6, 8 and 9 built (2026-11-04)
 

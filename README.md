@@ -221,7 +221,11 @@ inductors: parts of one type whose `Value`, `Footprint`, `Voltage:Min`,
 `MPN`, `DigiKeyPN` and `LCSC` numbers are identical on the schematic, and (for symbols with no part number) whose
 Descriptions state the same values for the fields those properties leave
 open, share a row and one part choice, so
-symbols with different existing parts are separate rows. Columns: Value ·
+symbols with different existing parts are separate rows. The stated ratings,
+tolerance and class are compared by meaning, not by text: `25V` and `25 V`
+are the same, a tolerance is its loosest percentage, and a class is the set
+of classes it allows, so `X5R` and `X5R, X7R` (both X5R or better) share a
+row. Columns: Value ·
 Package · Footprint · Rating · Class · Tolerance · Qty · References ·
 Current part · Status · Chosen MPN. Footprint is the footprint name without
 its library (the full lib id is in the tooltip). Rating is the voltage floor

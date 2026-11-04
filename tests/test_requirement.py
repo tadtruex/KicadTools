@@ -1023,3 +1023,33 @@ def test_stated_schematic_values_never_replaced_by_evidence():
     assert r.rating_min == Sourced(None, SCHEMATIC)
     assert r.dielectrics == Sourced(("X7R",), SCHEMATIC)
     assert r.tolerance_max_pct == Sourced(None, SCHEMATIC)
+
+
+# --- stated fields grouped by meaning (2026-11-04) -------------------------------
+
+FP0402 = "Capacitor_SMD:C_0402_1005Metric"
+
+
+def test_class_written_with_and_without_upgrades_is_one_group():
+    """MotorDriver C13 (`X5R, X7R`, written before revision 6) and C30
+    (`X5R`, written after) both mean X5R or better."""
+    a = _record("C13", Footprint=FP0402, **{"Class:Preferred": "X5R, X7R"})
+    b = _record("C30", Footprint=FP0402, **{"Class:Preferred": "X5R"})
+    c = _record("C31", Footprint=FP0402, **{"Class:Preferred": "X7R"})
+    groups = group_parts([a, b, c], DEFAULTS)
+    assert [g.references for g in groups] == [["C13", "C30"], ["C31"]]
+
+
+def test_rating_and_tolerance_grouped_by_value_not_text():
+    a = _record("C1", Footprint=FP0402, **{"Voltage:Min": "25V", "Tolerance:Preferred": "10%"})
+    b = _record("C2", Footprint=FP0402, **{"Voltage:Min": "25 V", "Tolerance:Preferred": "10 %"})
+    c = _record("C3", Footprint=FP0402, **{"Voltage:Min": "16V", "Tolerance:Preferred": "10%"})
+    groups = group_parts([a, b, c], DEFAULTS)
+    assert [g.references for g in groups] == [["C1", "C2"], ["C3"]]
+
+
+def test_unparsed_stated_text_still_compared_as_written():
+    a = _record("C1", Footprint=FP0402, **{"Voltage:Min": "see note"})
+    b = _record("C2", Footprint=FP0402, **{"Voltage:Min": "see notes"})
+    assert len(group_parts([a, b], DEFAULTS)) == 2
+
