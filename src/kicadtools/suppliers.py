@@ -14,12 +14,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from urllib.parse import quote
 
 import requests
+
+from kicadtools.dkfilters import (
+    CategoryFilters,
+    ResolvedFilters,
+    ValueSpec,
+    parse_filter_options,
+    resolve_filters,
+    search_body,
+)
 
 TOKEN_URL = "https://api.digikey.com/v1/oauth2/token"
 # Keyword search: a fuzzy relevance search (``POST {"Keywords", "Limit",
@@ -42,6 +52,152 @@ LCSC_SEARCH_URL = (
 )
 
 _TIMEOUT = 12
+
+# DigiKey's Product Information API allows 120 calls a minute and 1000 a day
+# per application (developer.digikey.com, "Shared Concepts"; the daily figure
+# is confirmed by the x-ratelimit-limit header on every response). Over either
+# limit it answers 429 with a Retry-After header. These settings stay under
+# both limits.
+DIGIKEY_PER_MINUTE = 100
+DIGIKEY_DAILY_RESERVE = 50  # stop when this many calls are left for the day
+DIGIKEY_MAX_RETRY_AFTER = 60.0  # seconds; a longer Retry-After stops the calls
+
+
+class DigiKeyRateLimiter:
+    """Spaces DigiKey calls and stops them before the daily limit.
+
+    One limiter is shared by every :class:`DigiKeyClient` in the process
+    (:data:`DIGIKEY_LIMITER`), and it is thread-safe, because the Cockpit runs
+    searches on worker threads and builds a client per search.
+
+    - :meth:`acquire` waits until ``60 / per_minute`` seconds have passed since
+      the previous call (``per_minute=None``: no spacing), then counts the
+      call. It returns ``False`` without waiting once the limiter has stopped.
+    - :meth:`record` reads ``x-ratelimit-remaining`` / ``x-ratelimit-limit``
+      from a response and stops the limiter when ``reserve`` calls or fewer
+      are left.
+    - :meth:`retry_after` handles a 429: it waits ``Retry-After`` seconds and
+      returns ``True`` (retry once) when that is at most ``max_retry_after``,
+      else stops the limiter and returns ``False``.
+
+    Once stopped (``stopped`` holds the reason) the limiter stays stopped for
+    the rest of the process; DigiKey calls then fail like a network error."""
+
+    def __init__(
+        self,
+        per_minute: Optional[float] = DIGIKEY_PER_MINUTE,
+        *,
+        reserve: int = DIGIKEY_DAILY_RESERVE,
+        max_retry_after: float = DIGIKEY_MAX_RETRY_AFTER,
+        clock=time.monotonic,
+        sleep=time.sleep,
+    ) -> None:
+        self.interval = 60.0 / per_minute if per_minute else 0.0
+        self.reserve = reserve
+        self.max_retry_after = max_retry_after
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._last: Optional[float] = None
+        self.calls = 0
+        self.remaining: Optional[int] = None
+        self.daily_limit: Optional[int] = None
+        self.stopped = ""
+
+    def acquire(self) -> bool:
+        with self._lock:
+            if self.stopped:
+                return False
+            now = self._clock()
+            if self._last is not None and self.interval:
+                wait = self._last + self.interval - now
+                if wait > 0:
+                    self._sleep(wait)
+                    now = self._clock()
+            self._last = now
+            self.calls += 1
+            return True
+
+    def record(self, resp) -> None:
+        headers = getattr(resp, "headers", None) or {}
+        remaining = _int_header(headers, "x-ratelimit-remaining")
+        limit = _int_header(headers, "x-ratelimit-limit")
+        with self._lock:
+            if limit is not None:
+                self.daily_limit = limit
+            if remaining is None:
+                return
+            self.remaining = remaining
+            if remaining <= self.reserve and not self.stopped:
+                self.stopped = (
+                    f"DigiKey daily limit: {remaining} of {self.daily_limit or '?'} calls left, "
+                    f"stopped to keep {self.reserve} in reserve"
+                )
+                print(f"⚠️  {self.stopped}")
+
+    def retry_after(self, resp) -> bool:
+        headers = getattr(resp, "headers", None) or {}
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+        try:
+            wait = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            wait = None
+        if wait is not None and 0 <= wait <= self.max_retry_after:
+            print(f"⚠️  DigiKey rate limit (429): waiting {wait:g} s")
+            self._sleep(wait)
+            return True
+        with self._lock:
+            if not self.stopped:
+                self.stopped = (
+                    "DigiKey rate limit (429)"
+                    + (f", retry after {wait:g} s" if wait is not None else "")
+                    + "; DigiKey calls stopped"
+                )
+                print(f"⚠️  {self.stopped}")
+        return False
+
+    def status(self) -> str:
+        """One line for a status bar: calls made and calls left today."""
+        text = f"DigiKey: {self.calls} call(s) this session"
+        if self.remaining is not None:
+            text += f", {self.remaining} of {self.daily_limit or '?'} left today"
+        if self.stopped:
+            text += f" — {self.stopped}"
+        return text
+
+
+def _int_header(headers, name: str) -> Optional[int]:
+    value = headers.get(name)
+    if value is None:
+        value = headers.get(name.title())
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+# The limiter every DigiKeyClient uses unless it is given its own.
+DIGIKEY_LIMITER = DigiKeyRateLimiter()
+
+# Filter options per (category id, keyword), for the session. DigiKey's options
+# depend on the keyword as well as the category, so both are the key.
+_CATEGORY_OPTIONS: Dict[Tuple[int, str], CategoryFilters] = {}
+_CATEGORY_OPTIONS_LOCK = threading.Lock()
+
+
+@dataclass
+class CategorySearchResult:
+    """One :meth:`DigiKeyClient.category_search`: the hits in DigiKey's order
+    (by price when sorted), the total number of matching products, the
+    category's options, and the wanted filters that had no ID (when any, no
+    search was made and ``products`` is empty)."""
+
+    products: List["DigiKeyProduct"]
+    total: int
+    options: Optional[CategoryFilters]
+    resolved: Optional[ResolvedFilters] = None
+    unmatched: Tuple[str, ...] = ()
+    error: str = ""
 
 
 def _norm_mpn(mpn: str) -> str:
@@ -162,8 +318,11 @@ class DigiKeyClient:
         self,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
+        *,
+        limiter: Optional[DigiKeyRateLimiter] = None,
     ) -> None:
         self.client_id = client_id or os.getenv("DIGIKEY_CLIENT_ID")
+        self._limiter = limiter
         self.client_secret = client_secret or os.getenv("DIGIKEY_CLIENT_SECRET")
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
@@ -208,6 +367,37 @@ class DigiKeyClient:
             "X-DIGIKEY-Client-Id": self.client_id,
         }
 
+    @property
+    def limiter(self) -> DigiKeyRateLimiter:
+        """The limiter for this client: its own, else :data:`DIGIKEY_LIMITER`
+        (read at call time, so tests can replace the module's limiter)."""
+        return self._limiter if self._limiter is not None else DIGIKEY_LIMITER
+
+    def _send(self, send):
+        """Call ``send()`` (one DigiKey request) through the limiter: wait
+        for the slot, refresh the token once on 401, wait and retry once on a
+        429 with a short Retry-After, and record the rate-limit headers.
+        Returns the response, or ``None`` when the limiter has stopped.
+        ``requests.RequestException`` propagates to the caller."""
+        limiter = self.limiter
+        if not limiter.acquire():
+            return None
+        resp = send()
+        limiter.record(resp)
+        if resp.status_code == 401 and self._obtain_token():
+            if not limiter.acquire():
+                return None
+            resp = send()
+            limiter.record(resp)
+        if resp.status_code == 429 and limiter.retry_after(resp):
+            if not limiter.acquire():
+                return None
+            resp = send()
+            limiter.record(resp)
+            if resp.status_code == 429:
+                limiter.retry_after(resp)
+        return resp
+
     def product_for(self, part_number: str) -> Optional[DigiKeyProduct]:
         """Return the exact :class:`DigiKeyProduct` for *part_number*, or ``None``.
 
@@ -221,12 +411,14 @@ class DigiKeyClient:
 
         url = V4_DETAILS_URL.format(pn=quote(part_number, safe=""))
         try:
-            resp = requests.get(url, headers=self._auth_headers(), timeout=_TIMEOUT)
-            if resp.status_code == 401 and self._obtain_token():
-                resp = requests.get(url, headers=self._auth_headers(), timeout=_TIMEOUT)
+            resp = self._send(
+                lambda: requests.get(url, headers=self._auth_headers(), timeout=_TIMEOUT)
+            )
         except requests.RequestException as exc:
             print(f"⚠️  Network error looking up DigiKey part {part_number}: {exc}")
             return None
+        if resp is None:
+            return None  # rate limiter stopped (already reported)
 
         if resp.status_code == 404:
             return None  # no such part — a normal "not found", not an error
@@ -267,12 +459,12 @@ class DigiKeyClient:
                                  timeout=_TIMEOUT)
 
         try:
-            resp = post()
-            if resp.status_code == 401 and self._obtain_token():
-                resp = post()
+            resp = self._send(post)
         except requests.RequestException as exc:
             print(f"⚠️  Network error searching DigiKey for {keyword}: {exc}")
             return []
+        if resp is None:
+            return []  # rate limiter stopped (already reported)
         if resp.status_code != 200:
             print(f"⚠️  DigiKey keyword search failed ({resp.status_code}) for {keyword}")
             return []
@@ -293,6 +485,108 @@ class DigiKeyClient:
             seen.add(key)
             out.append(product)
         return out
+
+    def _search_raw(self, body: dict, what: str) -> Optional[dict]:
+        """POST *body* to the keyword search; the JSON response, or ``None``
+        after printing why."""
+        if not self.configured or not self._ensure_token():
+            return None
+
+        def post():
+            headers = {**self._auth_headers(), "Content-Type": "application/json"}
+            return requests.post(V4_SEARCH_URL, headers=headers, json=body, timeout=_TIMEOUT)
+
+        try:
+            resp = self._send(post)
+        except requests.RequestException as exc:
+            print(f"⚠️  Network error searching DigiKey for {what}: {exc}")
+            return None
+        if resp is None:
+            return None  # rate limiter stopped (already reported)
+        if resp.status_code != 200:
+            print(f"⚠️  DigiKey search failed ({resp.status_code}) for {what}")
+            return None
+        try:
+            return resp.json() or {}
+        except ValueError:
+            print(f"⚠️  DigiKey search returned non-JSON for {what}")
+            return None
+
+    def category_filters(self, keyword: str, category_id: int) -> Optional[CategoryFilters]:
+        """The filter options of leaf category *category_id* for *keyword*:
+        one search call the first time in the session, then from the cache.
+        ``None`` when the call fails."""
+        key = (int(category_id), keyword.strip().lower())
+        with _CATEGORY_OPTIONS_LOCK:
+            cached = _CATEGORY_OPTIONS.get(key)
+        if cached is not None:
+            return cached
+        data = self._search_raw(
+            search_body(keyword, category_id, limit=1, sort_by_price=False),
+            f"{keyword} (category {category_id} options)",
+        )
+        if data is None:
+            return None
+        options = parse_filter_options(data, int(category_id))
+        with _CATEGORY_OPTIONS_LOCK:
+            _CATEGORY_OPTIONS[key] = options
+        return options
+
+    def category_search(
+        self,
+        keyword: str,
+        category_id: int,
+        filters: Optional[Mapping[Union[int, str], ValueSpec]] = None,
+        *,
+        manufacturers: Sequence[str] = (),
+        min_stock: int = 0,
+        limit: int = 50,
+    ) -> CategorySearchResult:
+        """Active parts in leaf category *category_id* matching *keyword*
+        (keep it short: ``"header"``, ``"capacitor"``), filtered by
+        *filters* (parameter name or id → wanted value, see
+        :data:`kicadtools.dkfilters.ValueSpec`), by *manufacturers* (name
+        prefixes) and by *min_stock*, cheapest first, up to *limit* (at most
+        50) hits.
+
+        Two calls the first time a (category, keyword) pair is searched in the
+        session (options, then the search), one after. When a wanted filter
+        has no ID in the options the search is not made and the result lists
+        it under ``unmatched``. Failures give an empty result with
+        ``error`` set."""
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return CategorySearchResult([], 0, None, error="no keyword")
+        if not self.configured:
+            return CategorySearchResult([], 0, None, error="DigiKey not configured")
+        options = self.category_filters(keyword, category_id)
+        if options is None:
+            return CategorySearchResult([], 0, None, error=self.limiter.stopped or "options call failed")
+        resolved = resolve_filters(options, filters or {}, manufacturers)
+        if resolved.unmatched:
+            return CategorySearchResult([], 0, options, resolved, resolved.unmatched)
+        data = self._search_raw(
+            search_body(keyword, category_id, resolved, min_stock=min_stock, limit=limit),
+            f"{keyword} (category {category_id})",
+        )
+        if data is None:
+            return CategorySearchResult([], 0, options, resolved, error=self.limiter.stopped or "search call failed")
+        products = []
+        seen = set()
+        for raw in list(data.get("ExactMatches") or []) + list(data.get("Products") or []):
+            if not isinstance(raw, dict):
+                continue
+            product = _parse_product(raw)
+            key = _norm_mpn(product.mpn or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            products.append(product)
+        try:
+            total = int(data.get("ProductsCount") or 0)
+        except (TypeError, ValueError):
+            total = len(products)
+        return CategorySearchResult(products, total, options, resolved)
 
     def mpn_for(self, digikey_pn: str) -> Optional[str]:
         """Return the manufacturer part number for *digikey_pn*, or ``None``.

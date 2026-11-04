@@ -546,6 +546,11 @@ Decisions from the review of the first build (2026-10-29):
      confirm only the hit the user picks);
    - scraping the DigiKey product page instead of the API. Check DigiKey's
      terms of use and bot protection before relying on it.
+   - 2026-11-03: the limits are 120 a minute and 1000 a day. A shared
+     limiter now spaces calls 0.6 s apart, stops at 50 left for the day and
+     handles 429 (`THT_PLAN.md`, step 4 as built). Caching DigiKey answers
+     between runs is still open; four-board live checks still use a few
+     hundred of the 1000.
 8. **Zero-ohm resistors** (2026-10-30): a Value of `0` reads as "not a
    resistance", since a value of zero cannot be matched within 0.1 %. Jumpers
    need an exact-zero match and no tolerance.

@@ -170,6 +170,53 @@ manufacturers=(), min_stock, limit)`: one call returns the hits and the
 category's filter options. Value names are mapped to IDs from those options,
 which are cached per category for the session.
 
+### Step 4 — as built (2026-11-03)
+
+**Rate limit.** DigiKey's Product Information API allows 120 calls a minute
+and 1000 a day per application ([Shared Concepts](https://developer.digikey.com/documentations));
+every response carries `x-ratelimit-limit: 1000` and `x-ratelimit-remaining`
+(no per-minute header was sent). Over a limit DigiKey answers 429 with
+`Retry-After`. `suppliers.DigiKeyRateLimiter`, one per process
+(`DIGIKEY_LIMITER`, thread-safe, used by every `DigiKeyClient` for
+`product_for`, `keyword_search` and the category search):
+
+- calls at least 0.6 s apart (100 a minute, `DIGIKEY_PER_MINUTE`);
+- reads `x-ratelimit-remaining` from each response and stops all DigiKey
+  calls for the rest of the process when 50 or fewer are left
+  (`DIGIKEY_DAILY_RESERVE`), with a printed warning;
+- on 429 waits `Retry-After` and retries once when it is 60 s or less, else
+  stops;
+- `status()` gives a one-line count ("DigiKey: 4 call(s) this session, 994
+  of 1000 left today"). Not shown in the Cockpit yet.
+
+Tests run with a fresh unspaced limiter and with the DigiKey credentials
+removed from the environment (`tests/conftest.py`), so no test reaches the
+real API.
+
+**Filtered search.** `src/kicadtools/dkfilters.py` (no I/O): parses a
+category's `FilterOptions` into `CategoryFilters`, matches wanted values per
+parameter (names without case, numbers against the mm figure in
+`0.100" (2.54mm)` or a plain number, predicates, lists), manufacturers by
+whole-word name prefix without accents (`Wurth` → `Würth Elektronik`, `TE` →
+`TE Connectivity …` but not `Technetix`), and builds the request body.
+`DigiKeyClient.category_search(keyword, category_id, filters, *,
+manufacturers, min_stock, limit)` returns a `CategorySearchResult`
+(products cheapest first, total, options, `unmatched`, `error`).
+
+- The options are cached for the session per (category, keyword): DigiKey's
+  options depend on the keyword too. First search of a pair: 2 calls; later:
+  1.
+- A wanted value with no ID is not dropped: the search is not made and the
+  result lists it under `unmatched`, since the search would be broader than
+  asked.
+- Mounting Type gives the orientation: vertical = "Through Hole",
+  horizontal = "Through Hole, Right Angle".
+- Live check (2026-11-03, 4 calls), male headers, in stock ≥ 100, seven
+  makers: 1×4 vertical 172 hits (Sullins `PREC004SAAN-RC`, $0.10); 1×6 right
+  angle 100 (`PREC006SBAN-M71RC`); 2×5 vertical 216 (`PREC005DAAN-RC`). The
+  plan's earlier 213 for 1×4 had no Contact Type or Connector Type filter.
+- Tests: `tests/test_dkfilters.py`, `tests/test_digikey_limiter.py`.
+
 ### Step 5 — header search and the run's series
 
 1. The first header group in a run searches category 314 (or the socket
