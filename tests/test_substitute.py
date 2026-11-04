@@ -77,9 +77,9 @@ def test_spec_from_jlcpcb_attributes():
     assert spec.package == "0603" and spec.package_source == "footprint"
     shown = {c.label: c.shown for c in spec.constraints}
     assert shown == {"Capacitance": "100nF", "Voltage": "≥ 25V",
-                     "Dielectric": "X7R", "Tolerance": "≤ 10%"}
+                     "Dielectric": "X7R or X8R", "Tolerance": "≤ 10%"}
     assert all(c.source == "current part (JLCPCB)" for c in spec.constraints)
-    assert spec.keywords() == ["100nF 0603 X7R"]
+    assert spec.keywords() == ["100nF 0603 X7R", "100nF 0603 X8R"]
 
 
 def test_spec_from_digikey_parameters_uses_digikey_names():
@@ -144,8 +144,8 @@ def test_dielectric_upgrades_from_current_part_but_not_from_intent():
                       part_attrs={"Capacitance": "4.7uF", "Voltage Rating": "16V",
                                   "Temperature Coefficient": "X5R"})
     diel = next(c for c in spec.constraints if c.label == "Dielectric")
-    assert diel.choices == ("X5R", "X7R")
-    assert spec.keywords() == ["4.7uF 0603 X5R", "4.7uF 0603 X7R"]
+    assert diel.choices == ("X5R", "X7R", "X8R")
+    assert spec.keywords() == ["4.7uF 0603 X5R", "4.7uF 0603 X7R", "4.7uF 0603 X8R"]
 
     intent = _intent(**{"Intent:Type": "capacitor", "Value": "4.7u", "Voltage:Min": "16V",
                         "Class:Preferred": "X5R"})
@@ -228,7 +228,7 @@ def test_search_uses_current_jlcpcb_part():
         footprint=CAP_FP, lcsc="C0", mpn="M", digikey_pn="D", needed=50,
         part_lookup={"C0": current}.get, search=search, digikey=dk,
     )
-    assert searched == ["100nF 0603 X7R"]
+    assert searched == ["100nF 0603 X7R", "100nF 0603 X8R"]
     assert [c.part.lcsc for c in result.candidates] == ["C1"]
     assert dk.calls == []  # JLCPCB had attributes, so DigiKey wasn't asked
 

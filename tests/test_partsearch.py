@@ -363,7 +363,7 @@ def test_database_rejected_mpn_dropped():
 @pytest.mark.parametrize("part,reason", [
     (_jlc(cap="10nF"), "JLCPCB capacitance 10nF, need 100nF"),
     (_jlc(volts="10V"), "JLCPCB rating 10V, need at least 16V"),
-    (_jlc(diel="X5R"), "JLCPCB dielectric X5R is not one of X7R"),
+    (_jlc(diel="X5R"), "JLCPCB dielectric X5R is not one of X7R, X8R"),
     (_jlc(tol="±20%"), "JLCPCB tolerance 20%, need at most 10%"),
     (_jlc(package="0805"), "JLCPCB package '0805', need 0603"),
     (_jlc(drop=("Capacitance",)), "JLCPCB lists no Capacitance"),
@@ -423,7 +423,7 @@ def test_two_code_dielectric_matches_either():
     (_dk(status=None), "DigiKey status 'unknown'"),
     (_dk(cap="1 µF"), "DigiKey capacitance 1uF, need 100nF"),
     (_dk(volts="10V"), "DigiKey rating 10V, need at least 16V"),
-    (_dk(diel="X5R"), "DigiKey dielectric X5R is not one of X7R"),
+    (_dk(diel="X5R"), "DigiKey dielectric X5R is not one of X7R, X8R"),
     (_dk(tol="±20%"), "DigiKey tolerance 20%, need at most 10%"),
     (_dk(package="0805 (2012 Metric)"),
      "DigiKey package '0805 (2012 Metric)', need 0603"),
@@ -971,7 +971,7 @@ def test_assess_current_part_passing_listed_first_no_search():
     # Only the MPN lookup at JLCPCB; no keyword search.
     assert jlc.searches == [TDK]
     assert res.requirement.rating_min == Sourced(16.0, PART)
-    assert res.requirement.dielectrics == Sourced(("X6S", "X7R"), PART)
+    assert res.requirement.dielectrics == Sourced(("X6S",), PART)
     assert res.existing.current is not None
     assert res.rejected == []
 

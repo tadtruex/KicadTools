@@ -365,6 +365,17 @@ def _rating(ptype: PartType, intent: Any, defaults: Mapping[str, str],
     return Sourced(None, UNSET if ptype.rating_required else ANY)
 
 
+def allowed_classes(ptype: PartType, codes: Sequence[str]) -> Tuple[str, ...]:
+    """The classes a part may have to meet a requirement whose class field
+    holds *codes*: each code and the classes that dominate it
+    (:attr:`~kicadtools.parttypes.PartType.class_upgrades`; X5R -> X5R, X7R,
+    X8R; Semi-Shielded -> Semi-Shielded, Shielded), whatever the field's
+    source (stated on the schematic, a default, the part or the
+    Description). The database lookup and the supplier checks use this; the
+    field itself keeps the codes as stated."""
+    return _upgraded(ptype, codes)
+
+
 def _upgraded(ptype: PartType, codes: Sequence[str]) -> Tuple[str, ...]:
     """Each normalized code in *codes* followed by its accepted upgrades
     (:attr:`~kicadtools.parttypes.PartType.class_upgrades`: X5R -> X5R, X7R;
@@ -382,23 +393,25 @@ def _dielectrics(ptype: PartType, intent: Any, nominal: Optional[float],
                  description: DescriptionEvidence,
                  part: Optional[PartEvidence]) -> Sourced:
     """The class field: ``Class:Preferred`` / ``Shielding:Preferred``, else
-    the existing part's class, else the description's (each with its
-    upgrades, X5R -> X5R, X7R), else the default: ``cap.dielectric.<band>``
+    the existing part's class, else the description's, else the default: ``cap.dielectric.<band>``
     for the capacitance, ``ind.shielding`` for an inductor; unset when none is
     available, and always for a type without a class. A stated value is
     tagged ``schematic`` even when it holds no code, so it is never replaced
-    by a default."""
+    by a default. The codes are kept as read: a part of a better class
+    (X7R for X5R) meets the field when matching (:func:`allowed_classes`)."""
     if not ptype.has_class:
         return Sourced((), UNSET)
     stated = ptype.class_text(intent)
     if stated:
         return Sourced(_codes(ptype, stated), SCHEMATIC)
+    # The codes as read; the better classes are allowed when matching
+    # (allowed_classes), whatever the source.
     if part is not None and part.dielectrics:
-        codes = _upgraded(ptype, part.dielectrics)
+        codes = _codes(ptype, part.dielectrics)
         if codes:
             return Sourced(codes, PART)
     if description.dielectrics:
-        codes = _upgraded(ptype, description.dielectrics)
+        codes = _codes(ptype, description.dielectrics)
         if codes:
             return Sourced(codes, DESCRIPTION)
     if ptype.class_setting:

@@ -55,6 +55,13 @@ to-do list. State on 2026-11-03:
   pad, and `ECG/Library/footprints.pretty/CP_20_10_ADI_NOTH.kicad_mod` has 20
   pads and none. Check the datasheet's exposed-pad recommendation.
 
+## Class upgrades from every source (2026-11-04)
+
+A stated or default dielectric (or shielding) now means "this or better" in
+the database and supplier searches, as a class read from the part or the
+Description already did; X8R was added to the upgrade table.
+`CAPACITOR_PLAN.md`, revision 6. Committed, not pushed.
+
 ## Through-hole part assignment: steps 1–6, 8 and 9 built (2026-11-04)
 
 `THT_PLAN.md` holds the decisions, the board survey, the DigiKey API test and

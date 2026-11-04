@@ -585,7 +585,7 @@ def test_hand_built_library_value_with_description():
     assert r.nominal_source == SCHEMATIC
     assert r.package == Sourced("0805", SCHEMATIC)
     assert r.rating_min == Sourced(25.0, DESCRIPTION)
-    assert r.dielectrics == Sourced(("X5R", "X7R"), DESCRIPTION)
+    assert r.dielectrics == Sourced(("X5R",), DESCRIPTION)
     assert r.conflicts == () and r.searchable
 
 
@@ -595,7 +595,7 @@ def test_description_only_fields():
     assert r.nominal_source == DESCRIPTION
     assert r.package == Sourced("1210", DESCRIPTION)
     assert r.rating_min == Sourced(25.0, DESCRIPTION)
-    assert r.dielectrics == Sourced(("X5R", "X7R"), DESCRIPTION)
+    assert r.dielectrics == Sourced(("X5R",), DESCRIPTION)
     assert r.tolerance_max_pct == Sourced(10.0, DEFAULT)
     assert r.searchable
 
@@ -619,7 +619,7 @@ def test_part_only_fields():
     assert r.nominal_source == PART
     assert r.package == Sourced("1210", PART)
     assert r.rating_min == Sourced(50.0, PART)
-    assert r.dielectrics == Sourced(("X5R", "X7R"), PART)
+    assert r.dielectrics == Sourced(("X5R",), PART)
     assert r.tolerance_max_pct == Sourced(10.0, PART)
     assert r.searchable
 
@@ -647,7 +647,7 @@ def test_part_beats_description_for_voltage_dielectric_tolerance():
     desc = _ev("10uF, 25V, X6S, 1210")
     r = _rq("10uF", description=desc, part=PART_10U)
     assert r.rating_min == Sourced(50.0, PART)
-    assert r.dielectrics == Sourced(("X5R", "X7R"), PART)
+    assert r.dielectrics == Sourced(("X5R",), PART)
     assert r.tolerance_max_pct == Sourced(10.0, PART)
     # part beats description for package
     assert r.package == Sourced("1210", PART)
@@ -678,21 +678,33 @@ def test_remembered_voltage_below_evidence():
     assert _rq(defaults=d).rating_min == Sourced(16.0, DEFAULT)
 
 
-@pytest.mark.parametrize("code,expected", [
-    ("X5R", ("X5R", "X7R")),
-    ("X6S", ("X6S", "X7R")),
-    ("X7S", ("X7S", "X7R")),
-    ("X7R", ("X7R",)),
-    ("C0G", ("C0G", "NP0")),
-    ("NP0", ("NP0", "C0G")),
-    ("NPO", ("NP0", "C0G")),
-    ("Y5V", ("Y5V",)),
+@pytest.mark.parametrize("code,kept,allowed", [
+    ("X5R", ("X5R",), ("X5R", "X7R", "X8R")),
+    ("X6S", ("X6S",), ("X6S", "X7R", "X8R")),
+    ("X7S", ("X7S",), ("X7S", "X7R", "X8R")),
+    ("X7R", ("X7R",), ("X7R", "X8R")),
+    ("C0G", ("C0G",), ("C0G", "NP0")),
+    ("NP0", ("NP0",), ("NP0", "C0G")),
+    ("NPO", ("NP0",), ("NP0", "C0G")),
+    ("Y5V", ("Y5V",), ("Y5V",)),
 ])
-def test_dielectric_upgrades_from_part_and_description(code, expected):
+def test_dielectric_kept_as_read_and_upgraded_when_matching(code, kept, allowed):
+    """The field keeps the code as read from the part or the Description; a
+    better class meets it when matching (allowed_classes)."""
+    from kicadtools.requirement import allowed_classes
     p = _rq(part=PartEvidence(label="p", dielectrics=(code,)))
-    assert p.dielectrics == Sourced(expected, PART)
+    assert p.dielectrics == Sourced(kept, PART)
     d = _rq(description=_ev(f"0.1uF {code}"))
-    assert d.dielectrics == Sourced(expected, DESCRIPTION)
+    assert d.dielectrics == Sourced(kept, DESCRIPTION)
+    assert allowed_classes(p.ptype, p.dielectrics.value) == allowed
+
+
+def test_stated_and_default_classes_are_upgraded_when_matching():
+    from kicadtools.parttypes import CAPACITOR, INDUCTOR
+    from kicadtools.requirement import allowed_classes
+    assert allowed_classes(CAPACITOR, ("X5R",)) == ("X5R", "X7R", "X8R")
+    assert allowed_classes(CAPACITOR, ("X7R", "X5R")) == ("X7R", "X8R", "X5R")
+    assert allowed_classes(INDUCTOR, ("Semi-Shielded",)) == ("Semi-Shielded", "Shielded")
 
 
 def test_multiple_dielectrics_expanded_in_order_without_repeats():
@@ -825,7 +837,7 @@ def test_member_and_group_description():
     assert g.description == DescriptionEvidence(
         nominal=pytest.approx(4.7e-6), rating=16.0,
         dielectrics=("X6S",), package="0603")
-    assert g.requirement.dielectrics == Sourced(("X6S", "X7R"), DESCRIPTION)
+    assert g.requirement.dielectrics == Sourced(("X6S",), DESCRIPTION)
 
 
 def test_requirement_with_part():
@@ -947,10 +959,10 @@ def test_same_capacitance_in_other_units_is_not_a_conflict():
 # dielectrics, conflicts).
 @pytest.mark.parametrize("value,desc,farads,pkg,volts,diel,conflicts", [
     ("C_4p7U", "4.7uF, 16V, X6S 603", 4.7e-6, Sourced("0603", DESCRIPTION),
-     Sourced(16.0, DESCRIPTION), Sourced(("X6S", "X7R"), DESCRIPTION), ()),
+     Sourced(16.0, DESCRIPTION), Sourced(("X6S",), DESCRIPTION), ()),
     ("C_10U_805", "10uF, 25V, X5R, 805 package", 10e-6,
      Sourced("0805", SCHEMATIC), Sourced(25.0, DESCRIPTION),
-     Sourced(("X5R", "X7R"), DESCRIPTION), ()),
+     Sourced(("X5R",), DESCRIPTION), ()),
     ("100nF", "Unpolarized capacitor, small symbol", 100e-9,
      Sourced("0603", DEFAULT), Sourced(None, UNSET), Sourced(("X7R",), DEFAULT), ()),
     ("10uF", "Polarized capacitor, small US symbol", 10e-6,
@@ -964,7 +976,7 @@ def test_same_capacitance_in_other_units_is_not_a_conflict():
     ("1uF", "1uF, 25V - 50V", 1e-6, Sourced("0603", DEFAULT),
      Sourced(25.0, DESCRIPTION), Sourced(("X7R",), DEFAULT), ()),
     ("C_22U_1210", "22uF, X5R, 25V, 1210", 22e-6, Sourced("1210", SCHEMATIC),
-     Sourced(25.0, DESCRIPTION), Sourced(("X5R", "X7R"), DESCRIPTION), ()),
+     Sourced(25.0, DESCRIPTION), Sourced(("X5R",), DESCRIPTION), ()),
     ("C_10U_1210", "10uF, 50V, X7R, 1210 package", 10e-6,
      Sourced("1210", SCHEMATIC), Sourced(50.0, DESCRIPTION),
      Sourced(("X7R",), DESCRIPTION), ()),

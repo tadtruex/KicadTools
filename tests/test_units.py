@@ -201,9 +201,10 @@ def test_parse_cap_description_value_digits_not_a_package():
 
 
 @pytest.mark.parametrize("code,upgrades", [
-    ("X5R", ("X5R", "X7R")), ("X6S", ("X6S", "X7R")), ("X7S", ("X7S", "X7R")),
-    ("X7R", ("X7R",)), ("C0G", ("C0G", "NP0")), ("NP0", ("NP0", "C0G")),
-    ("COG", ("C0G", "NP0")), ("x5r", ("X5R", "X7R")), ("Y5V", ("Y5V",)),
+    ("X5R", ("X5R", "X7R", "X8R")), ("X6S", ("X6S", "X7R", "X8R")),
+    ("X7S", ("X7S", "X7R", "X8R")), ("X7R", ("X7R", "X8R")),
+    ("C0G", ("C0G", "NP0")), ("NP0", ("NP0", "C0G")),
+    ("COG", ("C0G", "NP0")), ("x5r", ("X5R", "X7R", "X8R")), ("Y5V", ("Y5V",)),
     ("X8R", ("X8R",)), ("", ()),
 ])
 def test_dielectric_upgrades(code, upgrades):

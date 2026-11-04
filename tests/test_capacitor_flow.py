@@ -330,7 +330,7 @@ def test_capacitor_flow_existing_part(tmp_path):
     assert first.package.value == "0805" and first.package.source == SCHEMATIC
     assert first.rating_min.value == pytest.approx(25.0)
     assert first.rating_min.source == DESCRIPTION
-    assert first.dielectrics.value == ("X5R", "X7R")
+    assert first.dielectrics.value == ("X5R",)
     assert first.dielectrics.source == DESCRIPTION
     assert first.conflicts == ()
     assert first.searchable
@@ -349,7 +349,7 @@ def test_capacitor_flow_existing_part(tmp_path):
     req = result.requirement
     assert req.rating_min.value == pytest.approx(25.0)
     assert req.rating_min.source == PART
-    assert req.dielectrics.value == ("X5R", "X7R") and req.dielectrics.source == PART
+    assert req.dielectrics.value == ("X5R",) and req.dielectrics.source == PART
     assert req.tolerance_max_pct.value == pytest.approx(10.0)
     assert req.tolerance_max_pct.source == PART
     assert [c.source for c in result.candidates] == [CURRENT]
@@ -402,7 +402,7 @@ def test_capacitor_flow_existing_part(tmp_path):
     assert m.props.get("Description") == TY_DESCRIPTION
     assert m.props.get("Footprint") == "Capacitor_SMD:C_0805_2012Metric"
     assert m.props.get("Voltage:Min") == "25V"
-    assert m.props.get("Class:Preferred") == "X5R, X7R"
+    assert m.props.get("Class:Preferred") == "X5R"  # read from the part; X5R or better
     assert m.props.get("Tolerance:Preferred") == "10%"
 
     again = reloaded.requirement

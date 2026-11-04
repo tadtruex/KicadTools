@@ -391,7 +391,7 @@ def test_requirement_from_description_and_part_is_written():
     assert req.tolerance_max_pct == Sourced(10.0, PART)
     props = assignment_plan(group, req, CAND)[SRC]["u1"]
     assert props["Voltage:Min"] == "25V"
-    assert props["Class:Preferred"] == "X5R, X7R"
+    assert props["Class:Preferred"] == "X5R"  # X5R or better
     assert props["Tolerance:Preferred"] == "10%"
 
 

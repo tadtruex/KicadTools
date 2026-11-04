@@ -94,6 +94,7 @@ from kicadtools.requirement import (
     PartRequirement,
     RequirementGroup,
     Sourced,
+    allowed_classes,
 )
 from kicadtools.suppliers import (
     DigiKeyProduct,
@@ -266,9 +267,8 @@ def _check_params(
     t = req.ptype
     want = float(req.nominal)
     want_r = req.rating_min.value
-    allowed: Tuple[str, ...] = tuple(
-        code for d in (req.dielectrics.value or ()) for code in t.class_tokens(d)
-    )
+    # Each required class or a better one (X5R or X7R or X8R).
+    allowed: Tuple[str, ...] = allowed_classes(t, tuple(req.dielectrics.value or ()))
     max_tol: Optional[float] = req.tolerance_max_pct.value
 
     raw = supplier_value(get, names.nominal)
@@ -674,7 +674,7 @@ def _find(
         nominal=float(req.nominal),
         package=req.package.value,
         rating_min=req.rating_min.value,
-        dielectrics=tuple(req.dielectrics.value or ()),
+        dielectrics=allowed_classes(req.ptype, tuple(req.dielectrics.value or ())),
         tolerance_max_pct=req.tolerance_max_pct.value,
     )
     for hit in hits:

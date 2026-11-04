@@ -312,9 +312,15 @@ point before a unit letter (`C_4p7U` is 4.7 µF, `C_P1U` is 0.1 µF), and an
 optional size suffix (`C_22U_1210`). The Description is read for its first
 capacitance, its voltages, every dielectric code and a standalone chip size
 (`10uF, 25V, X5R, 805 package`); a generic Description such as `Unpolarized
-capacitor, small symbol` provides none. A dielectric from the existing part or
-the Description admits its upgrades as well: X5R, X6S and X7S also accept
-X7R, and C0G and NP0 accept each other.
+capacitor, small symbol` provides none. A dielectric means that dielectric or
+a better one, from any source (stated on the schematic, the default, the
+existing part or the Description): X5R, X6S and X7S also accept X7R and X8R,
+X7R accepts X8R, and C0G and NP0 accept each other. X6S and X7S are not
+upgrades of X5R, since their change over temperature is looser (±22 %
+against ±15 %). The upgrades apply when the parts database and the
+suppliers are searched; the field shows, and Save writes, the codes as read.
+An inductor's shielding works the same way: Semi-Shielded accepts
+Shielded.
 
 A resistor `Value` is read in plain form (`10K`, `4k7`, `4R7`, `1`, `10M` is
 10 MΩ) and in library form (`R_10K`, `R_49p9K` with `p` as the decimal point,

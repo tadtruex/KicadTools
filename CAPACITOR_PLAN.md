@@ -507,6 +507,29 @@ BarrelJackAdapter, MotorDriver and NeoPMOD):
 - NeoPMOD L1 (`1u`, no footprint): needs a package. With `0805`, five TDK and
   Murata candidates.
 
+## Revision 6: class upgrades from every source (2026-11-04)
+
+User decision: a field with a range (rating, tolerance, class) is met by a
+part that is at least as good. Rating (at least) and tolerance (at most)
+already worked that way in the database and supplier searches; the class
+did only when it came from the existing part or the Description.
+
+- `requirement.allowed_classes(ptype, codes)`: each code and the classes
+  that dominate it. The database lookup (`find_parts`) and the JLCPCB and
+  DigiKey checks (`_check_params`) use it, so a stated or default class is
+  "this or better" too.
+- The class field keeps the codes as read from every source (`X5R`, not
+  `X5R, X7R`), so the cell shows, and Save writes, `X5R`; earlier writes
+  of `X5R, X7R` read the same.
+- Upgrade table (`units._DIELECTRIC_UPGRADES`): X8R added above X7R
+  (X5R, X6S, X7S -> X7R, X8R; X7R -> X8R). X6S and X7S are not upgrades of
+  X5R (±22 % against ±15 %). C0G is not offered for class-2 codes.
+- The LCSC tab's substitute search (`substitute.py`) uses the same table, so
+  it now also searches X8R.
+- On the user's database and four boards no group gains a stored part from
+  the change today (the stored parts are X5R and X7R against X5R or X7R
+  requirements already); it applies to parts accepted from here on.
+
 ## TBD (after the main loop is working)
 
 Decisions from the review of the first build (2026-10-29):

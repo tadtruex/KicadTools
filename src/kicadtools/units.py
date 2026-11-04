@@ -216,11 +216,15 @@ def dielectric_tokens(text: object) -> Tuple[str, ...]:
 # tighter capacitance change over a wider temperature range. X7R (±15 %,
 # −55…125 °C) dominates X5R (±15 %, −55…85 °C), X6S (±22 %, −55…105 °C) and
 # X7S (±22 %, −55…125 °C). C0G and NP0 are two names for one class.
+# Each code and the codes that dominate it: the same or a wider temperature
+# range with the same or a tighter change (R ±15 % beats S ±22 %). X6S and
+# X7S are not upgrades of X5R: their change is looser.
 _DIELECTRIC_UPGRADES: Dict[str, Tuple[str, ...]] = {
-    "X5R": ("X5R", "X7R"),
-    "X6S": ("X6S", "X7R"),
-    "X7S": ("X7S", "X7R"),
-    "X7R": ("X7R",),
+    "X5R": ("X5R", "X7R", "X8R"),
+    "X6S": ("X6S", "X7R", "X8R"),
+    "X7S": ("X7S", "X7R", "X8R"),
+    "X7R": ("X7R", "X8R"),
+    "X8R": ("X8R",),
     "C0G": ("C0G", "NP0"),
     "NP0": ("NP0", "C0G"),
 }
