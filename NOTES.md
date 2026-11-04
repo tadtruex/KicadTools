@@ -72,16 +72,17 @@ without"). `gui/sorting.py` holds `SortItem` (sorts by
 prefixes, then natural order) and the view-row to data-row map the candidate
 dialogs use for selection, clicks and Reject. Covered: the passive, IC,
 through-hole, substitute and Autopopulate tables and the values popup tree.
-The main window's proxy uses the same key.
+The main window's proxy uses the same key. Committed with Autopopulate as
+c8b94c7 and pushed on 2026-11-04. Suite 1661 passing.
 
 ## Class upgrades from every source (2026-11-04)
 
 A stated or default dielectric (or shielding) now means "this or better" in
 the database and supplier searches, as a class read from the part or the
 Description already did; X8R was added to the upgrade table.
-`CAPACITOR_PLAN.md`, revision 6. Committed as d172a00, not pushed. Rows now
-group stated ratings, tolerance and class by meaning (`X5R` and `X5R, X7R`
-share a row); committed, not pushed.
+`CAPACITOR_PLAN.md`, revision 6. Committed as d172a00. Rows now group
+stated ratings, tolerance and class by meaning (`X5R` and `X5R, X7R` share a
+row), committed as 4bb57dc. Both pushed on 2026-11-04.
 
 ## Through-hole part assignment: steps 1–6, 8 and 9 built (2026-11-04)
 
@@ -92,14 +93,14 @@ as b349980; step 4 (DigiKey rate limiter and filtered search,
 `dkfilters.py`, `suppliers.py`) as e668722; step 5 (header and socket search
 and the run's series, `headersearch.py`) as 11e9a5f, all pushed. Step 6
 (part-named footprints, `namedsearch.py`) and the package-name fix in
-`thtfootprint.py` were committed on 2026-11-04 as c5bc41d, not pushed. Step 8 (parts
-database, `thtdb.py`, table `tht` in `partsdb.py`) was committed on
-2026-11-04, not pushed. Step 9 (Cockpit: through-hole rows,
-`ThtAssignDialog`, `thtassign.py`, DigiKey call count in the status bar,
-`hdr.manufacturers` setting) was committed on 2026-11-04, not pushed.
+`thtfootprint.py` are committed as c5bc41d. Step 8 (parts database,
+`thtdb.py`, table `tht` in `partsdb.py`) is e66e4ae. Step 9 (Cockpit:
+through-hole rows, `ThtAssignDialog`, `thtassign.py`, DigiKey call count in
+the status bar, `hdr.manufacturers` setting, solder jumpers and net ties left
+out) is 3b689cc. All pushed on 2026-11-04.
 Next: step 10 (your live check in the Cockpit on BarrelJackAdapter, SX1509,
 MiDi and Breakout), then step 7 (through-hole passives). See the "as built"
-sections in the plan. Suite 1622 passing.
+sections in the plan.
 - The next Cockpit open adds the `tht` table to `~/Code/Boards/parts.sqlite`
   (no migration, every row kept; checked on a copy).
 
