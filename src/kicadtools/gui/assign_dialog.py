@@ -70,7 +70,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QTableWidget,
-    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -79,6 +78,16 @@ from PySide6.QtWidgets import (
 
 from kicadtools.assign import assignment_plan
 from kicadtools.evidence import ExistingPart
+from kicadtools.gui.sorting import (
+    SortItem,
+    SortTreeItem,
+    data_row,
+    filling,
+    make_sortable,
+    remove_data_row,
+    selected_data_row,
+    view_row,
+)
 from kicadtools.partsearch import (
     CURRENT,
     DATABASE,
@@ -319,6 +328,7 @@ class FacetPopup(QDialog):
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["Value", "Parts"])
         self._tree.itemDoubleClicked.connect(self._double_clicked)
+        make_sortable(self._tree)
         layout = QVBoxLayout(self)
         layout.addWidget(self._note)
         layout.addWidget(self._tree)
@@ -331,16 +341,17 @@ class FacetPopup(QDialog):
             "listed manufacturers (DigiKey not checked). Each count meets the "
             "other fields. Double-click a value to use it."
         )
-        self._tree.clear()
-        for key, values in rows:
-            top = QTreeWidgetItem([facet_title(key, ptype), str(sum(n for _, n in values))])
-            top.setData(0, Qt.UserRole, None)
-            for text, n in values:
-                child = QTreeWidgetItem([text, str(n)])
-                child.setData(0, Qt.UserRole, key)
-                top.addChild(child)
-            self._tree.addTopLevelItem(top)
-            top.setExpanded(True)
+        with filling(self._tree):
+            self._tree.clear()
+            for key, values in rows:
+                top = SortTreeItem([facet_title(key, ptype), str(sum(n for _, n in values))])
+                top.setData(0, Qt.UserRole, None)
+                for text, n in values:
+                    child = SortTreeItem([text, str(n)])
+                    child.setData(0, Qt.UserRole, key)
+                    top.addChild(child)
+                self._tree.addTopLevelItem(top)
+                top.setExpanded(True)
         self._tree.resizeColumnToContents(0)
 
     def _double_clicked(self, item: QTreeWidgetItem, _col: int) -> None:
@@ -594,6 +605,7 @@ class AssignDialog(QDialog):
         self._table.cellDoubleClicked.connect(self._double_clicked)
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._context_menu)
+        make_sortable(self._table)
 
         self._buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self._search_btn = self._buttons.addButton("Search suppliers", QDialogButtonBox.ActionRole)
@@ -850,23 +862,24 @@ class AssignDialog(QDialog):
             self._status.setToolTip("")
 
         self._table.clearSelection()
-        self._table.setRowCount(len(self._candidates))
-        link = self.palette().link().color()
-        for r, cand in enumerate(self._candidates):
-            short = stock_shortfall(cand, self.needed)
-            for col, text in enumerate(candidate_cells(cand)):
-                item = QTableWidgetItem(text)
-                if short:
-                    item.setBackground(_SHORT_TINT)
-                    item.setToolTip(short)
-                url = self._url(cand, col)
-                if url:
-                    item.setForeground(link)
-                    item.setToolTip(url)
-                self._table.setItem(r, col, item)
+        with filling(self._table):
+            self._table.setRowCount(len(self._candidates))
+            link = self.palette().link().color()
+            for r, cand in enumerate(self._candidates):
+                short = stock_shortfall(cand, self.needed)
+                for col, text in enumerate(candidate_cells(cand)):
+                    item = SortItem(text)
+                    if short:
+                        item.setBackground(_SHORT_TINT)
+                        item.setToolTip(short)
+                    url = self._url(cand, col)
+                    if url:
+                        item.setForeground(link)
+                        item.setToolTip(url)
+                    self._table.setItem(r, col, item)
         if self._candidates:
             current = [r for r, c in enumerate(self._candidates) if c.source == CURRENT]
-            self._table.selectRow(current[0] if current else 0)
+            self._table.selectRow(view_row(self._table, current[0] if current else 0))
         self._selection_changed()
         self._values_btn.setEnabled(bool(result.facets))
         self._show_facets()
@@ -925,12 +938,14 @@ class AssignDialog(QDialog):
         return None
 
     def _cell_clicked(self, row: int, col: int) -> None:
+        row = data_row(self._table, row)
         if 0 <= row < len(self._candidates):
             url = self._url(self._candidates[row], col)
             if url:
                 QDesktopServices.openUrl(QUrl(url))
 
     def _double_clicked(self, row: int, col: int) -> None:
+        row = data_row(self._table, row)
         if col in (COL_LCSC, COL_DIGIKEY):
             return
         if 0 <= row < len(self._candidates):
@@ -938,9 +953,10 @@ class AssignDialog(QDialog):
 
     def _context_menu(self, pos) -> None:
         item = self._table.itemAt(pos)
-        if item is None or not 0 <= item.row() < len(self._candidates):
+        r = data_row(self._table, item.row()) if item is not None else -1
+        if not 0 <= r < len(self._candidates):
             return
-        cand = self._candidates[item.row()]
+        cand = self._candidates[r]
         menu = QMenu(self)
         act = menu.addAction(f"Reject {cand.mpn}")
         if menu.exec(self._table.viewport().mapToGlobal(pos)) is act:
@@ -951,7 +967,7 @@ class AssignDialog(QDialog):
         for r, c in enumerate(self._candidates):
             if c is candidate:
                 del self._candidates[r]
-                self._table.removeRow(r)
+                remove_data_row(self._table, r)
                 break
         self._selection_changed()
 
@@ -979,10 +995,7 @@ class AssignDialog(QDialog):
         return requirement_for(req, self._result, candidate)
 
     def _selected(self) -> Optional[Candidate]:
-        rows = self._table.selectionModel().selectedRows()
-        if len(rows) != 1:
-            return None
-        r = rows[0].row()
+        r = selected_data_row(self._table)
         return self._candidates[r] if 0 <= r < len(self._candidates) else None
 
     def _selection_changed(self) -> None:

@@ -55,6 +55,25 @@ to-do list. State on 2026-11-03:
   pad, and `ECG/Library/footprints.pretty/CP_20_10_ADI_NOTH.kicad_mod` has 20
   pads and none. Check the datasheet's exposed-pad recommendation.
 
+## Autopopulate (2026-11-04)
+
+**Autopopulate…** on the Parts tab offers stored parts for every unassigned
+row from the parts database only (`autopopulate.py`,
+`gui/autopopulate_dialog.py`), graded green (exact), orange (exceeds a
+stated field) or red (rests on a default or a footprint alone); the best
+match is the one with most uses, the others are in a drop-down; checked rows
+are queued with no supplier call. User decisions: tiers by fit and by
+source; one row per group with the other matches in a list.
+
+Every dialog table now sorts on a header click, as the main window's tabs did
+(user: "very poor form to have some forms with sortable columns and some
+without"). `gui/sorting.py` holds `SortItem` (sorts by
+`naturalsort.display_key`: numbers by value with commas, currency and SI
+prefixes, then natural order) and the view-row to data-row map the candidate
+dialogs use for selection, clicks and Reject. Covered: the passive, IC,
+through-hole, substitute and Autopopulate tables and the values popup tree.
+The main window's proxy uses the same key.
+
 ## Class upgrades from every source (2026-11-04)
 
 A stated or default dielectric (or shielding) now means "this or better" in

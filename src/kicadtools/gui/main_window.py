@@ -67,6 +67,7 @@ from kicadtools.gui.lcsc import (
     _COL_ROTATION,
 )
 from kicadtools.gui.assign_dialog import AssignDialog
+from kicadtools.gui.autopopulate_dialog import AutopopulateDialog
 from kicadtools.gui.ic_assign_dialog import IcAssignDialog
 from kicadtools.gui.tht_assign_dialog import ThtAssignDialog
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
@@ -87,10 +88,11 @@ from kicadtools.gui.parts import (
 )
 from kicadtools.gui.param_editor import ElectricalParamsDialog
 from kicadtools.gui.substitute_dialog import SubstituteDialog, describe_part
+from kicadtools.autopopulate import find_matches
 from kicadtools.headersearch import HEADER_MAKERS, HeaderRun
 from kicadtools.icrequirement import group_ics
 from kicadtools.mounting import BoardMounting
-from kicadtools.icsearch import MATCH, ic_assignment_plan
+from kicadtools.icsearch import MATCH, board_pads, ic_assignment_plan
 from kicadtools.naturalsort import natural_key
 from kicadtools.partrotation import PartRotationStore
 from kicadtools.partsdb import PartsDb
@@ -224,6 +226,15 @@ class MainWindow(QMainWindow):
 
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        bar = QHBoxLayout()
+        self.autopopulate_btn = QPushButton("Autopopulate…")
+        self.autopopulate_btn.setToolTip(
+            "Offer the parts already in the parts database for every unassigned row, "
+            "without asking a supplier.")
+        self.autopopulate_btn.clicked.connect(self._autopopulate)
+        bar.addWidget(self.autopopulate_btn)
+        bar.addStretch(1)
+        layout.addLayout(bar)
         layout.addWidget(self.parts_table)
         hint = QLabel(
             "Double-click a capacitor, resistor, inductor, IC or through-hole group to choose "
@@ -793,6 +804,65 @@ class MainWindow(QMainWindow):
         if cand is None or final_req is None:
             return
         self._accept_candidate(row, group, final_req, cand)
+
+    def _autopopulate(self) -> None:
+        """Offer stored parts for every unassigned row (no supplier call);
+        queue the ones the user checks."""
+        if self._parts_db is None or not self._records:
+            self.statusBar().showMessage("Open a schematic first (and the parts database).")
+            return
+        model = self.parts_model
+        open_rows = [r for r in range(model.rowCount()) if model.status(r) == STATUS_UNASSIGNED]
+        pads = board_pads(self._board)
+        rows = find_matches(model.groups(), self._parts_db, open_rows=open_rows,
+                            pad_count=pads.count if pads is not None else None)
+        if not rows:
+            self.statusBar().showMessage(
+                f"No stored part matches any of the {len(open_rows)} unassigned rows.")
+            return
+        dialog = AutopopulateDialog(model, rows, self)
+        accepted = dialog.exec() == QDialog.Accepted
+        chosen = dialog.chosen() if accepted else []
+        dialog.deleteLater()
+        done, failed = [], []
+        for row, match in chosen:
+            group = model.group_at(row)
+            why = self._queue_stored(row, group, match)
+            (failed if why else done).append(f"{', '.join(group.references)}: {why or match.mpn}")
+        if done:
+            self._mark_dirty()
+        msg = f"Autopopulate: {len(done)} row(s) queued"
+        if failed:
+            msg += f", {len(failed)} not: " + "; ".join(failed)
+        self.statusBar().showMessage(msg + (". Save to write them." if done else "."))
+
+    def _queue_stored(self, row: int, group, match) -> str:
+        """Queue a stored part for *row* without asking a supplier: the write
+        plan, the usage record and the queued choice. ``""`` when queued,
+        else why not."""
+        cand = match.candidate
+        try:
+            if is_tht(group):
+                req = group.requirement
+                plan = tht_assignment_plan(group, cand)
+            elif is_ic(group):
+                req = group.requirement
+                plan = ic_assignment_plan(group, cand)
+            else:
+                req = group.requirement
+                plan = assignment_plan(group, req, cand)
+        except ValueError as exc:
+            return str(exc)
+        try:
+            if self._board is not None:
+                self._parts_db.record_usage(match.part_id, board_label(self._board),
+                                            group.references)
+        except Exception as exc:  # noqa: BLE001
+            return f"parts database: {exc}"
+        self.parts_model.queue(row, req, cand, plan)
+        if is_tht(group) and req.family in (HEADER, SOCKET) and self._header_run is not None:
+            self._header_run.pick(cand.product, req.signature)
+        return ""
 
     def _assign_tht_group(self, row: int) -> None:
         """The through-hole counterpart of :meth:`_assign_group`."""

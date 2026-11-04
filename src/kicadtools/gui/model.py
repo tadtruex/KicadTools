@@ -18,17 +18,19 @@ from PySide6.QtCore import (
 )
 
 from kicadtools.intent import ElectricalIntent
-from kicadtools.naturalsort import natural_key  # re-exported for existing imports
+from kicadtools.naturalsort import display_key, natural_key  # natural_key re-exported
 
 
 class NaturalSortProxyModel(QSortFilterProxyModel):
-    """Proxy that sorts by :func:`natural_key` of each cell's display text."""
+    """Proxy that sorts by :func:`~kicadtools.naturalsort.display_key` of each
+    cell's display text (numbers by value, then natural order), as the dialog
+    tables do (:mod:`kicadtools.gui.sorting`)."""
 
     def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
         model = self.sourceModel()
         left_val = model.data(left, Qt.DisplayRole)
         right_val = model.data(right, Qt.DisplayRole)
-        return natural_key(left_val) < natural_key(right_val)
+        return display_key(left_val) < display_key(right_val)
 
 _COLUMNS = ["Accept", "Ref", "Status", "Type", "Footprint", "Description"]
 

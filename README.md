@@ -191,6 +191,12 @@ capacitors, resistors, inductors or ICs and records it in a local parts database
 stock for, and substitutes JLCPCB part numbers (see below). See `BOMCOCKPIT.md`
 for the full vision.
 
+Every table, on the tabs and in the dialogs, sorts on a header click. A cell
+that starts with a number sorts by its value (`1,234` after `987`, `$0.12`
+before `$0.5`, `100nF` before `10µF`); other text sorts in natural order (`C2`
+before `C10`). A table keeps its fill order until a header is clicked, and a
+dialog's new search results keep the column picked.
+
 ```bash
 pip install -e ".[dev,gui]"
 kicadtools-cockpit path/to/board.kicad_sch     # path is optional; File → Open too
@@ -478,6 +484,32 @@ remembered `cap.voltage_min` can't be searched until one is entered.
   canonical numbers under the canonical keys, which also corrects swapped
   `MPN` / `DigiKeyPN` fields and fills an empty `LCSC`.
 
+#### Autopopulate
+
+**Autopopulate…** above the Parts table offers the parts already in the
+parts database for every `unassigned` row, without asking a supplier (stock
+and price are not checked). Capacitors, resistors and inductors are looked
+up with their requirement (rating at least, class or better, tolerance at
+most), ICs by their MPN field and Value tokens, through-hole parts by their
+footprint signature. The dialog has an **Accept** check box in its first
+column, coloured by the selected match, then the Parts tab's columns, then a
+**Match** drop-down of the stored parts (most uses first):
+
+- green (exact): the part the symbol already names, an IC named exactly, or
+  a part whose rating, class and tolerance equal the stated ones;
+- orange (near): it meets the stated requirement but exceeds a field (25V
+  for 16V, X7R for X5R, 10% for 20%), or a part-named through-hole part
+  stored for the same footprint and Value;
+- red (less sure): the match rests on a default or unset field (rating,
+  class or tolerance not stated on the schematic, by the part or the
+  Description), or a header, socket or terminal block found by footprint
+  alone.
+
+Click the Accept header to sort by tier (exact first), the Match header to
+sort by the selected MPN. **Check green** checks the exact matches, **Check all** every row, **Clear**
+none. **Accept checked** queues each checked row as the assign dialog's
+Accept does (write plan and usage record) and **File → Save** writes them.
+
 #### ICs
 
 A part is an IC when its intent type is `ic`: `Intent:Type = ic`, or guessed
@@ -701,10 +733,11 @@ Test schematics live in `tests/data/`.
 - `src/kicadtools/namedsearch.py` — DigiKey search for through-hole parts whose footprint names the part
 - `src/kicadtools/thtdb.py` — through-hole parts in the parts database, found by footprint signature
 - `src/kicadtools/thtassign.py` — through-hole groups for the Parts tab, their search and write plan
+- `src/kicadtools/autopopulate.py` — parts-database matches for the open Parts-tab rows, graded exact, near or less sure
 - `src/kicadtools/cpl.py` — JLCPCB CPL centroid and rotation math (`cpl`)
 - `src/kicadtools/rotations.py` — per-footprint-family CPL rotation offsets
 - `src/kicadtools/partrotation.py` — per-LCSC CPL rotation overrides stored in SQLite
-- `src/kicadtools/naturalsort.py` — natural-sort key (R2 before R10)
+- `src/kicadtools/naturalsort.py` — natural-sort key (R2 before R10) and the table cell sort key (numbers by value)
 - `src/kicadtools/substitute.py` — parametric substitute search: spec, matching rules, ranking, `Alternates` merge
 - `src/kicadtools/units.py` — parse and format resistance, capacitance, voltage, tolerance and power; package and dielectric codes
 - `src/kicadtools/partsdb.py` — the SQLite parts database: accepted/rejected parts, supplier PNs, usage, settings
@@ -723,3 +756,5 @@ Test schematics live in `tests/data/`.
   - `parts.py` — Parts tab: requirement-group table model and the background candidate-search worker
   - `assign_dialog.py` — the "Assign Part" dialog
   - `tht_assign_dialog.py` — the "Assign through-hole part" dialog
+  - `autopopulate_dialog.py` — the Autopopulate dialog
+  - `sorting.py` — sortable dialog tables: sort items and the view-row to data-row map

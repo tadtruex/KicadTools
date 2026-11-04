@@ -24,10 +24,17 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
 )
 
+from kicadtools.gui.sorting import (
+    SortItem,
+    data_row,
+    filling,
+    make_sortable,
+    selected_data_row,
+    view_row,
+)
 from kicadtools.substitute import Candidate, SubstituteSearch
 from kicadtools.suppliers import JlcPart, lcsc_url
 
@@ -94,6 +101,7 @@ class SubstituteDialog(QDialog):
         self._table.itemSelectionChanged.connect(self._selection_changed)
         self._table.cellDoubleClicked.connect(self._double_clicked)
         self._table.setMouseTracking(True)
+        make_sortable(self._table)
 
         self._buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
         self._use = self._buttons.addButton("Use Selected", QDialogButtonBox.AcceptRole)
@@ -137,20 +145,21 @@ class SubstituteDialog(QDialog):
         headers = _FIXED_COLUMNS + labels
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
-        self._table.setRowCount(len(self._candidates))
-        for r, cand in enumerate(self._candidates):
-            short = cand.part.stock < self._needed
-            for col, text in enumerate(candidate_cells(cand, labels)):
-                item = QTableWidgetItem(text)
-                if short:
-                    item.setBackground(_LOW_TINT)
-                    item.setToolTip(f"Only {cand.part.stock:,} in stock; the build needs {self._needed:,}.")
-                if col == 0:
-                    item.setForeground(self.palette().link().color())
-                    item.setToolTip(lcsc_url(cand.part.lcsc) or "")
-                self._table.setItem(r, col, item)
+        with filling(self._table):
+            self._table.setRowCount(len(self._candidates))
+            for r, cand in enumerate(self._candidates):
+                short = cand.part.stock < self._needed
+                for col, text in enumerate(candidate_cells(cand, labels)):
+                    item = SortItem(text)
+                    if short:
+                        item.setBackground(_LOW_TINT)
+                        item.setToolTip(f"Only {cand.part.stock:,} in stock; the build needs {self._needed:,}.")
+                    if col == 0:
+                        item.setForeground(self.palette().link().color())
+                        item.setToolTip(lcsc_url(cand.part.lcsc) or "")
+                    self._table.setItem(r, col, item)
         self._table.cellClicked.connect(self._cell_clicked)
-        self._table.selectRow(0)
+        self._table.selectRow(view_row(self._table, 0))
 
     def show_error(self, message: str) -> None:
         self._status.setText(f"Search failed: {message}")
@@ -160,18 +169,17 @@ class SubstituteDialog(QDialog):
         self._use.setEnabled(self.chosen() is not None)
 
     def _double_clicked(self, row: int, _col: int) -> None:
+        row = data_row(self._table, row)
         if 0 <= row < len(self._candidates):
             self.accept()
 
     def _cell_clicked(self, row: int, col: int) -> None:
+        row = data_row(self._table, row)
         if col == 0 and 0 <= row < len(self._candidates):
             url = lcsc_url(self._candidates[row].part.lcsc)
             if url:
                 QDesktopServices.openUrl(QUrl(url))
 
     def chosen(self) -> Optional[Candidate]:
-        rows = self._table.selectionModel().selectedRows()
-        if not rows:
-            return None
-        r = rows[0].row()
+        r = selected_data_row(self._table)
         return self._candidates[r] if 0 <= r < len(self._candidates) else None

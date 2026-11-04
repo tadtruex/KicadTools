@@ -44,11 +44,19 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
 )
 
 from kicadtools.gui.parts import CHECK_TINTS, DASH, current_part_cell
+from kicadtools.gui.sorting import (
+    SortItem,
+    data_row,
+    filling,
+    make_sortable,
+    remove_data_row,
+    selected_data_row,
+    view_row,
+)
 from kicadtools.icsearch import MATCH, UNVERIFIED, stock_floor, stock_minimum
 from kicadtools.suppliers import digikey_url
 from kicadtools.thtassign import (
@@ -187,6 +195,7 @@ class ThtAssignDialog(QDialog):
         self._table.cellDoubleClicked.connect(self._double_clicked)
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._context_menu)
+        make_sortable(self._table)
 
         self._notes = QPlainTextEdit()
         self._notes.setReadOnly(True)
@@ -287,27 +296,28 @@ class ThtAssignDialog(QDialog):
             self._series.setText(result.series)
         self._notes.setPlainText("\n".join(result.notes))
         self._table.clearSelection()
-        self._table.setRowCount(len(self._candidates))
-        link = self.palette().link().color()
-        for r, cand in enumerate(self._candidates):
-            for col, text in enumerate(tht_candidate_cells(cand)):
-                item = QTableWidgetItem(text)
-                if col == COL_THT_PADS:
-                    tint = CHECK_TINTS.get(cand.pads.result)
-                    if tint is not None:
-                        item.setBackground(tint)
-                    item.setToolTip(cand.pads.reason)
-                if col == COL_THT_STOCK and cand.stock_warning:
-                    item.setBackground(CHECK_TINTS[UNVERIFIED])
-                    item.setToolTip(cand.stock_warning)
-                if col == COL_THT_DIGIKEY:
-                    url = digikey_url(cand.digikey_pn or "")
-                    if url:
-                        item.setForeground(link)
-                        item.setToolTip(url)
-                self._table.setItem(r, col, item)
+        with filling(self._table):
+            self._table.setRowCount(len(self._candidates))
+            link = self.palette().link().color()
+            for r, cand in enumerate(self._candidates):
+                for col, text in enumerate(tht_candidate_cells(cand)):
+                    item = SortItem(text)
+                    if col == COL_THT_PADS:
+                        tint = CHECK_TINTS.get(cand.pads.result)
+                        if tint is not None:
+                            item.setBackground(tint)
+                        item.setToolTip(cand.pads.reason)
+                    if col == COL_THT_STOCK and cand.stock_warning:
+                        item.setBackground(CHECK_TINTS[UNVERIFIED])
+                        item.setToolTip(cand.stock_warning)
+                    if col == COL_THT_DIGIKEY:
+                        url = digikey_url(cand.digikey_pn or "")
+                        if url:
+                            item.setForeground(link)
+                            item.setToolTip(url)
+                    self._table.setItem(r, col, item)
         if self._candidates:
-            self._table.selectRow(0)
+            self._table.selectRow(view_row(self._table, 0))
         self._selection_changed()
 
     def show_error(self, message: str, tag: Optional[int] = None) -> None:
@@ -317,12 +327,14 @@ class ThtAssignDialog(QDialog):
 
     # ---- table -------------------------------------------------------
     def _cell_clicked(self, row: int, col: int) -> None:
+        row = data_row(self._table, row)
         if col == COL_THT_DIGIKEY and 0 <= row < len(self._candidates):
             url = digikey_url(self._candidates[row].digikey_pn or "")
             if url:
                 QDesktopServices.openUrl(QUrl(url))
 
     def _double_clicked(self, row: int, col: int) -> None:
+        row = data_row(self._table, row)
         if col == COL_THT_DIGIKEY:
             return
         if 0 <= row < len(self._candidates):
@@ -330,9 +342,10 @@ class ThtAssignDialog(QDialog):
 
     def _context_menu(self, pos) -> None:
         item = self._table.itemAt(pos)
-        if item is None or not 0 <= item.row() < len(self._candidates):
+        r = data_row(self._table, item.row()) if item is not None else -1
+        if not 0 <= r < len(self._candidates):
             return
-        cand = self._candidates[item.row()]
+        cand = self._candidates[r]
         menu = QMenu(self)
         act = menu.addAction(f"Reject {cand.mpn}")
         if menu.exec(self._table.viewport().mapToGlobal(pos)) is act:
@@ -342,7 +355,7 @@ class ThtAssignDialog(QDialog):
         for r, c in enumerate(self._candidates):
             if c is candidate:
                 del self._candidates[r]
-                self._table.removeRow(r)
+                remove_data_row(self._table, r)
                 break
         if self._result is not None:
             self._result = replace(self._result, candidates=[
@@ -360,10 +373,7 @@ class ThtAssignDialog(QDialog):
         return self._req
 
     def _selected(self) -> Optional[ThtCandidate]:
-        rows = self._table.selectionModel().selectedRows()
-        if len(rows) != 1:
-            return None
-        r = rows[0].row()
+        r = selected_data_row(self._table)
         return self._candidates[r] if 0 <= r < len(self._candidates) else None
 
     def pads_text(self) -> str:

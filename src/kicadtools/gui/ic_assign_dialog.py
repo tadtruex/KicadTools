@@ -59,7 +59,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
 )
 
@@ -69,6 +68,15 @@ from kicadtools.gui.parts import (
     current_part_cell,
     identifiers_text,
     package_text,
+)
+from kicadtools.gui.sorting import (
+    SortItem,
+    data_row,
+    filling,
+    make_sortable,
+    remove_data_row,
+    selected_data_row,
+    view_row,
 )
 from kicadtools.icrequirement import IcGroup, IcRequirement
 from kicadtools.icsearch import (
@@ -286,6 +294,7 @@ class IcAssignDialog(QDialog):
         self._table.cellDoubleClicked.connect(self._double_clicked)
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._context_menu)
+        make_sortable(self._table)
 
         self._notes = QPlainTextEdit()
         self._notes.setReadOnly(True)
@@ -411,31 +420,32 @@ class IcAssignDialog(QDialog):
         self._notes.setPlainText("\n".join(result.notes))
 
         self._table.clearSelection()
-        self._table.setRowCount(len(self._candidates))
-        link = self.palette().link().color()
-        for r, cand in enumerate(self._candidates):
-            for col, text in enumerate(ic_candidate_cells(cand)):
-                item = QTableWidgetItem(text)
-                if col == COL_IC_CHECK:
-                    tint = CHECK_TINTS.get(cand.footprint.result)
-                    if tint is not None:
-                        item.setBackground(tint)
-                    item.setToolTip(check_message(cand.footprint))
-                warning = {COL_IC_DK_STOCK: cand.digikey_warning,
-                           COL_IC_JLC_STOCK: cand.jlc_warning if cand.at_jlcpcb else ""}.get(col)
-                if warning:
-                    item.setBackground(CHECK_TINTS[UNVERIFIED])
-                    item.setToolTip(warning)
-                url = self._url(cand, col)
-                if url:
-                    item.setForeground(link)
-                    # The LCSC cell's note (why JLCPCB cannot assemble it)
-                    # goes above its link.
-                    note = cand.jlc_note if col == COL_IC_LCSC else ""
-                    item.setToolTip(f"{note}\n{url}" if note else url)
-                self._table.setItem(r, col, item)
+        with filling(self._table):
+            self._table.setRowCount(len(self._candidates))
+            link = self.palette().link().color()
+            for r, cand in enumerate(self._candidates):
+                for col, text in enumerate(ic_candidate_cells(cand)):
+                    item = SortItem(text)
+                    if col == COL_IC_CHECK:
+                        tint = CHECK_TINTS.get(cand.footprint.result)
+                        if tint is not None:
+                            item.setBackground(tint)
+                        item.setToolTip(check_message(cand.footprint))
+                    warning = {COL_IC_DK_STOCK: cand.digikey_warning,
+                               COL_IC_JLC_STOCK: cand.jlc_warning if cand.at_jlcpcb else ""}.get(col)
+                    if warning:
+                        item.setBackground(CHECK_TINTS[UNVERIFIED])
+                        item.setToolTip(warning)
+                    url = self._url(cand, col)
+                    if url:
+                        item.setForeground(link)
+                        # The LCSC cell's note (why JLCPCB cannot assemble it)
+                        # goes above its link.
+                        note = cand.jlc_note if col == COL_IC_LCSC else ""
+                        item.setToolTip(f"{note}\n{url}" if note else url)
+                    self._table.setItem(r, col, item)
         if self._candidates:
-            self._table.selectRow(0)
+            self._table.selectRow(view_row(self._table, 0))
         self._selection_changed()
 
     def show_error(self, message: str, tag: Optional[int] = None) -> None:
@@ -453,12 +463,14 @@ class IcAssignDialog(QDialog):
         return None
 
     def _cell_clicked(self, row: int, col: int) -> None:
+        row = data_row(self._table, row)
         if 0 <= row < len(self._candidates):
             url = self._url(self._candidates[row], col)
             if url:
                 QDesktopServices.openUrl(QUrl(url))
 
     def _double_clicked(self, row: int, col: int) -> None:
+        row = data_row(self._table, row)
         if col in (COL_IC_LCSC, COL_IC_DIGIKEY):
             return
         if 0 <= row < len(self._candidates):
@@ -466,9 +478,10 @@ class IcAssignDialog(QDialog):
 
     def _context_menu(self, pos) -> None:
         item = self._table.itemAt(pos)
-        if item is None or not 0 <= item.row() < len(self._candidates):
+        r = data_row(self._table, item.row()) if item is not None else -1
+        if not 0 <= r < len(self._candidates):
             return
-        cand = self._candidates[item.row()]
+        cand = self._candidates[r]
         menu = QMenu(self)
         act = menu.addAction(f"Reject {cand.mpn}")
         if menu.exec(self._table.viewport().mapToGlobal(pos)) is act:
@@ -481,7 +494,7 @@ class IcAssignDialog(QDialog):
         for r, c in enumerate(self._candidates):
             if c is candidate:
                 del self._candidates[r]
-                self._table.removeRow(r)
+                remove_data_row(self._table, r)
                 break
         if self._result is not None:
             self._result = replace(self._result, candidates=[
@@ -502,10 +515,7 @@ class IcAssignDialog(QDialog):
         return self._req
 
     def _selected(self) -> Optional[IcCandidate]:
-        rows = self._table.selectionModel().selectedRows()
-        if len(rows) != 1:
-            return None
-        r = rows[0].row()
+        r = selected_data_row(self._table)
         return self._candidates[r] if 0 <= r < len(self._candidates) else None
 
     def check_text(self) -> str:
