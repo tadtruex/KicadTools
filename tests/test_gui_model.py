@@ -91,3 +91,18 @@ def test_setdata_rejected_on_non_guessed_row():
     m = _model()
     row = next(r for r in range(m.rowCount()) if m.status(r) != "guessed")
     assert m.setData(m.index(row, 0), Qt.Checked, Qt.CheckStateRole) is False
+
+
+def test_proxy_sorts_accept_column_checked_unchecked_blank():
+    m = _model()
+    guessed = [r for r in range(m.rowCount()) if m.status(r) == "guessed"]
+    assert len(guessed) >= 2
+    m.setData(m.index(guessed[-1], 0), Qt.Checked, Qt.CheckStateRole)
+    proxy = NaturalSortProxyModel()
+    proxy.setSourceModel(m)
+    proxy.sort(0, Qt.AscendingOrder)
+    states = [proxy.data(proxy.index(r, 0), Qt.CheckStateRole) for r in range(proxy.rowCount())]
+    rank = {Qt.Checked: 0, Qt.Unchecked: 1, None: 2}
+    assert [rank[s] for s in states] == sorted(rank[s] for s in states)
+    assert states[0] == Qt.Checked and states[-1] is None
+    assert states.count(Qt.Unchecked) == len(guessed) - 1

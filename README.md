@@ -194,7 +194,8 @@ for the full vision.
 Every table, on the tabs and in the dialogs, sorts on a header click. A cell
 that starts with a number sorts by its value (`1,234` after `987`, `$0.12`
 before `$0.5`, `100nF` before `10µF`); other text sorts in natural order (`C2`
-before `C10`). A table keeps its fill order until a header is clicked, and a
+before `C10`). A check-box column (Accept) sorts checked rows first, then
+unchecked, then rows without a box. A table keeps its fill order until a header is clicked, and a
 dialog's new search results keep the column picked.
 
 ```bash

@@ -75,6 +75,17 @@ through-hole, substitute and Autopopulate tables and the values popup tree.
 The main window's proxy uses the same key. Committed with Autopopulate as
 c8b94c7 and pushed on 2026-11-04. Suite 1661 passing.
 
+## LEDs: plan written (2026-11-04)
+
+`LED_PLAN.md`: decisions, board survey, JLCPCB and DigiKey data and six build
+steps. Plain one-colour chip LEDs get the passive treatment, colour matched
+by dominant-wavelength band (user decision b: JLCPCB's colour labels do not
+follow the wavelength). Multicolour and smart LEDs are found from what they
+name, as ICs are. JLCPCB's colour keyword does not filter, so the search
+lists the LED category per package (987 parts for 0603 in 9 s) and matches
+locally. Nothing built yet. The Intents tab's Accept column now sorts
+checked, unchecked, then rows without a box.
+
 ## Low stock is a warning on named and stored parts (2026-11-04)
 
 MotorDriver L1 (`SRP3020TA-4R7M`, 232 at JLCPCB) listed nothing: the

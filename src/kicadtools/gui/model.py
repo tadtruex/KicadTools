@@ -21,16 +21,28 @@ from kicadtools.intent import ElectricalIntent
 from kicadtools.naturalsort import display_key, natural_key  # natural_key re-exported
 
 
+def _check_rank(state) -> int:
+    """A check box's sort rank: checked 0, partly checked 1, unchecked 2, no
+    check box 3."""
+    if state is None:
+        return 3
+    value = state.value if hasattr(state, "value") else int(state)
+    return {Qt.Checked.value: 0, Qt.PartiallyChecked.value: 1}.get(value, 2)
+
+
 class NaturalSortProxyModel(QSortFilterProxyModel):
-    """Proxy that sorts by :func:`~kicadtools.naturalsort.display_key` of each
-    cell's display text (numbers by value, then natural order), as the dialog
-    tables do (:mod:`kicadtools.gui.sorting`)."""
+    """Proxy that sorts by a cell's check box (checked, then unchecked, then
+    none), then by :func:`~kicadtools.naturalsort.display_key` of its display
+    text (numbers by value, then natural order), as the dialog tables do
+    (:mod:`kicadtools.gui.sorting`)."""
+
+    def _key(self, index: QModelIndex) -> tuple:
+        model = self.sourceModel()
+        return (_check_rank(model.data(index, Qt.CheckStateRole)),
+                display_key(model.data(index, Qt.DisplayRole)))
 
     def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:
-        model = self.sourceModel()
-        left_val = model.data(left, Qt.DisplayRole)
-        right_val = model.data(right, Qt.DisplayRole)
-        return display_key(left_val) < display_key(right_val)
+        return self._key(left) < self._key(right)
 
 _COLUMNS = ["Accept", "Ref", "Status", "Type", "Footprint", "Description"]
 
