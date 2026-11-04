@@ -24,7 +24,8 @@ from kicadtools.digikey_bom import (
 )
 from kicadtools.cpl import cpl_from_schematic, write_cpl_csv
 from kicadtools.partrotation import PartRotationStore, manual_rotation_for_refs
-from kicadtools.pcb import read_mounting_for_schematic, sibling_pcb
+from kicadtools.mounting import mounting_kinds
+from kicadtools.pcb import sibling_pcb
 from kicadtools.normalize import (
     compute_file_changes,
     plan_normalization,
@@ -337,12 +338,12 @@ def _export_jlcpcb(args: argparse.Namespace) -> int:
 
     mounting: dict = {}
     if args.smd:
-        mounting, pcb = read_mounting_for_schematic(args.schematic)
+        mounting, pcb = mounting_kinds(records, args.schematic)
         if pcb is None:
             print(
                 f"⚠️  --smd: no {Path(args.schematic).with_suffix('.kicad_pcb').name} "
-                "found next to the schematic — mounting can't be determined, so the "
-                "SMD BOM will be empty. Lay out / place the board first.",
+                "found next to the schematic — mounting is read from the library "
+                "footprints instead.",
                 file=sys.stderr,
             )
 
@@ -387,12 +388,12 @@ def _export_digikey(args: argparse.Namespace) -> int:
     # everything and never touches the board.
     mounting: dict = {}
     if mode != BOTH:
-        mounting, pcb = read_mounting_for_schematic(args.schematic)
+        mounting, pcb = mounting_kinds(records, args.schematic)
         if pcb is None and mode == SMD_ONLY:
             print(
                 f"⚠️  --mounting smd: no {Path(args.schematic).with_suffix('.kicad_pcb').name} "
-                "found next to the schematic — mounting can't be determined, so the "
-                "SMD BOM will be empty. Lay out / place the board first.",
+                "found next to the schematic — mounting is read from the library "
+                "footprints instead.",
                 file=sys.stderr,
             )
         # non-smd with no PCB needs no warning: every part reads "unknown", which
@@ -447,7 +448,7 @@ def _export_cpl(args: argparse.Namespace) -> int:
     records = iter_bom_part_records(args.schematic)
     mounting: dict = {}
     if args.smd:
-        mounting, _ = read_mounting_for_schematic(args.schematic)
+        mounting, _ = mounting_kinds(records, args.schematic)
         include = {r.reference for r in records if mounting.get(r.reference) == "smd"}
     else:
         include = {r.reference for r in records}
@@ -621,7 +622,8 @@ def main(argv=None) -> int:
         "--smd",
         action="store_true",
         help="Only include surface-mount parts (mounting read from the sibling "
-        ".kicad_pcb; parts of undetermined mounting are excluded and reported)",
+        ".kicad_pcb, else the library footprint; parts of undetermined mounting "
+        "are excluded and reported)",
     )
     jlc.set_defaults(func=_export_jlcpcb)
 
@@ -641,7 +643,8 @@ def main(argv=None) -> int:
         "--mounting",
         choices=MOUNTING_FILTERS,
         default=BOTH,
-        help="Which parts to include by mounting, read from the sibling .kicad_pcb: "
+        help="Which parts to include by mounting, read from the sibling .kicad_pcb "
+        "or else the library footprint: "
         "'smd' = surface-mount only (undetermined parts excluded and reported); "
         "'non-smd' = everything else (through-hole and undetermined); "
         "'both' = every part, no PCB needed (default: both)",
@@ -663,7 +666,8 @@ def main(argv=None) -> int:
     cpl.add_argument(
         "--smd",
         action="store_true",
-        help="Only include surface-mount parts (mounting read from the .kicad_pcb), "
+        help="Only include surface-mount parts (mounting read from the .kicad_pcb "
+        "or the library footprint), "
         "matching a --smd BOM",
     )
     cpl.add_argument(

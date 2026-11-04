@@ -130,7 +130,12 @@ kicadtools confirm --write path/to/board.kicad_sch   # also write the fills into
 ### Exporting for assembly and ordering
 
 The three export commands write CSV to stdout, or to a file with `-o PATH`.
-Warnings go to stderr, so `… > bom.csv` gives a clean file. The mounting filters read the `.kicad_pcb` that sits next to the schematic.
+Warnings go to stderr, so `… > bom.csv` gives a clean file. The mounting filters
+read each part's footprint from the `.kicad_pcb` that sits next to the schematic,
+or from the footprint library when the part is not on the board. The footprint's
+pads decide: all through-hole pads is through-hole, all SMD pads is SMD (even
+when the footprint's `attr` says otherwise), and a mix of both (USB connectors
+with plated shield tabs) follows the `attr`.
 
 #### JLCPCB BOM
 
@@ -623,6 +628,7 @@ Test schematics live in `tests/data/`.
 - `src/kicadtools/jlcpcb.py` — JLCPCB BOM grouping and CSV writer (`jlcpcb`)
 - `src/kicadtools/digikey_bom.py` — DigiKey BOM grouping and CSV writer (`digikey`)
 - `src/kicadtools/pcb.py` — read SMD/THT mounting and footprint placements from the `.kicad_pcb`
+- `src/kicadtools/mounting.py` — SMD/THT mounting per part, from the board's footprint or the library `.kicad_mod`
 - `src/kicadtools/cpl.py` — JLCPCB CPL centroid and rotation math (`cpl`)
 - `src/kicadtools/rotations.py` — per-footprint-family CPL rotation offsets
 - `src/kicadtools/partrotation.py` — per-LCSC CPL rotation overrides stored in SQLite

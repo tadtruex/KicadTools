@@ -80,7 +80,7 @@ def test_pad_number_parsed_quoted_bare_and_empty():
 
 def test_pad_geometry_unchanged_by_number():
     u1 = parse_footprint_placements(_BOARD)["U1"]
-    assert u1.pads[0] == Pad(-1.1, -0.95, 1.3, 0.6, 0.0, "1")
+    assert u1.pads[0] == Pad(-1.1, -0.95, 1.3, 0.6, 0.0, "1", "smd")
     assert (u1.x, u1.y, u1.angle, u1.side) == (10.0, 20.0, 90.0, "top")
 
 

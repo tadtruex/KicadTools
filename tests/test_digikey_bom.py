@@ -3,6 +3,8 @@ import csv as _csv
 import io
 from pathlib import Path
 
+import pytest
+
 from kicadtools import cli
 from kicadtools.digikey_bom import (
     BOTH,
@@ -221,16 +223,25 @@ def test_cli_exit_code_tracks_unorderable(tmp_path, capsys):
         assert "no DigiKey or manufacturer part number" in capsys.readouterr().err
 
 
+@pytest.fixture
+def no_standard_libs(tmp_path, monkeypatch):
+    """Point the standard footprint library fallback at an empty folder, so a
+    part not on the synthetic board stays of undetermined mounting instead of
+    being read from this repo's Libraries/kicad-footprints."""
+    import kicadtools.footprints as footprints
+    monkeypatch.setattr(footprints, "DEFAULT_REPO_ROOT", tmp_path / "no_repo")
+
+
 def _write_pcb(path, entries):
     """Write a minimal .kicad_pcb with (ref, attr-first-token) footprint nodes."""
     nodes = "\n".join(
-        f'\t(footprint "L:F"\n\t\t(property "Reference" "{ref}")\n\t\t(attr {attr})\n\t)'
+        f'\t(footprint "L:F"\n\t\t(at 0 0)\n\t\t(property "Reference" "{ref}")\n\t\t(attr {attr})\n\t)'
         for ref, attr in entries
     )
     path.write_text(f"(kicad_pcb\n{nodes}\n)\n", encoding="utf-8")
 
 
-def test_cli_smd_filters_by_sibling_pcb(tmp_path, capsys):
+def test_cli_smd_filters_by_sibling_pcb(tmp_path, capsys, no_standard_libs):
     sch = tmp_path / "board.kicad_sch"
     sch.write_text(FLAT_BOARD.read_text(encoding="utf-8"), encoding="utf-8")
     refs = [r.reference for r in iter_bom_part_records(sch)]
@@ -253,7 +264,7 @@ def test_cli_smd_filters_by_sibling_pcb(tmp_path, capsys):
     assert "undetermined mounting" in err  # the absent refs are reported
 
 
-def test_cli_non_smd_filters_by_sibling_pcb(tmp_path, capsys):
+def test_cli_non_smd_filters_by_sibling_pcb(tmp_path, capsys, no_standard_libs):
     sch = tmp_path / "board.kicad_sch"
     sch.write_text(FLAT_BOARD.read_text(encoding="utf-8"), encoding="utf-8")
     refs = [r.reference for r in iter_bom_part_records(sch)]
@@ -276,7 +287,7 @@ def test_cli_non_smd_filters_by_sibling_pcb(tmp_path, capsys):
     assert len(designators) > 1
 
 
-def test_cli_smd_no_pcb_warns_and_empties(tmp_path, capsys):
+def test_cli_smd_no_pcb_warns_and_empties(tmp_path, capsys, no_standard_libs):
     sch = tmp_path / "board.kicad_sch"
     sch.write_text(FLAT_BOARD.read_text(encoding="utf-8"), encoding="utf-8")  # no sibling PCB
     out = tmp_path / "smd.csv"
@@ -287,7 +298,7 @@ def test_cli_smd_no_pcb_warns_and_empties(tmp_path, capsys):
     assert "no board.kicad_pcb" in capsys.readouterr().err
 
 
-def test_cli_non_smd_no_pcb_keeps_all_no_warning(tmp_path, capsys):
+def test_cli_non_smd_no_pcb_keeps_all_no_warning(tmp_path, capsys, no_standard_libs):
     sch = tmp_path / "board.kicad_sch"
     sch.write_text(FLAT_BOARD.read_text(encoding="utf-8"), encoding="utf-8")  # no sibling PCB
     out = tmp_path / "nonsmd.csv"

@@ -84,6 +84,9 @@ class Pad:
     # (paste aperture, mechanical hole). Last and defaulted so positional
     # construction ``Pad(x, y, w, h, angle)`` keeps working.
     number: str = ""
+    # The pad type token: "smd", "thru_hole", "np_thru_hole" or "connect";
+    # "" when the pad node has none.
+    kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,8 @@ class Placement:
     angle: float
     side: str  # "top" | "bottom"
     pads: Tuple[Pad, ...]
+    # The footprint's (attr …) verdict: SMD, THT or UNKNOWN.
+    attr: str = UNKNOWN
 
 
 def _direct_child(node, head: str):
@@ -136,6 +141,13 @@ def _pad_number(pad) -> str:
     return ""
 
 
+def _pad_kind(pad) -> str:
+    """The type token of a ``(pad <number> <type> <shape> …)`` node."""
+    if len(pad) < 3 or not isinstance(pad[2], Symbol):
+        return ""
+    return str(pad[2])
+
+
 def _parse_pads(node) -> Tuple[Pad, ...]:
     pads: List[Pad] = []
     for item in node:
@@ -153,6 +165,7 @@ def _parse_pads(node) -> Tuple[Pad, ...]:
                 h=size[1],
                 angle=at[2] if len(at) > 2 else 0.0,
                 number=_pad_number(item),
+                kind=_pad_kind(item),
             )
         )
     return tuple(pads)
@@ -182,6 +195,7 @@ def parse_footprint_placements(text: str) -> Dict[str, Placement]:
             angle=at[2] if len(at) > 2 else 0.0,
             side=_footprint_side(node),
             pads=_parse_pads(node),
+            attr=_footprint_mounting(node),
         )
     return out
 

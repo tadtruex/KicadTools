@@ -3,7 +3,8 @@
 Goal: give every through-hole part on a schematic that has no DigiKey PN a
 chosen DigiKey part (MPN, manufacturer, DigiKey PN), found from its footprint
 plus its Value, intent or Description. Through-hole parts are soldered by hand,
-so they need no LCSC number and are left out of the JLCPCB BOM and CPL.
+so they need no LCSC number; the JLCPCB BOM and CPL leave them out when the
+SMD-only choice is taken.
 
 This is a fourth search path on the Parts tab, beside capacitors, resistors and
 inductors (`CAPACITOR_PLAN.md`) and ICs (`IC_PLAN.md`). It searches DigiKey
@@ -16,7 +17,7 @@ only.
 | Scope | Parts whose footprint is through-hole and that have no DigiKey PN. |
 | Through-hole test | The footprint's `(attr through_hole)`, from the board's `.kicad_pcb`, or from the library `.kicad_mod` when the board has no copy. Pad types are counted as a cross-check (step 1). |
 | Supplier | DigiKey only. No LCSC number is needed or written. |
-| JLCPCB export | Through-hole parts are never exported to the JLCPCB BOM or CPL. SMD-only becomes the fixed behaviour: the GUI's "SMD parts only?" question and the CLI's `--smd` flag are removed, and parts of undetermined mounting are left out and counted in the status message. |
+| JLCPCB export | The SMD-only choices stay as they are (the GUI's "SMD parts only?" question and the CLI's `--smd` flag; DigiKey's three-way filter). Revised 2026-11-03: the first plan made SMD-only fixed, which the user rejected as too strong. The exports do use the new per-part mounting (step 1). |
 | Headers | One series per run. The first header group searched in a run uses a manufacturer-filtered search, and the part the user picks sets the series. Every later header group in that run searches that series first (step 5). The series is not stored between runs. |
 | Pads with no part | Solder-wire pads, mounting holes, fiducials and bare test pads get a "no part" status instead of a search. Loop test points (BuckConverter `36-5001-ND`) are real parts. |
 
@@ -79,11 +80,43 @@ library `.kicad_mod` (through `FootprintPads.footprint_file`), and counts
 the pads decide and the row shows a note. The JLCPCB export and the Parts tab
 use the same function.
 
-### Step 2 — JLCPCB export is SMD-only
+### Step 2 — dropped
 
-Remove the question in `main_window.py` and the `--smd` flag in `cli.py`;
-`build_jlcpcb_bom` and the CPL always keep SMD parts only. The status message
-counts the parts left out for undetermined mounting.
+Was: make the JLCPCB export SMD-only and remove the choice. The user decided
+(2026-11-03) to keep the choices as they are. The exports switched to step 1's
+mounting instead.
+
+### Step 1 — as built (2026-11-03)
+
+`src/kicadtools/mounting.py`: `decide(attr, pads, source)`, `BoardMounting`
+(`mounting(ref, lib_id)`, `mounting_for(record)`, `for_schematic`),
+`mounting_for_records` and `mounting_kinds`. `pcb.Pad` gained `kind` (the pad
+type token) and `pcb.Placement` gained `attr`; `FootprintPads` gained
+`placed()` and `library_footprint()` (`footprints.LibraryFootprint`,
+`parse_kicad_mod`). Tests: `tests/test_mounting.py`.
+
+Differences from the plan, from a survey of all boards:
+
+- The pads decide only when the plated pads are all one type. Mixed pads
+  (USB connectors on AtTinyDemo J4 and MotorDriver J1: `attr smd`, SMD signal
+  pads, plated shield tabs) follow the `attr`; with no `attr` they are
+  `unknown`. `np_thru_hole` and `connect` pads are not counted.
+- KiCad's standard through-hole library footprints have no `attr`; only the
+  board copy has one. Before layout the pads classify them.
+- The board copy is used even when its library id differs from the
+  schematic's Footprint field, with a note. 15 parts on Breakout and SX1509
+  have KiCad 5 names in the schematic (`LEDs:LED_0603`) and the renamed
+  footprint on the board. The pad-count lookup for ICs still skips such a
+  board copy.
+- The JLCPCB BOM, DigiKey BOM and CPL exports (CLI and GUI) read mounting
+  through `mounting_kinds`. Across the 15 boards: 65 parts went from
+  undetermined to SMD, 28 to through-hole, Breakout U6 from through-hole to
+  SMD, none lost a mounting. 39 stay undetermined: footprint libraries not in
+  the project, blank Footprint fields (ECG 7, NeoPMOD 8), and the Tag-Connect
+  footprint (no plated pads, no `attr`).
+- Without a `.kicad_pcb` the exports now read the library footprints; the
+  CLI warning says so instead of "the SMD BOM will be empty".
+- Not done in step 1: the Parts tab does not show mounting yet (step 9).
 
 ### Step 3 — footprint signatures (`thtfootprint.py`)
 

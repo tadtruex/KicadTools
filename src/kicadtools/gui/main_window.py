@@ -53,7 +53,8 @@ from kicadtools.digikey_bom import (
     write_digikey_csv,
 )
 from kicadtools.cpl import cpl_from_schematic, write_cpl_csv
-from kicadtools.pcb import read_mounting_for_schematic, sibling_pcb
+from kicadtools.mounting import mounting_kinds
+from kicadtools.pcb import sibling_pcb
 from kicadtools.gui.lcsc import (
     LINK_ROLE,
     LcscTableModel,
@@ -1044,7 +1045,7 @@ class MainWindow(QMainWindow):
         override = {row.reference: row.lcsc for row in self.lcsc_model.rows() if row.lcsc}
         mounting: dict = {}
         if smd_only and self._board:
-            mounting, _pcb = read_mounting_for_schematic(self._board)
+            mounting, _pcb = mounting_kinds(self._records, self._board)
         lines = build_jlcpcb_bom(
             self._records, override, mounting=mounting, smd_only=smd_only
         )
@@ -1103,7 +1104,7 @@ class MainWindow(QMainWindow):
 
         mounting: dict = {}
         if mode != BOTH and self._board:
-            mounting, _pcb = read_mounting_for_schematic(self._board)
+            mounting, _pcb = mounting_kinds(self._records, self._board)
         lines = build_digikey_bom(self._records, mounting=mounting, mounting_filter=mode)
 
         start = str(Path(self._board).with_name(Path(self._board).stem + "_digikey.csv")) \
@@ -1162,7 +1163,7 @@ class MainWindow(QMainWindow):
         if resp == QMessageBox.Cancel:
             return
         if resp == QMessageBox.Yes:
-            mounting, _pcb = read_mounting_for_schematic(self._board)
+            mounting, _pcb = mounting_kinds(self._records, self._board)
             include = {r.reference for r in self._records if mounting.get(r.reference) == "smd"}
         else:
             include = {r.reference for r in self._records}

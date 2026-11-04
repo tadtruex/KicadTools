@@ -26,11 +26,19 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Optional, Tuple, TypeVar
 
 from sexpdata import Symbol, loads
 
-from kicadtools.pcb import Pad, _direct_child, _parse_pads, parse_footprint_placements
+from kicadtools.pcb import (
+    Pad,
+    Placement,
+    _direct_child,
+    _footprint_mounting,
+    _parse_pads,
+    parse_footprint_placements,
+)
 
 # This repo's checkout of KiCad's standard footprint libraries, relative to the
 # repo root, and the repo root assumed when the board is not inside the repo
@@ -70,14 +78,29 @@ def pad_count(pads: Iterable[Pad]) -> int:
 # --- .kicad_mod -------------------------------------------------------------
 
 
-def parse_kicad_mod_pads(text: str) -> Tuple[Pad, ...]:
-    """The pads of a ``.kicad_mod`` file from its *text*. Pure — no I/O. The
-    root node is ``(footprint …)`` (KiCad 6+) or ``(module …)`` (KiCad 5);
-    anything else gives no pads."""
+@dataclass(frozen=True)
+class LibraryFootprint:
+    """A footprint read from its library ``.kicad_mod`` file."""
+
+    attr: str  # the (attr …) verdict: SMD, THT or UNKNOWN (no attr node)
+    pads: Tuple[Pad, ...]
+
+
+def parse_kicad_mod(text: str) -> Optional[LibraryFootprint]:
+    """The ``attr`` and pads of a ``.kicad_mod`` file from its *text*. Pure — no
+    I/O. The root node is ``(footprint …)`` (KiCad 6+) or ``(module …)``
+    (KiCad 5); anything else gives ``None``."""
     tree = loads(text)
     if not (isinstance(tree, list) and tree and tree[0] in (Symbol("footprint"), Symbol("module"))):
-        return ()
-    return _parse_pads(tree)
+        return None
+    return LibraryFootprint(attr=_footprint_mounting(tree), pads=_parse_pads(tree))
+
+
+def parse_kicad_mod_pads(text: str) -> Tuple[Pad, ...]:
+    """The pads of a ``.kicad_mod`` file from its *text*; no pads when the root
+    node is not a footprint. Pure — no I/O."""
+    footprint = parse_kicad_mod(text)
+    return footprint.pads if footprint is not None else ()
 
 
 # --- fp-lib-table -----------------------------------------------------------
@@ -183,7 +206,7 @@ class FootprintPads:
         )
         self._placements = None
         self._libs: Optional[Dict[str, Path]] = None
-        self._library_counts: Dict[str, Optional[int]] = {}
+        self._library: Dict[str, Optional[LibraryFootprint]] = {}
 
     def _board_placements(self):
         if self._placements is None:
@@ -219,27 +242,36 @@ class FootprintPads:
         path = folder / f"{name}.kicad_mod"
         return path if path.is_file() else None
 
+    def library_footprint(self, lib_id: str) -> Optional[LibraryFootprint]:
+        """*lib_id* read from its library file, or ``None`` when the file is
+        not found or cannot be parsed. Cached per library id."""
+        if lib_id not in self._library:
+            path = self.footprint_file(lib_id)
+            self._library[lib_id] = _parse_file(path, parse_kicad_mod) if path is not None else None
+        return self._library[lib_id]
+
     def library_count(self, lib_id: str) -> Optional[int]:
         """Pad count of *lib_id* read from its library file, or ``None``."""
-        if lib_id not in self._library_counts:
-            path = self.footprint_file(lib_id)
-            count: Optional[int] = None
-            if path is not None:
-                pads = _parse_file(path, parse_kicad_mod_pads)
-                if pads is not None:
-                    count = pad_count(pads)
-            self._library_counts[lib_id] = count
-        return self._library_counts[lib_id]
+        footprint = self.library_footprint(lib_id)
+        return pad_count(footprint.pads) if footprint is not None else None
 
-    def count(self, reference: str, lib_id: Optional[str] = None) -> Optional[int]:
-        """Pad count for *reference* with footprint *lib_id* (the schematic's
-        Footprint field). The board copy is used when it is placed under
-        *reference* with the same library id (or *lib_id* is not given);
-        otherwise the library file for *lib_id*. ``None`` when neither is
-        found. A board copy that names another footprint is stale (the board
-        has not been updated from the schematic), so it is not used."""
+    def placed(self, reference: str, lib_id: Optional[str] = None) -> Optional[Placement]:
+        """The board's footprint placed under *reference*, when it is the same
+        library footprint as *lib_id* (the schematic's Footprint field) or
+        *lib_id* is not given; else ``None``. A board copy that names another
+        footprint is stale (the board has not been updated from the
+        schematic), so it is not returned."""
         placed = self._board_placements().get(reference)
         if placed is not None and (not lib_id or placed.footprint == lib_id):
+            return placed
+        return None
+
+    def count(self, reference: str, lib_id: Optional[str] = None) -> Optional[int]:
+        """Pad count for *reference* with footprint *lib_id*: from the board
+        copy (:meth:`placed`) when there is one, else from the library file for
+        *lib_id*. ``None`` when neither is found."""
+        placed = self.placed(reference, lib_id)
+        if placed is not None:
             return pad_count(placed.pads)
         if lib_id:
             return self.library_count(lib_id)

@@ -58,10 +58,12 @@ to-do list. State on 2026-11-03:
 ## Through-hole part assignment: planned (2026-11-03)
 
 `THT_PLAN.md` holds the decisions, the board survey, the DigiKey API test and
-ten build steps. No code yet; the next step is plan step 1 (mounting per part).
+ten build steps. Step 1 (mounting per part, `mounting.py`) is built, not yet
+committed; step 2 is dropped; the next step is step 3 (footprint signatures).
+See "Step 1 — as built" in the plan. Suite 1462 passing.
 
-- Decisions: DigiKey only, no LCSC; the JLCPCB BOM and CPL become SMD-only
-  with no prompt or `--smd` flag; headers take one series per run, set by the
+- Decisions: DigiKey only, no LCSC; the JLCPCB BOM and CPL keep their SMD-only
+  choices (revised 2026-11-03); headers take one series per run, set by the
   first header the user picks (manufacturer, finish, connector type, pin
   lengths, MPN pattern), not stored between runs.
 - Survey: `scripts/tht_survey.py` (run from `Code/KicadTools` with the venv;
