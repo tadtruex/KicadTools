@@ -105,7 +105,8 @@ def test_rank_for_series():
     hits = [_p("PEC07SAAN", 0.05), _p("PRPC007SFAN-RC", 0.08), _p("PRPC007SAAN-RC", 0.12),
             _p("PRPC017SAAN-RC", 0.2)]
     ranked = [p.mpn for p in rank_for_series(hits, series, H1x07)]
-    assert ranked == ["PRPC007SAAN-RC", "PRPC017SAAN-RC", "PEC07SAAN", "PRPC007SFAN-RC"]
+    # Outside the pattern, a longer prefix shared with the series MPN first.
+    assert ranked == ["PRPC007SAAN-RC", "PRPC017SAAN-RC", "PRPC007SFAN-RC", "PEC07SAAN"]
 
 
 def test_stock_note():
@@ -202,3 +203,10 @@ def test_nothing_found_note_and_unmatched():
     assert result.notes == []
     run = HeaderRun(FakeClient(lambda call: ([], ())))
     assert run.search(H1x04, needed=5).notes == ["no header in stock (at least 50) from the maker list"]
+
+
+def test_rank_prefers_a_longer_shared_prefix_outside_the_pattern():
+    series = series_from_pick(_p("PREC012DAAN-RC"), H2x05)
+    single = parse_signature("Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical")
+    ranked = rank_for_series([_p("PEC01SAAN", 0.05), _p("PREC001SAAN-RC", 0.08)], series, single)
+    assert [p.mpn for p in ranked] == ["PREC001SAAN-RC", "PEC01SAAN"]

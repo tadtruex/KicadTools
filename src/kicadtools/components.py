@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from kicadtools.classify import guess_intent_type
 from kicadtools.intent import ElectricalIntent
+from kicadtools.thtfootprint import virtual_part
 from kicadtools.sexpr_parser import (
     extract_properties,
     iter_symbol_instances,
@@ -61,14 +62,25 @@ def build_intent(
     return intent
 
 
+def is_virtual_part(footprint: object, value: object = "") -> bool:
+    """True for a solder jumper or net tie: copper on the board, not a part
+    to buy or place, so it is left out of every BOM, the CPL and the
+    Cockpit's lists whatever its ``in_bom`` flag says
+    (:func:`kicadtools.thtfootprint.virtual_part`)."""
+    return bool(virtual_part(footprint if isinstance(footprint, str) else "",
+                             value if isinstance(value, str) else ""))
+
+
 def bom_components(components: List[ElectricalIntent]) -> List[ElectricalIntent]:
     """Drop the parts the BOM listing hides: power/flag symbols (``#…`` refs),
-    do-not-place parts, and parts excluded from the BOM. Used by both the CLI
-    ``bom`` command and the GUI so they show the same set."""
+    do-not-place parts, parts excluded from the BOM, and solder jumpers and
+    net ties (:func:`is_virtual_part`). Used by both the CLI ``bom`` command
+    and the GUI so they show the same set."""
     return [
         c
         for c in components
         if not c.reference.startswith("#") and not c.dnp and c.in_bom
+        and not is_virtual_part(c.footprint, getattr(c, "value", ""))
     ]
 
 

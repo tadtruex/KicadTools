@@ -231,3 +231,23 @@ def test_short_part_names_stay_named(lib_id, mpn):
 def test_mounting_hole_library_part_is_not_a_hole():
     # Same library as the holes, but a Harwin part.
     assert parse_signature("MountingHole:HARWIN_H9051-01").family == NAMED_PART
+
+
+# --- solder jumpers and net ties: not parts ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "lib_id, value, what",
+    [
+        ("Jumper:SolderJumper-2_P1.3mm_Bridged_RoundedPad1.0x1.5mm", "SolderJumper_2_Bridged", "solder jumper"),
+        ("StockedComponents:SolderJumper-2_P1.3mm_Bridged_RoundedPad1.0x1.5mm_oopsey", "", "solder jumper"),
+        ("NetTie:NetTie-2_SMD_Pad0.5mm", "NetTie_2", "net tie"),
+        ("", "NetTie_2", "net tie"),
+        ("", "SolderJumper_3_Bridged12", "solder jumper"),
+        ("Jumper:Jumper_2_Open", "Jumper_2_Open", ""),     # a real jumper part
+        ("Resistor_SMD:R_0603_1608Metric", "SolderJumper", ""),  # the footprint decides
+    ],
+)
+def test_virtual_part(lib_id, value, what):
+    from kicadtools.thtfootprint import virtual_part
+    assert virtual_part(lib_id, value) == what

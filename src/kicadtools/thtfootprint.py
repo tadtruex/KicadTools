@@ -132,6 +132,27 @@ _RES_STYLES = {
 }
 
 
+# Footprints that are copper only, not a part: they are left out of every
+# BOM, the CPL and the Cockpit's lists (kicadtools.components.is_virtual_part).
+_VIRTUAL: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"^SolderJumper", re.I), "solder jumper"),
+    (re.compile(r"^NetTie", re.I), "net tie"),
+]
+
+
+def virtual_part(lib_id: str, value: str = "") -> str:
+    """``"solder jumper"`` or ``"net tie"`` when footprint *lib_id* (any
+    library: ``Jumper:SolderJumper-2_…``, ``StockedComponents:SolderJumper-…``)
+    or, without a footprint, the symbol's *value* (``SolderJumper_2_Bridged``,
+    ``NetTie_2``) names one; ``""`` otherwise."""
+    _, name = _split(lib_id)
+    text = name.strip() or (value or "").strip()
+    for pattern, what in _VIRTUAL:
+        if pattern.match(text):
+            return what
+    return ""
+
+
 def _is_geometry(token: str) -> bool:
     return bool(
         _GRID.match(token)

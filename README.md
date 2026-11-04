@@ -21,8 +21,12 @@ List the components in a schematic (a BOM-style listing):
 kicadtools bom path/to/board.kicad_sch
 ```
 
-Power flags (`#…`), do-not-place parts, and parts excluded from the BOM are
-filtered out. Each remaining component is classified and printed with a short
+Power flags (`#…`), do-not-place parts, parts excluded from the BOM, and
+solder jumpers and net ties are filtered out. A solder jumper or net tie is
+copper, not a part, so it is left out of every BOM, the CPL and the Cockpit's
+lists whatever its BOM flag says; it is recognized by its footprint name
+(`SolderJumper…`, `NetTie…`, in any library) or, without a footprint, by its
+Value. Each remaining component is classified and printed with a short
 description. Every line is marked with its classification outcome:
 
 | Mark | Meaning |
@@ -538,6 +542,56 @@ values, so nothing in its dialog is editable.
   of the four part-number fields are removed. `Value`, `Footprint`,
   `Datasheet` and `Reference` are never written, and no settings are stored.
 
+#### Through-hole parts
+
+Through-hole parts are soldered by hand, so they are searched at DigiKey only
+and get no LCSC number. A part gets a through-hole row when it is not a
+capacitor, resistor, inductor or IC (those have their own rows) and its
+footprint is through-hole (see the export section for how mounting is read).
+Parts with the same footprint, Value and part numbers share a row. The
+design is in `THT_PLAN.md`.
+
+- **Row.** Value is the Value. Package is the footprint signature read from
+  the footprint name: `header 1x04, 2.54 mm, vertical`, `named part JST
+  S3B-PH-K`, `no part (solder wire pad)`. Class is `through-hole`; Rating and
+  Tolerance are empty. Status is `no part` for a footprint with nothing to
+  buy (solder-wire pads, mounting holes, fiducials, bare test pads),
+  `not searchable` for a footprint family not searched yet (terminal blocks,
+  loop test points, through-hole passives without an intent, footprints that
+  name no part) unless the symbol has a `DigiKeyPN` or `MPN`, `assigned` when
+  every symbol has `MPN`, `Manufacturer` and `DigiKeyPN`, else `unassigned`.
+- **Search.** Double-click the row to open the **Assign through-hole part**
+  dialog. A part stored in the parts database for the same footprint
+  signature (and, except for headers, sockets and terminal blocks, the same
+  Value) is checked at DigiKey and offered without a DigiKey search; **Search
+  DigiKey** searches anyway. The symbol's `DigiKeyPN`, else its `MPN`, is
+  looked up first and shown as the current part. Then:
+  - pin headers and sockets are searched in DigiKey's header categories by
+    positions, rows, pitch, orientation and contact type, with the header
+    maker list (setting `hdr.manufacturers`, comma-separated; default
+    Sullins, Samtec, Amphenol, Harwin, Wurth, TE, Molex). The first header or
+    socket accepted sets the series for the rest of the run (until the
+    schematic is opened again): later headers search that manufacturer, its
+    contact finish and connector type, and rank the MPN the series predicts
+    first;
+  - a footprint that names a part (`JST_PH_S3B-PH-K…`, `CUI_PJ-002B`) is
+    searched by that part number, or by a Value token that fits it.
+- **Checks.** DigiKey status `Active` and stock of at least 10 × the units
+  needed; below the units needed + 1000 with a warning. The footprint's pad
+  count is compared with the part's positions: more pads than positions
+  (mounting or shield pads) is shown as cannot verify, fewer as a mismatch.
+  The check ranks candidates and never removes one.
+- **Columns.** MPN · Manufacturer · Source · DigiKey PN · DigiKey stock ·
+  Pads · Unit price · Description. Source is `database`, `current part`,
+  `series`, `maker list`, or the text that found the part.
+- Right-click a candidate to reject it. **Accept** records the part in the
+  parts database under its footprint signature and **File → Save** writes
+  `MPN`, `Manufacturer` and `DigiKeyPN` on every symbol in the group, and
+  removes `LCSC` and other spellings of the part-number fields. `Value` and
+  `Footprint` are never written.
+- The status bar shows the DigiKey call count for the session and the calls
+  left today (DigiKey allows 1000 a day).
+
 #### Parts database
 
 The parts database is a SQLite file at `~/Code/Boards/parts.sqlite` (the same
@@ -636,6 +690,7 @@ Test schematics live in `tests/data/`.
 - `src/kicadtools/headersearch.py` — pin header and socket search at DigiKey, with one series per run
 - `src/kicadtools/namedsearch.py` — DigiKey search for through-hole parts whose footprint names the part
 - `src/kicadtools/thtdb.py` — through-hole parts in the parts database, found by footprint signature
+- `src/kicadtools/thtassign.py` — through-hole groups for the Parts tab, their search and write plan
 - `src/kicadtools/cpl.py` — JLCPCB CPL centroid and rotation math (`cpl`)
 - `src/kicadtools/rotations.py` — per-footprint-family CPL rotation offsets
 - `src/kicadtools/partrotation.py` — per-LCSC CPL rotation overrides stored in SQLite
@@ -657,3 +712,4 @@ Test schematics live in `tests/data/`.
   - `substitute_dialog.py` — the "Find Parametrically Equivalent Substitute" dialog
   - `parts.py` — Parts tab: requirement-group table model and the background candidate-search worker
   - `assign_dialog.py` — the "Assign Part" dialog
+  - `tht_assign_dialog.py` — the "Assign through-hole part" dialog

@@ -223,10 +223,23 @@ def stock_note(product: DigiKeyProduct, needed: int) -> str:
     return ""
 
 
+def _shared_prefix(a: str, b: str) -> int:
+    """The length of the common prefix of two MPNs, without case."""
+    n = 0
+    for x, y in zip(a.upper(), b.upper()):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
 def rank_for_series(products: Sequence[DigiKeyProduct], series: HeaderSeries,
                     signature: FootprintSignature) -> List[DigiKeyProduct]:
     """*products* with the series' predicted MPN first, then other MPNs
-    that fit the pattern, then the rest; DigiKey's order (price) within each."""
+    that fit the pattern, then the rest; within the rest, MPNs sharing a
+    longer prefix with the series MPN first (a single-row ``PREC001SAAN-RC``
+    before a ``PEC01SAAN`` when the series was set by a dual-row
+    ``PREC012DAAN-RC``); DigiKey's order (price) within each."""
     predicted = {
         series.predicted_mpn(n)
         for n in (signature.per_row, signature.positions)
@@ -234,15 +247,15 @@ def rank_for_series(products: Sequence[DigiKeyProduct], series: HeaderSeries,
     } - {None}
     pattern = re.compile(series.pattern) if series.pattern else None
 
-    def tier(p: DigiKeyProduct) -> int:
+    def key(p: DigiKeyProduct):
         mpn = p.mpn or ""
         if mpn in predicted:
-            return 0
+            return (0, 0)
         if pattern is not None and pattern.fullmatch(mpn):
-            return 1
-        return 2
+            return (1, 0)
+        return (2, -_shared_prefix(mpn, series.mpn))
 
-    return sorted(products, key=tier)  # stable: keeps price order in a tier
+    return sorted(products, key=key)  # stable: keeps price order within a key
 
 
 class HeaderRun:
@@ -263,14 +276,19 @@ class HeaderRun:
         self.db = db
         self.series: Dict[str, HeaderSeries] = {}
 
-    def search(self, signature: FootprintSignature, needed: int) -> HeaderSearchResult:
-        """Search one group of *needed* parts with footprint *signature*."""
+    def search(self, signature: FootprintSignature, needed: int, *,
+               db: Optional[PartsDb] = None, use_stored: bool = True) -> HeaderSearchResult:
+        """Search one group of *needed* parts with footprint *signature*.
+        *db* replaces the run's database for this call (the Cockpit opens one
+        per worker thread). With *use_stored* false, stored parts are not
+        offered and DigiKey is searched; rejected parts are still left out."""
+        db = db if db is not None else self.db
         result = HeaderSearchResult(signature=signature)
         category = CATEGORIES.get(signature.family)
         if category is None:
             result.error = f"not a header or socket footprint ({signature.family})"
             return result
-        stored = stored_candidates(self.db, self.client, signature, "", needed)
+        stored = stored_candidates(db if use_stored else None, self.client, signature, "", needed)
         result.notes.extend(stored.notes)
         result.rejected.extend(stored.rejected)
         if stored.parts:
@@ -290,7 +308,7 @@ class HeaderRun:
             for p in products:
                 if rows_after and p.param("Number of Rows") != str(signature.rows):
                     continue
-                if is_rejected(self.db, p):
+                if is_rejected(db, p):
                     result.rejected.append(((p.mpn or "").strip(), "rejected in the parts database"))
                     continue
                 out.append(p)

@@ -26,7 +26,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from kicadtools.components import build_intent
+from kicadtools.components import build_intent, is_virtual_part
 from kicadtools.confirm import ConfirmResult, confirm_resistor
 from kicadtools.intent import ElectricalIntent, ResistorIntent
 from kicadtools.partnum import PartNumbers, extract_part_numbers
@@ -69,7 +69,8 @@ def iter_bom_part_records(root_path: Path) -> List[PartRecord]:
     """Yield one :class:`PartRecord` per placed BOM part across the hierarchy.
 
     Applies the same filter as ``components.bom_components`` — drops power/flag
-    symbols (``#…`` refs), do-not-place parts, and parts excluded from the BOM —
+    symbols (``#…`` refs), do-not-place parts, parts excluded from the BOM, and
+    solder jumpers and net ties (``components.is_virtual_part``) —
     but keeps the *raw* property dict (which the typed intent model discards).
     """
     records: List[PartRecord] = []
@@ -83,6 +84,8 @@ def iter_bom_part_records(root_path: Path) -> List[PartRecord]:
                 if base_props.get("dnp", False):
                     continue
                 if not base_props.get("in_bom", True):
+                    continue
+                if is_virtual_part(base_props.get("Footprint"), base_props.get("Value")):
                     continue
                 props = dict(base_props)
                 props["Reference"] = ref

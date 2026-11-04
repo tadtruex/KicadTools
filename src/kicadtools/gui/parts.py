@@ -1,7 +1,8 @@
 """
-Parts tab: one row per capacitor, resistor or inductor requirement group and
-one per IC group (``IC_PLAN.md`` step 8), plus the background workers that
-search for candidate parts for one group.
+Parts tab: one row per capacitor, resistor or inductor requirement group, one
+per IC group (``IC_PLAN.md`` step 8) and one per through-hole group
+(``THT_PLAN.md`` step 9), plus the background workers that search for
+candidate parts for one group.
 
 Each row shows the group's requirement (Value, Package, Rating — the voltage
 floor of a capacitor, the power floor of a resistor, the saturation-current
@@ -28,6 +29,16 @@ The existing-part lookup of a group (from the assign dialog) is kept per row
 (:meth:`PartsTableModel.record_lookup`), so the row shows the part's evidence
 and warnings after the dialog closes, :meth:`PartsTableModel.set_defaults`
 keeps them, and a reopened dialog reuses the lookup.
+
+A through-hole row (:class:`~kicadtools.thtassign.ThtGroup`) shows its Value,
+the footprint signature under Package (``header 1x04, 2.54 mm, vertical``),
+``through-hole`` under Class, and Rating and Tolerance empty. Its status is
+``no part`` for a footprint with nothing to buy (solder-wire pad, mounting
+hole, bare test pad), ``not searchable`` for a family not searched yet
+(terminal block, loop test point, a footprint that names no part) unless the
+symbol has a DigiKeyPN or MPN, ``assigned`` when every member has an MPN,
+Manufacturer and DigiKeyPN, else ``unassigned``.
+:class:`ThtCandidateWorker` runs its search.
 
 An IC row (:class:`~kicadtools.icrequirement.IcGroup`) shows the MPN field,
 else the Value, under Value; the package parsed from the footprint name (or
@@ -91,6 +102,7 @@ from kicadtools.requirement import (
 )
 from kicadtools.resolve import Cache, cached_jlcpcb_part
 from kicadtools.suppliers import DigiKeyClient, jlcpcb_category_search, jlcpcb_search
+from kicadtools.thtassign import ThtGroup, assess_tht, signature_text
 from kicadtools.units import fmt_percent
 
 PARTS_COLUMNS = ["Value", "Package", "Footprint", "Rating", "Class", "Tolerance",
@@ -116,6 +128,9 @@ STATUS_CONFLICT = "conflict"
 # A footprint with no chip-size code (radial or axial electrolytic). Those
 # packages are a planned addition (CAPACITOR_PLAN.md, TBD 2).
 STATUS_NOT_SEARCHABLE = "not searchable"
+# A through-hole footprint with nothing to buy: solder-wire pad, mounting
+# hole, bare test pad (THT_PLAN.md step 9).
+STATUS_NO_PART = "no part"
 
 DASH = "—"
 
@@ -143,8 +158,11 @@ _SOURCE_MARKERS = {
 # The plan shape: {source_file: {symbol_uuid: {property_key: value or None}}}.
 Plan = Dict[Path, Dict[str, Dict[str, Optional[str]]]]
 
-# A Parts-tab row: a capacitor/resistor group or an IC group.
-Group = Union[RequirementGroup, IcGroup]
+# A Parts-tab row: a capacitor/resistor/inductor group, an IC group or a
+# through-hole group.
+Group = Union[RequirementGroup, IcGroup, ThtGroup]
+
+THT_CLASS = "through-hole"
 
 
 # --------------------------------------------------------------------------- #
@@ -269,6 +287,11 @@ def is_ic(group: object) -> bool:
     return isinstance(group, IcGroup)
 
 
+def is_tht(group: object) -> bool:
+    """True for a through-hole group (a row searched by footprint)."""
+    return isinstance(group, ThtGroup)
+
+
 def footprint_name(footprint: str) -> str:
     """A KiCad lib id without its library: ``"SOT-23-5"`` for
     ``"Package_TO_SOT_SMD:SOT-23-5"``; ``""`` stays ``""``."""
@@ -382,8 +405,8 @@ class PartsTableModel(QAbstractTableModel):
 
     def _recompute(self, row: int, defaults: Mapping[str, str]) -> None:
         group = self._groups[row]
-        if is_ic(group):
-            return      # an IC requirement has no defaults
+        if is_ic(group) or is_tht(group):
+            return      # an IC or through-hole requirement has no defaults
         lookup = self._lookups.get(row)
         group.requirement = requirement_from_lookup(group, lookup, defaults)[0]
 
@@ -465,6 +488,8 @@ class PartsTableModel(QAbstractTableModel):
         """The row's conflict lines: a capacitor, resistor or inductor requirement's
         conflicts; an IC's from its recorded search."""
         group = self._groups[row]
+        if is_tht(group):
+            return []
         if is_ic(group):
             res = self._ic_results.get(row)
             return list(res.conflicts) if res is not None else []
@@ -485,6 +510,10 @@ class PartsTableModel(QAbstractTableModel):
             return STATUS_CONFLICT
         if group.assigned:
             return STATUS_ASSIGNED
+        if is_tht(group):
+            if req.no_part:
+                return STATUS_NO_PART
+            return STATUS_UNASSIGNED if req.searchable else STATUS_NOT_SEARCHABLE
         if is_ic(group):
             return STATUS_NOT_SEARCHABLE if not req.searchable else STATUS_UNASSIGNED
         if (req.footprint and not req.package.value
@@ -495,7 +524,7 @@ class PartsTableModel(QAbstractTableModel):
     def summary(self) -> Dict[str, int]:
         """Row counts by status."""
         counts = {STATUS_ASSIGNED: 0, STATUS_QUEUED: 0, STATUS_UNASSIGNED: 0,
-                  STATUS_CONFLICT: 0, STATUS_NOT_SEARCHABLE: 0}
+                  STATUS_CONFLICT: 0, STATUS_NOT_SEARCHABLE: 0, STATUS_NO_PART: 0}
         for r in range(len(self._groups)):
             counts[self.status(r)] += 1
         return counts
@@ -530,7 +559,8 @@ class PartsTableModel(QAbstractTableModel):
             return ("Voltage:Min for a capacitor, Power:Min for a resistor, "
                     "Current:Min (saturation current) for an inductor")
         if role == Qt.ToolTipRole and section == COL_DIELECTRIC:
-            return "Dielectric for a capacitor, shielding for an inductor"
+            return ("Dielectric for a capacitor, shielding for an inductor; "
+                    "through-hole for a part found by its footprint")
         if role == Qt.ToolTipRole and section == COL_FOOTPRINT:
             return ("For an IC: red when the footprint does not match the part, "
                     "amber when it cannot be checked against it")
@@ -548,6 +578,8 @@ class PartsTableModel(QAbstractTableModel):
             return footprint_name(req.footprint) or DASH
         if is_ic(group):
             return self._ic_cell_text(row, col, group, req)
+        if is_tht(group):
+            return self._tht_cell_text(row, col, group, req)
         if col == COL_VALUE:
             return value_cell(req)
         t = req.ptype
@@ -591,6 +623,58 @@ class PartsTableModel(QAbstractTableModel):
         if col == COL_MPN:
             return self.chosen_mpn(row)
         return ""
+
+    def _tht_cell_text(self, row: int, col: int, group: ThtGroup, req) -> str:
+        if col == COL_VALUE:
+            return req.value_text or DASH
+        if col == COL_PACKAGE:
+            return signature_text(req.signature)
+        if col == COL_DIELECTRIC:
+            return THT_CLASS
+        if col in (COL_RATING, COL_TOLERANCE):
+            return ""
+        if col == COL_QTY:
+            return str(group.quantity)
+        if col == COL_REFERENCES:
+            return ", ".join(group.references)
+        if col == COL_CURRENT:
+            return current_part_cell(group)
+        if col == COL_STATUS:
+            return self.status(row)
+        if col == COL_MPN:
+            return self.chosen_mpn(row)
+        return ""
+
+    def _tht_tooltip(self, row: int, col: int) -> Optional[str]:
+        group = self._groups[row]
+        req = group.requirement
+        status = self.status(row)
+        if col == COL_FOOTPRINT:
+            lines = [req.footprint or "No footprint."]
+            if req.pad_count is not None:
+                lines.append(f"{req.pad_count} pads.")
+            if req.mounting_note:
+                lines.append(req.mounting_note)
+            return "\n".join(lines)
+        if col == COL_REFERENCES:
+            return ", ".join(group.references)
+        if col == COL_PACKAGE:
+            return "Read from the footprint name."
+        if col == COL_CURRENT:
+            e = group.existing
+            lines = [f"{name}: {v}" for name, v in (
+                ("MPN", e.mpn), ("Manufacturer", e.manufacturer),
+                ("DigiKeyPN", e.digikey_pn)) if v]
+            return "\n".join(lines) if lines else "No part number on the schematic."
+        if status == STATUS_NO_PART:
+            return "Nothing to buy for this footprint (a pad, hole or bare test point)."
+        if status == STATUS_NOT_SEARCHABLE:
+            return f"Not searchable: {req.problem()}."
+        if status == STATUS_ASSIGNED:
+            return "MPN, Manufacturer and DigiKeyPN on the schematic."
+        if status == STATUS_UNASSIGNED:
+            return "Through-hole, soldered by hand: DigiKey only. Double-click to assign a part."
+        return None
 
     def _ic_tooltip(self, row: int, col: int) -> Optional[str]:
         group = self._groups[row]
@@ -639,6 +723,8 @@ class PartsTableModel(QAbstractTableModel):
         if role == Qt.ToolTipRole:
             if is_ic(self._groups[r]):
                 return self._ic_tooltip(r, col)
+            if is_tht(self._groups[r]):
+                return self._tht_tooltip(r, col)
             req = self.requirement_at(r)
             if col == COL_FOOTPRINT and req.footprint:
                 return req.footprint
@@ -799,6 +885,42 @@ class IcCandidateWorker(QObject):
         finally:
             if cache is not None:
                 cache.close()
+            if db is not None:
+                db.close()
+            QThread.currentThread().quit()
+
+
+class ThtCandidateWorker(QObject):
+    """Runs :func:`kicadtools.thtassign.assess_tht` for one through-hole group
+    off the GUI thread; emits ``found`` (a ``ThtSearchResult``) or
+    ``failed``. *run* is the window's :class:`~kicadtools.headersearch.HeaderRun`
+    (one header series per run); the parts database is opened on the worker
+    thread and closed before the thread's event loop is ended. With
+    *use_stored* false, parts stored in the database are not offered and
+    DigiKey is searched."""
+
+    found = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, *, group: ThtGroup, run, needed: int, db_path: Path,
+                 use_stored: bool = True):
+        super().__init__()
+        self._group = group
+        self._run = run
+        self._needed = needed
+        self._db_path = db_path
+        self._use_stored = use_stored
+
+    def run(self) -> None:
+        db: Optional[PartsDb] = None
+        try:
+            db = PartsDb(self._db_path)
+            result = assess_tht(self._group, run=self._run, digikey=self._run.client,
+                                db=db, needed=self._needed, use_stored=self._use_stored)
+            self.found.emit(result)
+        except Exception as exc:  # noqa: BLE001 — report any failure in the dialog
+            self.failed.emit(str(exc))
+        finally:
             if db is not None:
                 db.close()
             QThread.currentThread().quit()

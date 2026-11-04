@@ -55,7 +55,7 @@ to-do list. State on 2026-11-03:
   pad, and `ECG/Library/footprints.pretty/CP_20_10_ADI_NOTH.kicad_mod` has 20
   pads and none. Check the datasheet's exposed-pad recommendation.
 
-## Through-hole part assignment: steps 1–6 and 8 built (2026-11-04)
+## Through-hole part assignment: steps 1–6, 8 and 9 built (2026-11-04)
 
 `THT_PLAN.md` holds the decisions, the board survey, the DigiKey API test and
 ten build steps. Step 1 (mounting per part, `mounting.py`) is committed as
@@ -66,9 +66,12 @@ and the run's series, `headersearch.py`) as 11e9a5f, all pushed. Step 6
 (part-named footprints, `namedsearch.py`) and the package-name fix in
 `thtfootprint.py` were committed on 2026-11-04 as c5bc41d, not pushed. Step 8 (parts
 database, `thtdb.py`, table `tht` in `partsdb.py`) was committed on
-2026-11-04, not pushed. The next step is step 9 (Cockpit), then step 10 (live
-check) and step 7 (through-hole passives) last. See the "as built" sections
-in the plan. Suite 1596 passing.
+2026-11-04, not pushed. Step 9 (Cockpit: through-hole rows,
+`ThtAssignDialog`, `thtassign.py`, DigiKey call count in the status bar,
+`hdr.manufacturers` setting) was committed on 2026-11-04, not pushed.
+Next: step 10 (your live check in the Cockpit on BarrelJackAdapter, SX1509,
+MiDi and Breakout), then step 7 (through-hole passives). See the "as built"
+sections in the plan. Suite 1622 passing.
 - The next Cockpit open adds the `tht` table to `~/Code/Boards/parts.sqlite`
   (no migration, every row kept; checked on a copy).
 
@@ -76,11 +79,9 @@ in the plan. Suite 1596 passing.
   through one limiter (0.6 s apart, stops at 50 left for the day, waits out a
   short 429). Tests run without the real DigiKey credentials
   (`tests/conftest.py`), so they cannot spend the daily limit.
-- Not done from steps 1–5: the Cockpit does not show the limiter's count
-  (`DIGIKEY_LIMITER.status()`); solder jumpers and net ties are "no part"
-  signatures but the exports still list them as SMD parts; the header maker
-  list (`hdr.manufacturers`) is not a setting yet. The Parts tab has no
-  through-hole rows until step 9.
+- Solder jumpers and net ties are not parts (user decision, 2026-11-04): left
+  out of every BOM, the CPL and the Cockpit's lists
+  (`components.is_virtual_part`), whatever their BOM flag says.
 
 - Decisions: DigiKey only, no LCSC; the JLCPCB BOM and CPL keep their SMD-only
   choices (revised 2026-11-03); headers take one series per run, set by the

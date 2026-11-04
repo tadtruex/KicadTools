@@ -161,7 +161,12 @@ spacings, maker, mpn, and `what` for no-part footprints). Tests:
   jumper libraries. Gaps: SIP resistor arrays give no pitch; `Connector_Pin`
   press pins, tactile switches, crystals and the unnamed barrel jack are
   "other".
-- Not done: the exports still list solder jumpers and net ties as SMD parts.
+- 2026-11-04: solder jumpers and net ties are not parts (user decision).
+  `thtfootprint.virtual_part` recognizes them by footprint name in any
+  library (`SolderJumper…`, `NetTie…`), or by Value without a footprint, and
+  `components.bom_components` and `resolve.iter_bom_part_records` drop them,
+  so no BOM, CPL or Cockpit list has them. 22 solder jumpers on 10 boards
+  (12 on `hbridge`); no net ties.
 - 2026-11-04: package names no longer read as named parts. The short-name
   rule (no maker token) now needs a digit, skips KiCad's `Package_*`
   libraries, and skips package and size tokens (`TO-92`, `TO56-3`,
@@ -376,6 +381,47 @@ table was: an existing file gains the table on open and keeps every row.
 Through-hole rows on the Parts tab: class "THT", status "no part" for pads,
 "needs part" otherwise, an assign dialog for the header and passive paths.
 The header dialog shows the run's series once it is set.
+
+### Step 9 — as built (2026-11-04)
+
+`src/kicadtools/thtassign.py` (no Qt): `ThtRequirement`, `ThtGroup`,
+`group_tht(records, board_mounting)`, `ThtCandidate`, `ThtSearchResult`,
+`assess_tht(group, *, run, digikey, db, needed, use_stored)`,
+`tht_assignment_plan`. `gui/parts.py`: through-hole rows, status `no part`,
+`ThtCandidateWorker`. `gui/tht_assign_dialog.py`: `ThtAssignDialog`, with the
+IC dialog's interface so the window's search queue, accept and reject paths
+take it unchanged. `gui/main_window.py`: rows loaded after the IC rows, one
+`HeaderRun` per opened schematic, the series set on the first header or
+socket accepted, `hdr.manufacturers` read from the settings table, and the
+DigiKey call count (`DIGIKEY_LIMITER.status()`) as a permanent status-bar
+label updated after each search. Tests: `tests/test_thtassign.py`,
+`tests/test_gui_tht.py`.
+
+- Rows: parts that are not capacitors, resistors, inductors or ICs, with a
+  through-hole footprint (step 1's mounting). Grouped by footprint, Value,
+  MPN and DigiKey PN. Through-hole capacitors with an intent stay on their
+  capacitor rows (step 7, `CAPACITOR_PLAN.md` TBD 2).
+- Status: `no part`, `not searchable` (terminal blocks, loop test points,
+  `other` footprints), `assigned` (MPN, Manufacturer and DigiKeyPN; no LCSC),
+  `unassigned`, `queued`.
+- Beyond the plan: the symbol's own `DigiKeyPN`, else `MPN`, is looked up
+  exactly first, for every family. Many through-hole symbols on the boards
+  hold a DigiKey PN and no MPN or Manufacturer (BuckConverter J1, RV1,
+  TP1–6); this fills them in, and makes a terminal block or loop test point
+  with a part number searchable.
+- Beyond the plan: header ranking outside the series pattern prefers MPNs
+  that share a longer prefix with the series MPN. Live, a series set by the
+  dual-row `PREC012DAAN-RC` proposed `PEC01SAAN` for a 1×01 before
+  `PREC001SAAN-RC`; it now proposes `PREC001SAAN-RC`.
+- The dialog's first search uses stored parts; **Search DigiKey** skips them.
+- Write plan: `MPN`, `Manufacturer`, `DigiKeyPN`; `LCSC` and alias
+  spellings removed; `Value` and `Footprint` never written.
+- Live check (2026-11-04, offscreen Cockpit, copy of `parts.sqlite`, no
+  save; 10 DigiKey calls): BarrelJackAdapter J2/J4 → `PREC004SAAN-RC` (20
+  shown, pads match); SX1509 J5 (2×12) → `PREC012DAAN-RC`, which set the
+  series; SX1509 J7 (1×01) → two Sullins parts; Breakout J101 →
+  `S3B-PH-K-S`. Reopened, J101 came from the database in 1 call.
+- Not done: the Parts tab does not show SMD mounting for other rows.
 
 ### Step 10 — live check
 

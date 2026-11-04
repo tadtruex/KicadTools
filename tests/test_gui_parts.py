@@ -141,7 +141,7 @@ def test_queue_changes_status_and_requirement():
     assert model.data(model.index(0, 0), Qt.BackgroundRole) is None
     assert model.status(1) == STATUS_UNASSIGNED
     assert model.summary() == {STATUS_ASSIGNED: 0, STATUS_QUEUED: 1, STATUS_UNASSIGNED: 3,
-                               "conflict": 0, "not searchable": 0}
+                               "conflict": 0, "not searchable": 0, "no part": 0}
 
 
 def test_accepted_edits_shape_keeps_none_values():
@@ -258,9 +258,10 @@ def window(tmp_path, monkeypatch):
 def test_main_window_parts_tab_round_trip(window, tmp_path):
     win, board = window
     model = win.parts_model
-    # ECG: 4 capacitor groups, 9 resistor groups, then 3 IC groups.
-    assert model.rowCount() == 16
-    assert "16 part groups, 16 unassigned" in win.statusBar().currentMessage()
+    # ECG: 4 capacitor groups, 9 resistor groups, 3 IC groups, then 5
+    # through-hole header groups (THT_PLAN.md step 9).
+    assert model.rowCount() == 21
+    assert "21 part groups, 21 unassigned" in win.statusBar().currentMessage()
 
     group = model.group_at(0)
     req = group.requirement.edited(rating_min=16.0)

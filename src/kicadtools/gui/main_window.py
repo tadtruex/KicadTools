@@ -1,10 +1,12 @@
 """The BOM Cockpit main window.
 
 The Parts tab holds capacitor, resistor and inductor groups and, after them, IC groups
-(``IC_PLAN.md`` step 8). Double-clicking a row opens the assign dialog for its
-kind (:class:`AssignDialog` or :class:`IcAssignDialog`); both run their
-searches through the same one-worker-at-a-time queue
-(:class:`CandidateWorker` or :class:`IcCandidateWorker`), and an accepted part
+(``IC_PLAN.md`` step 8) and through-hole groups (``THT_PLAN.md`` step 9).
+Double-clicking a row opens the assign dialog for its kind
+(:class:`AssignDialog`, :class:`IcAssignDialog` or :class:`ThtAssignDialog`);
+all run their searches through the same one-worker-at-a-time queue
+(:class:`CandidateWorker`, :class:`IcCandidateWorker` or
+:class:`ThtCandidateWorker`), and an accepted part
 is recorded in the parts database and its write plan queued on the model, so
 File > Save writes it merged with the other tabs' edits.
 """
@@ -66,22 +68,28 @@ from kicadtools.gui.lcsc import (
 )
 from kicadtools.gui.assign_dialog import AssignDialog
 from kicadtools.gui.ic_assign_dialog import IcAssignDialog
+from kicadtools.gui.tht_assign_dialog import ThtAssignDialog
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.gui.parts import (
     STATUS_ASSIGNED,
     STATUS_CONFLICT,
+    STATUS_NO_PART,
     STATUS_NOT_SEARCHABLE,
     STATUS_UNASSIGNED,
     CandidateWorker,
     IcCandidateWorker,
     PartsTableModel,
+    ThtCandidateWorker,
     board_label,
     is_ic,
+    is_tht,
     requirement_settings,
 )
 from kicadtools.gui.param_editor import ElectricalParamsDialog
 from kicadtools.gui.substitute_dialog import SubstituteDialog, describe_part
+from kicadtools.headersearch import HEADER_MAKERS, HeaderRun
 from kicadtools.icrequirement import group_ics
+from kicadtools.mounting import BoardMounting
 from kicadtools.icsearch import MATCH, ic_assignment_plan
 from kicadtools.naturalsort import natural_key
 from kicadtools.partrotation import PartRotationStore
@@ -95,9 +103,15 @@ from kicadtools.substitute import (
     STOCK_OUT,
     SUPPORTED_TYPES,
 )
+from kicadtools import suppliers
 from kicadtools.suppliers import DigiKeyClient, _norm_mpn, preferred_digikey_pn
+from kicadtools.thtassign import group_tht, tht_assignment_plan
+from kicadtools.thtfootprint import HEADER, SOCKET
 
 _LCSC_CACHE = Path.home() / ".kicadtools" / "lcsc_cache.sqlite"
+
+# Setting: the header and socket maker list, comma-separated (THT_PLAN.md step 5).
+HEADER_MAKERS_SETTING = "hdr.manufacturers"
 
 
 class MainWindow(QMainWindow):
@@ -117,7 +131,10 @@ class MainWindow(QMainWindow):
         self._threads: list = []
         # The Parts tab's candidate search: one worker at a time. A request made
         # while one runs is kept in _search_next; only the latest is kept.
-        self._assign_dialog: Optional["AssignDialog | IcAssignDialog"] = None
+        self._assign_dialog: Optional["AssignDialog | IcAssignDialog | ThtAssignDialog"] = None
+        # Header and socket searches for the open board: one series per run,
+        # reset when a schematic is opened (THT_PLAN.md step 5).
+        self._header_run: Optional[HeaderRun] = None
         self._search_running = False
         # The dialog and request number of the running search, so an outcome is
         # shown only in the dialog (and for the request) it was made for.
@@ -145,6 +162,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(tabs)
 
         self._build_menu()
+        # DigiKey's daily limit is 1000 calls; the count stays in view.
+        self._digikey_label = QLabel("")
+        self.statusBar().addPermanentWidget(self._digikey_label)
+        self._refresh_digikey()
         self.statusBar().showMessage("Open a schematic to begin.")
 
         if schematic:
@@ -205,9 +226,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         layout.addWidget(self.parts_table)
         hint = QLabel(
-            "Double-click a capacitor, resistor, inductor or IC group to choose its part. Stock is "
-            "checked against the Boards count on the LCSC tab. An IC's Footprint cell is "
-            "red when the footprint does not match the part, amber when it cannot be checked."
+            "Double-click a capacitor, resistor, inductor, IC or through-hole group to choose "
+            "its part. Stock is checked against the Boards count on the LCSC tab. An IC's "
+            "Footprint cell is red when the footprint does not match the part, amber when it "
+            "cannot be checked. Through-hole parts are soldered by hand: DigiKey only."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -309,9 +331,12 @@ class MainWindow(QMainWindow):
         self.table.resizeColumnsToContents()  # sensible initial widths; still draggable
         self.lcsc_model.load(self._records)
         self.lcsc_table.resizeColumnsToContents()
-        # Capacitor and resistor groups first, then ICs, each in reference order.
+        # Capacitor, resistor and inductor groups first, then ICs, then
+        # through-hole parts, each in reference order.
         self.parts_model.load(group_parts(self._records, self._part_defaults())
-                              + group_ics(self._records))
+                              + group_ics(self._records)
+                              + group_tht(self._records, BoardMounting.for_schematic(path)))
+        self._header_run = HeaderRun(DigiKeyClient(), makers=self._header_makers())
         self.parts_table.resizeColumnsToContents()
         self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
         self.setWindowModified(False)  # a fresh load matches disk → clean
@@ -624,9 +649,37 @@ class MainWindow(QMainWindow):
         settings = self._parts_db.settings() if self._parts_db is not None else {}
         return part_defaults(settings)
 
+    def _header_makers(self) -> "tuple[str, ...]":
+        """The header and socket maker list: the ``hdr.manufacturers`` setting
+        (comma-separated), else :data:`~kicadtools.headersearch.HEADER_MAKERS`."""
+        text = self._parts_db.get_setting(HEADER_MAKERS_SETTING) if self._parts_db else None
+        makers = tuple(m.strip() for m in (text or "").split(",") if m.strip())
+        return makers or HEADER_MAKERS
+
+    def _refresh_digikey(self) -> None:
+        """Show the DigiKey call count (session and day) in the status bar."""
+        self._digikey_label.setText(suppliers.DIGIKEY_LIMITER.status())
+
     def _parts_double_clicked(self, index) -> None:
         row = self.parts_proxy.mapToSource(index).row()
         group = self.parts_model.group_at(row)
+        if is_tht(group):
+            status = self.parts_model.status(row)
+            if status == STATUS_NO_PART:
+                self.statusBar().showMessage(
+                    "Nothing to buy for this footprint (a pad, hole or bare test point).")
+                return
+            if status == STATUS_NOT_SEARCHABLE:
+                self.statusBar().showMessage(
+                    f"Not searchable: {group.requirement.problem()}. Add a DigiKeyPN or MPN "
+                    "to the symbol to have it looked up.")
+                return
+            if status == STATUS_ASSIGNED:
+                self.statusBar().showMessage(
+                    "That part already has its MPN, Manufacturer and DigiKeyPN on the schematic.")
+                return
+            self._assign_group(row)
+            return
         if is_ic(group):
             # An assigned IC opens too: the dialog shows its footprint check.
             if self.parts_model.status(row) == STATUS_NOT_SEARCHABLE:
@@ -661,6 +714,9 @@ class MainWindow(QMainWindow):
             return
         if is_ic(self.parts_model.group_at(row)):
             self._assign_ic_group(row)
+            return
+        if is_tht(self.parts_model.group_at(row)):
+            self._assign_tht_group(row)
             return
         # Re-read the remembered settings, so a defaulted field starts with the
         # last value used (an earlier accept this session may have changed it).
@@ -738,22 +794,45 @@ class MainWindow(QMainWindow):
             return
         self._accept_candidate(row, group, final_req, cand)
 
+    def _assign_tht_group(self, row: int) -> None:
+        """The through-hole counterpart of :meth:`_assign_group`."""
+        group = self.parts_model.group_at(row)
+        run = self._header_run
+        series = ""
+        if run is not None and group.requirement.family in run.series:
+            s = run.series[group.requirement.family]
+            series = f"{s.manufacturer} {s.mpn}"
+        dialog = ThtAssignDialog(group, self.build_qty.value(), self, series=series)
+        cand, final_req = self._run_assign_dialog(dialog)
+        dialog.deleteLater()
+        still_here = (row < self.parts_model.rowCount()
+                      and self.parts_model.group_at(row) is group)
+        if not still_here or cand is None or final_req is None:
+            return
+        self._accept_candidate(row, group, final_req, cand)
+
     def _accept_candidate(self, row: int, group, req, cand) -> None:
         """Record *cand* for *group*: database accept and usage, remembered
         settings (capacitors, resistors and inductors only), and the queued write plan
         (:func:`assignment_plan`, or
         :func:`kicadtools.icsearch.ic_assignment_plan` for an IC)."""
         ic = is_ic(group)
+        tht = is_tht(group)
         try:
-            plan = ic_assignment_plan(group, cand) if ic else assignment_plan(group, req, cand)
+            if tht:
+                plan = tht_assignment_plan(group, cand)
+            elif ic:
+                plan = ic_assignment_plan(group, cand)
+            else:
+                plan = assignment_plan(group, req, cand)
         except ValueError as exc:
             QMessageBox.warning(self, "Can't assign", str(exc))
             return
         db = self._parts_db
         if db is None:
             return
-        # An IC has no rating or dielectric to remember as a default.
-        settings = {} if ic else requirement_settings(req)
+        # An IC or through-hole part has no rating or dielectric to remember.
+        settings = {} if ic or tht else requirement_settings(req)
         try:
             part_id = db.accept_part(cand.choice())
             if self._board is not None:
@@ -764,6 +843,15 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Parts database", f"Could not record the part:\n{exc}")
             return
         self.parts_model.queue(row, req, cand, plan)
+        if tht:
+            # The first header or socket accepted in a run sets its series.
+            if req.family in (HEADER, SOCKET) and self._header_run is not None:
+                self._header_run.pick(cand.product, req.signature)
+            self._mark_dirty()
+            self.statusBar().showMessage(
+                f"{', '.join(group.references)} → {cand.mpn} ({cand.digikey_pn}). "
+                "Save to write it.")
+            return
         if not ic:
             # The settings written above are the new defaults for the other groups.
             self.parts_model.set_defaults(self._part_defaults())
@@ -796,6 +884,20 @@ class MainWindow(QMainWindow):
         needed = dialog.needed if dialog is not None else 1
         self._search_running = True
         self._search_for = (dialog, tag)
+        if isinstance(dialog, ThtAssignDialog):
+            if self._header_run is None:
+                self._header_run = HeaderRun(DigiKeyClient(), makers=self._header_makers())
+            tht_worker = ThtCandidateWorker(
+                group=dialog.group,
+                run=self._header_run,
+                needed=needed,
+                db_path=self._parts_db_path,
+                use_stored=not search_suppliers,
+            )
+            tht_worker.found.connect(self._on_candidates)
+            tht_worker.failed.connect(self._on_candidates_failed)
+            self._start(tht_worker)
+            return
         if isinstance(dialog, IcAssignDialog):
             # The pad count is read on the worker from the board's .kicad_pcb
             # and the footprint libraries (first request only). A request
@@ -835,6 +937,7 @@ class MainWindow(QMainWindow):
         self._start(worker)
 
     def _search_done(self) -> None:
+        self._refresh_digikey()
         self._search_running = False
         self._search_for = None
         nxt, self._search_next = self._search_next, None
@@ -1256,4 +1359,6 @@ class MainWindow(QMainWindow):
                if p[STATUS_CONFLICT] else "")
             + (f", {p[STATUS_NOT_SEARCHABLE]} not searchable"
                if p[STATUS_NOT_SEARCHABLE] else "")
+            + (f", {p[STATUS_NO_PART]} with no part to buy"
+               if p[STATUS_NO_PART] else "")
         )

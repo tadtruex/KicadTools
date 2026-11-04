@@ -327,6 +327,7 @@ def find_named_candidates(
     needed: int,
     pad_count: Optional[int] = None,
     db: Optional[PartsDb] = None,
+    use_stored: bool = True,
 ) -> NamedSearchResult:
     """The DigiKey parts for a group whose footprint has *signature* and
     whose first member's properties are *props*; *needed* is the build
@@ -336,12 +337,14 @@ def find_named_candidates(
     With *db*, parts stored for the group's footprint and Value
     (:func:`kicadtools.thtdb.stored_candidates`) come first; when one of them
     passes, DigiKey is not searched. Parts *db* records as rejected are
-    left out of the search results."""
+    left out of the search results. With *use_stored* false, stored parts
+    are not offered and DigiKey is searched."""
     result = NamedSearchResult(signature=signature)
     if not getattr(digikey, "configured", False):
         result.problem = NO_DIGIKEY
         return result
-    stored = stored_candidates(db, digikey, signature, props.get("Value"), needed)
+    stored = stored_candidates(db if use_stored else None, digikey, signature,
+                               props.get("Value"), needed)
     result.notes.extend(stored.notes)
     result.rejected.extend(stored.rejected)
     if stored.parts:
