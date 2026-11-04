@@ -24,7 +24,9 @@ cheapest first.
    group falls back to the maker list, with a note. Picking a part for a
    later group does not change the series.
 
-The series is not stored between runs.
+The series is not stored between runs. Parts accepted earlier are: with a
+parts database, a group whose footprint signature has a stored part is
+offered that part first and DigiKey is not searched (``THT_PLAN.md`` step 8).
 """
 from __future__ import annotations
 
@@ -33,7 +35,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from kicadtools.icsearch import stock_floor, stock_minimum
+from kicadtools.partsdb import DbTht, PartsDb
 from kicadtools.suppliers import DigiKeyClient, DigiKeyProduct
+from kicadtools.thtdb import is_rejected, stored_candidates
 from kicadtools.thtfootprint import HEADER, HORIZONTAL, SOCKET, FootprintSignature
 
 HEADER_CATEGORY = 314  # Headers, Male Pins
@@ -193,6 +197,14 @@ class HeaderSearchResult:
     notes: List[str] = field(default_factory=list)
     unmatched: Tuple[str, ...] = ()
     error: str = ""
+    # Parts from the parts database (candidates in the same order); when
+    # there are any, DigiKey was not searched.
+    stored: List[DbTht] = field(default_factory=list)
+    rejected: List[Tuple[str, str]] = field(default_factory=list)  # (MPN, reason)
+
+    @property
+    def from_database(self) -> bool:
+        return bool(self.stored)
 
     @property
     def proposed(self) -> Optional[DigiKeyProduct]:
@@ -238,13 +250,17 @@ class HeaderRun:
 
     *client* is a :class:`DigiKeyClient`; *makers* the maker list for
     searches without a series; *needed* the build quantity of each group
-    is passed per search."""
+    is passed per search. With *db*, a group whose footprint signature has a
+    stored part (:func:`kicadtools.thtdb.stored_candidates`) is offered that
+    part and DigiKey is not searched; parts *db* records as rejected are
+    left out of search results."""
 
     def __init__(self, client: DigiKeyClient, *, makers: Sequence[str] = HEADER_MAKERS,
-                 limit: int = 20):
+                 limit: int = 20, db: Optional[PartsDb] = None):
         self.client = client
         self.makers = tuple(makers)
         self.limit = limit
+        self.db = db
         self.series: Dict[str, HeaderSeries] = {}
 
     def search(self, signature: FootprintSignature, needed: int) -> HeaderSearchResult:
@@ -254,6 +270,15 @@ class HeaderRun:
         if category is None:
             result.error = f"not a header or socket footprint ({signature.family})"
             return result
+        stored = stored_candidates(self.db, self.client, signature, "", needed)
+        result.notes.extend(stored.notes)
+        result.rejected.extend(stored.rejected)
+        if stored.parts:
+            result.stored = [row for row, _ in stored.parts]
+            result.candidates = [product for _, product in stored.parts]
+            result.total = len(result.candidates)
+            self._note_stock(result, needed)
+            return result
         filters = header_filters(signature)
         min_stock = stock_minimum(needed)
         series = self.series.get(signature.family)
@@ -261,9 +286,15 @@ class HeaderRun:
         limit = _ROWS_AFTER_SEARCH_LIMIT if rows_after else self.limit
 
         def keep(products):
-            if not rows_after:
-                return list(products)
-            return [p for p in products if p.param("Number of Rows") == str(signature.rows)]
+            out = []
+            for p in products:
+                if rows_after and p.param("Number of Rows") != str(signature.rows):
+                    continue
+                if is_rejected(self.db, p):
+                    result.rejected.append(((p.mpn or "").strip(), "rejected in the parts database"))
+                    continue
+                out.append(p)
+            return out
 
         if series is not None:
             series_filters = {**filters, **series.filters_for(signature)}

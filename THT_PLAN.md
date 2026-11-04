@@ -333,6 +333,44 @@ film and ceramic categories to be found.
 Accepted through-hole parts are stored with their footprint signature, so a
 later board with the same signature finds the stored part first.
 
+### Step 8 — as built (2026-11-04)
+
+`partsdb.py`: table `tht` (part_id, family, signature, value_key,
+footprint, positions; index on signature and value_key), `part.type` =
+`"tht"`, `ThtChoice` / `DbTht`, `PartsDb.find_tht(signature, value_key)`
+(accepted only; usage count, then the latest decision, then MPN). Added
+within schema version 2 with `CREATE TABLE IF NOT EXISTS`, as the inductor
+table was: an existing file gains the table on open and keeps every row.
+`src/kicadtools/thtdb.py`: `signature_key`, `value_key`, `db_key`,
+`tht_choice`, `stored_candidates`, and the DigiKey checks shared with
+`namedsearch` (`reject_reason`, `stock_warning`, `positions_of`). Tests:
+`tests/test_thtdb.py`.
+
+- The key is the footprint signature (family, rows, positions, pitch,
+  orientation, SMD variant, passive body and spacings, and the part-number
+  token of a part-named footprint), not the library id: the same header
+  geometry from two libraries finds the same part.
+- Headers, sockets and terminal blocks key on the signature alone. Every
+  other family keys on the normalized Value too: `Bourns_3386P` takes a 200K
+  and a 10K pot alike. A different Value gives a fresh search instead of a
+  wrong part. A part-named footprint whose Value differs between boards
+  (`I2C_Conn` here, `JST_3` there) is searched again on the second board.
+- A stored part is refreshed at DigiKey (one `product_for`, by DigiKey PN)
+  and offered only when it passes the search's checks (active, stock at
+  least 10 × the build quantity). When one passes, DigiKey is not searched;
+  `HeaderSearchResult.from_database` and `NamedCandidate.stored` say so.
+  This keeps within DigiKey's 1000 calls a day; the Cockpit (step 9) can
+  offer a search anyway.
+- Parts recorded as rejected are left out of the header and part-named
+  search results, with the reason in `rejected`.
+- A stored header the user picks sets the run's series, as any first pick
+  does (`HeaderRun.pick`).
+- Checked on a copy of `parts.sqlite`: the table was added, the 15 stored
+  parts were kept. Live: Breakout J101 searched (6 DigiKey calls), accepted
+  `S3B-PH-K-S`, searched again from the database (1 call).
+- Not done: accepting and rejecting from the Cockpit, and recording usage,
+  are step 9.
+
 ### Step 9 — Cockpit
 
 Through-hole rows on the Parts tab: class "THT", status "no part" for pads,

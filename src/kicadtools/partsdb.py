@@ -22,6 +22,9 @@ Tables (see ``CAPACITOR_PLAN.md`` and ``IC_PLAN.md`` step 7):
   a part;
 - ``ic`` — DigiKey's package/case and pin count of an IC (``part.type`` =
   ``"ic"``; modules are ICs here);
+- ``tht`` — a through-hole part (``part.type`` = ``"tht"``; ``THT_PLAN.md``
+  step 8): the footprint signature it was accepted for, the Value key when
+  the family needs one, the footprint, the family and the positions;
 - ``supplier_pn`` — DigiKey and LCSC part numbers of a part. An IC first
   accepted while JLCPCB does not stock it has no LCSC row; an LCSC row
   recorded earlier is kept when the IC is accepted again without one (the
@@ -34,7 +37,7 @@ in one transaction, and every existing row is kept. A file of any other
 version is refused without being changed. The ``inductor`` table was added
 within version 2: the schema text is run on every open and holds only
 ``CREATE TABLE IF NOT EXISTS``, so a version-2 file without the table gains
-it and keeps every row.
+it and keeps every row. The ``tht`` table was added the same way.
 
 Stock and price are not stored; they change by the hour and are fetched from
 the suppliers (through the existing JLCPCB cache) when candidates are listed.
@@ -64,6 +67,10 @@ _MIGRATABLE_VERSION = 1
 # ``part.type`` of an IC. ICs are not a :class:`~kicadtools.parttypes.PartType`
 # (they are found by part number, not by value), so the name is defined here.
 IC = "ic"
+
+# ``part.type`` of a through-hole part found by footprint (headers, sockets,
+# terminal blocks, part-named footprints; ``THT_PLAN.md`` step 8).
+THT = "tht"
 
 # Environment variable naming an alternative database file.
 ENV_VAR = "KICADTOOLS_PARTS_DB"
@@ -121,6 +128,18 @@ CREATE TABLE IF NOT EXISTS ic (
   package       TEXT,
   pins          INTEGER
 );
+-- A through-hole part, found again by the footprint signature it was
+-- accepted for (thtdb.signature_key) and, for families that need it, the
+-- normalized Value (thtdb.value_key, else '').
+CREATE TABLE IF NOT EXISTS tht (
+  part_id       INTEGER PRIMARY KEY REFERENCES part(id) ON DELETE CASCADE,
+  family        TEXT NOT NULL,
+  signature     TEXT NOT NULL,
+  value_key     TEXT NOT NULL DEFAULT '',
+  footprint     TEXT NOT NULL DEFAULT '',
+  positions     INTEGER
+);
+CREATE INDEX IF NOT EXISTS tht_signature ON tht(signature, value_key);
 CREATE TABLE IF NOT EXISTS supplier_pn (
   part_id       INTEGER NOT NULL REFERENCES part(id) ON DELETE CASCADE,
   supplier      TEXT NOT NULL,
@@ -159,7 +178,7 @@ _TABLES: Dict[str, _Table] = {
 
 
 # Every per-type parameter table; a part has a row in at most one of them.
-_PARAM_TABLES = tuple(t.name for t in _TABLES.values()) + (IC,)
+_PARAM_TABLES = tuple(t.name for t in _TABLES.values()) + (IC, THT)
 
 
 def _table(kind: str) -> _Table:
@@ -282,6 +301,53 @@ class DbIc:
 
 
 @dataclass(frozen=True)
+class ThtChoice:
+    """A through-hole part to record as accepted or rejected. ``signature``
+    and ``value_key`` are the lookup key (:func:`kicadtools.thtdb.db_key`);
+    ``footprint`` the footprint it was accepted for; ``package`` DigiKey's
+    ``Package / Case`` when it states one. Through-hole parts are soldered by
+    hand, so there is no LCSC number."""
+
+    kind: ClassVar[str] = THT
+    mpn: str
+    manufacturer: str
+    family: str
+    signature: str
+    value_key: str = ""
+    footprint: str = ""
+    positions: Optional[int] = None
+    package: str = ""
+    digikey_pn: Optional[str] = None
+    digikey_packaging: Optional[str] = None
+    description: str = ""
+    datasheet_url: str = ""
+    lcsc: ClassVar[Optional[str]] = None
+    jlc_library: ClassVar[Optional[str]] = None
+
+
+@dataclass(frozen=True)
+class DbTht:
+    """An accepted through-hole part read back from the database; fields as
+    in :class:`ThtChoice`. ``usage_count`` is the number of (board,
+    reference) pairs recorded against it."""
+
+    kind: ClassVar[str] = THT
+    part_id: int
+    mpn: str
+    manufacturer: str
+    family: str
+    signature: str
+    value_key: str
+    footprint: str
+    positions: Optional[int]
+    package: str
+    digikey_pn: Optional[str]
+    usage_count: int
+    description: str = ""
+    datasheet_url: str = ""
+
+
+@dataclass(frozen=True)
 class DbPart:
     """An accepted part read back from the database. ``usage_count`` is
     the number of (board, reference) pairs recorded against it."""
@@ -391,15 +457,17 @@ class PartsDb:
 
     # ----- decisions -------------------------------------------------------
 
-    def accept_part(self, choice: Union[PartChoice, IcChoice]) -> int:
-        """Record *choice* (a capacitor, resistor or IC) as accepted and
+    def accept_part(self, choice: Union[PartChoice, IcChoice, ThtChoice]) -> int:
+        """Record *choice* (a capacitor, resistor, inductor, IC or
+        through-hole part) as accepted and
         return its part id. An existing row for the same (manufacturer, MPN)
         is updated in place, including one previously rejected."""
         return self._upsert(choice, ACCEPTED)
 
-    def reject_part(self, choice: Union[PartChoice, IcChoice]) -> int:
+    def reject_part(self, choice: Union[PartChoice, IcChoice, ThtChoice]) -> int:
         """Record *choice* as rejected and return its part id. A rejected part
-        is excluded from :meth:`find_parts` and :meth:`find_ics`."""
+        is excluded from :meth:`find_parts`, :meth:`find_ics` and
+        :meth:`find_tht`."""
         return self._upsert(choice, REJECTED)
 
     def is_rejected(self, manufacturer: str, mpn: str) -> bool:
@@ -411,9 +479,13 @@ class PartsDb:
             ).fetchone()
         return row is not None and row[0] == REJECTED
 
-    def _upsert(self, choice: Union[PartChoice, IcChoice], status: str) -> int:
-        is_ic = isinstance(choice, IcChoice)
-        table_name = IC if is_ic else _table(choice.kind).name
+    def _upsert(self, choice: Union[PartChoice, IcChoice, ThtChoice], status: str) -> int:
+        if isinstance(choice, IcChoice):
+            table_name, row = IC, self._ic_row
+        elif isinstance(choice, ThtChoice):
+            table_name, row = THT, self._tht_row
+        else:
+            table_name, row = _table(choice.kind).name, self._param_row
         mpn = (choice.mpn or "").strip()
         manufacturer = (choice.manufacturer or "").strip()
         if not mpn:
@@ -446,10 +518,7 @@ class PartsDb:
                 if other != table_name:
                     self.conn.execute(
                         f"DELETE FROM {other} WHERE part_id = ?", (part_id,))
-            if is_ic:
-                cols, values = self._ic_row(part_id, choice)
-            else:
-                cols, values = self._param_row(part_id, choice)
+            cols, values = row(part_id, choice)
             self.conn.execute(
                 f"INSERT OR REPLACE INTO {table_name}({', '.join(cols)})"
                 f" VALUES ({', '.join('?' * len(cols))})",
@@ -487,6 +556,17 @@ class PartsDb:
         pins = None if choice.pins is None else int(choice.pins)
         return (["part_id", "package", "pins"],
                 [part_id, _opt_text(choice.package_case), pins])
+
+    @staticmethod
+    def _tht_row(part_id: int, choice: ThtChoice) -> tuple:
+        """Columns and values of a tht row."""
+        if not (choice.signature or "").strip():
+            raise ValueError("a through-hole choice needs a footprint signature")
+        positions = None if choice.positions is None else int(choice.positions)
+        return (["part_id", "family", "signature", "value_key", "footprint", "positions"],
+                [part_id, choice.family, choice.signature.strip(),
+                 (choice.value_key or "").strip(), (choice.footprint or "").strip(),
+                 positions])
 
     def _replace_pn(self, part_id: int, supplier: str, pn: str,
                     packaging: Optional[str], jlc_library: Optional[str],
@@ -624,6 +704,37 @@ class PartsDb:
                  description=desc or "", datasheet_url=url or "")
             for (pid, m, mfr, pkg, desc, url, case, pins, dk, lcsc, lib, uses)
             in rows
+        ]
+
+    def find_tht(self, signature: str, value_key: str = "") -> List[DbTht]:
+        """Accepted through-hole parts recorded for footprint *signature* and
+        *value_key* (both as :func:`kicadtools.thtdb.db_key` gives them).
+        Ordered by usage count (highest first), then the latest decision,
+        then MPN. An empty *signature* finds nothing."""
+        signature = (signature or "").strip()
+        if not signature:
+            return []
+        sql = (
+            "SELECT p.id, p.mpn, p.manufacturer, p.package, p.description,"
+            " p.datasheet_url, t.family, t.signature, t.value_key, t.footprint,"
+            " t.positions,"
+            " (SELECT pn FROM supplier_pn WHERE part_id = p.id"
+            "   AND supplier = 'digikey' ORDER BY pn LIMIT 1),"
+            " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
+            " FROM part p JOIN tht t ON t.part_id = p.id"
+            " WHERE p.status = ? AND p.type = ? AND t.signature = ? AND t.value_key = ?"
+            " ORDER BY usage_count DESC, p.decided_at DESC, p.mpn"
+        )
+        with self._lock:
+            rows = self.conn.execute(
+                sql, (ACCEPTED, THT, signature, (value_key or "").strip())).fetchall()
+        return [
+            DbTht(part_id=int(pid), mpn=m, manufacturer=mfr, family=fam,
+                  signature=sig, value_key=vk, footprint=fp or "",
+                  positions=None if pos is None else int(pos), package=pkg or "",
+                  digikey_pn=dk, usage_count=int(uses),
+                  description=desc or "", datasheet_url=url or "")
+            for (pid, m, mfr, pkg, desc, url, fam, sig, vk, fp, pos, dk, uses) in rows
         ]
 
     # ----- usage -----------------------------------------------------------

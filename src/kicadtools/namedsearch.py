@@ -35,7 +35,12 @@ Each part is then checked:
   mismatch; fewer pads is a mismatch. The check ranks candidates and never
   removes one.
 
-Rank: an MPN equal to the text tried, then the pad check (match, cannot
+With a parts database, parts accepted earlier for the same footprint
+signature and Value (:mod:`kicadtools.thtdb`) are refreshed at DigiKey and
+come first; when one passes, DigiKey is not searched. Parts the database
+records as rejected are left out.
+
+Rank: a stored part, then an MPN equal to the text tried, then the pad check (match, cannot
 verify, mismatch), then stock meeting the floor, then DigiKey stock, then
 price. Pure apart from the injected *digikey* (``configured``,
 ``product_for``, ``keyword_search``, as on
@@ -47,11 +52,19 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Tuple
 
-from kicadtools.icsearch import MATCH, MISMATCH, UNVERIFIED, stock_floor, stock_minimum
-from kicadtools.package import DK_PIN_PARAMS
+from kicadtools.icsearch import MATCH, MISMATCH, UNVERIFIED
 from kicadtools.partnum import extract_part_numbers
-from kicadtools.partsdb import norm_mpn
+from kicadtools.partsdb import PartsDb, norm_mpn
 from kicadtools.suppliers import DigiKeyProduct, preferred_digikey_pn
+from kicadtools.thtdb import (
+    DATABASE_LABEL,
+    POSITION_PARAMS,
+    is_rejected,
+    positions_of,
+    reject_reason,
+    stock_warning,
+    stored_candidates,
+)
 from kicadtools.thtfootprint import NAMED_PART, FootprintSignature, looks_like_part_number
 
 # product_for confirmations per group.
@@ -61,14 +74,10 @@ MPN_FIELD = "MPN"
 FOOTPRINT = "footprint"
 VALUE = "Value"
 
-# The DigiKey parameters a pad count is compared with, first found wins.
-POSITION_PARAMS: Tuple[str, ...] = ("Number of Positions", *DK_PIN_PARAMS)
-
 NO_DIGIKEY = "DigiKey credentials are not set (DIGIKEY_CLIENT_ID, DIGIKEY_CLIENT_SECRET)"
 NO_TEXT = "no part number in the footprint name, the MPN field or the Value"
 
 _PLACEHOLDER = re.compile(r"^[xX]+$")
-_INT = re.compile(r"^\s*(\d+)")
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,12 @@ class NamedCandidate:
     exact: bool  # its MPN equals that text (normalized)
     pads: PadCheck = field(default_factory=lambda: PadCheck(UNVERIFIED))
     stock_warning: str = ""
+    db_part_id: Optional[int] = None  # set for a part stored in the parts database
+    usage_count: int = 0
+
+    @property
+    def stored(self) -> bool:
+        return self.db_part_id is not None
 
     @property
     def mpn(self) -> str:
@@ -216,15 +231,6 @@ def mpn_fits(mpn: str, text: str) -> bool:
 # --- checks ---------------------------------------------------------------------
 
 
-def positions_of(product: DigiKeyProduct) -> Optional[int]:
-    """The part's positions or pins from its DigiKey parameters, or ``None``."""
-    for name in POSITION_PARAMS:
-        m = _INT.match(product.param(name) or "")
-        if m:
-            return int(m.group(1))
-    return None
-
-
 def pad_check(pad_count: Optional[int], product: DigiKeyProduct) -> PadCheck:
     """*pad_count* (distinct pads on the footprint) against the part's
     positions (:func:`positions_of`)."""
@@ -243,30 +249,13 @@ def pad_check(pad_count: Optional[int], product: DigiKeyProduct) -> PadCheck:
     return PadCheck(MISMATCH, f"{pad_count} pads vs {positions} positions")
 
 
-def _reject_reason(product: DigiKeyProduct, needed: int) -> str:
-    status = (product.product_status or "").strip()
-    if status and status.lower() != "active":
-        return f"DigiKey status {status}"
-    stock = product.quantity_available
-    least = stock_minimum(needed)
-    if stock is None:
-        return "DigiKey stock unknown"
-    if stock < least:
-        return f"DigiKey stock {stock}, need at least {least}"
-    return ""
-
-
-def _stock_warning(product: DigiKeyProduct, needed: int) -> str:
-    stock = product.quantity_available
-    floor = stock_floor(needed)
-    if stock is not None and stock < floor:
-        return f"DigiKey stock {stock}, below {floor}"
-    return ""
-
-
 def named_rank_key(c: NamedCandidate) -> tuple:
-    """Sort key, lower is better."""
+    """Sort key, lower is better: a stored part (more recorded uses first),
+    then an MPN equal to the text tried, then the pad check, then stock
+    meeting the floor, then DigiKey stock, then price."""
     return (
+        0 if c.stored else 1,
+        -c.usage_count,
         0 if c.exact else 1,
         c.pads.rank,
         1 if c.stock_warning else 0,
@@ -337,14 +326,33 @@ def find_named_candidates(
     digikey,
     needed: int,
     pad_count: Optional[int] = None,
+    db: Optional[PartsDb] = None,
 ) -> NamedSearchResult:
     """The DigiKey parts for a group whose footprint has *signature* and
     whose first member's properties are *props*; *needed* is the build
     quantity, *pad_count* the footprint's pad count. See the module
-    docstring."""
+    docstring.
+
+    With *db*, parts stored for the group's footprint and Value
+    (:func:`kicadtools.thtdb.stored_candidates`) come first; when one of them
+    passes, DigiKey is not searched. Parts *db* records as rejected are
+    left out of the search results."""
     result = NamedSearchResult(signature=signature)
     if not getattr(digikey, "configured", False):
         result.problem = NO_DIGIKEY
+        return result
+    stored = stored_candidates(db, digikey, signature, props.get("Value"), needed)
+    result.notes.extend(stored.notes)
+    result.rejected.extend(stored.rejected)
+    if stored.parts:
+        for row, product in stored.parts:
+            result.candidates.append(NamedCandidate(
+                product=product, label=DATABASE_LABEL, exact=True,
+                pads=pad_check(pad_count, product),
+                stock_warning=stock_warning(product, needed),
+                db_part_id=row.part_id, usage_count=row.usage_count,
+            ))
+        result.candidates.sort(key=named_rank_key)
         return result
     texts = named_texts(signature, props)
     if not texts:
@@ -369,7 +377,10 @@ def find_named_candidates(
             break
 
     for product, exact, label in found.values():
-        why = _reject_reason(product, needed)
+        if is_rejected(db, product):
+            result.rejected.append(((product.mpn or "").strip(), "rejected in the parts database"))
+            continue
+        why = reject_reason(product, needed)
         if why:
             result.rejected.append(((product.mpn or "").strip(), why))
             continue
@@ -378,7 +389,7 @@ def find_named_candidates(
             label=label,
             exact=exact,
             pads=pad_check(pad_count, product),
-            stock_warning=_stock_warning(product, needed),
+            stock_warning=stock_warning(product, needed),
         ))
     result.candidates.sort(key=named_rank_key)
     if not result.candidates:

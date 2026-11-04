@@ -546,14 +546,16 @@ path relative to the home directory on every machine); set
 part with its type, its parameters (capacitors: capacitance, voltage rating,
 dielectric, tolerance; resistors: resistance, power rating, tolerance;
 inductors: inductance, saturation current, shielding, tolerance; ICs:
-DigiKey's Package / Case and pin count), its package (a chip size, or an
+DigiKey's Package / Case and pin count; through-hole parts: the footprint
+signature it was accepted for, and the Value for families other than headers,
+sockets and terminal blocks), its package (a chip size, or an
 inductor's body size such as `4x4mm`), its DigiKey and LCSC part numbers, and the board references that
 place it. Stock
 and price are not stored. The file is listed in `Boards/.gitignore`, so each
 machine has its own copy. The schema is version 2; a version-1 file is
 updated in place when it is opened (the `ic` table is added). The
-`inductor` table was added within version 2 and is created when a file
-without it is opened.
+`inductor` and `tht` tables were added within version 2 and are created when
+a file without them is opened.
 
 The `settings` table holds the remembered defaults under the `cap.*` and
 `res.*` keys in the tables above. A key absent from the table takes the built-in value shown in
@@ -633,6 +635,7 @@ Test schematics live in `tests/data/`.
 - `src/kicadtools/dkfilters.py` — DigiKey category filter options, value names to filter IDs
 - `src/kicadtools/headersearch.py` — pin header and socket search at DigiKey, with one series per run
 - `src/kicadtools/namedsearch.py` — DigiKey search for through-hole parts whose footprint names the part
+- `src/kicadtools/thtdb.py` — through-hole parts in the parts database, found by footprint signature
 - `src/kicadtools/cpl.py` — JLCPCB CPL centroid and rotation math (`cpl`)
 - `src/kicadtools/rotations.py` — per-footprint-family CPL rotation offsets
 - `src/kicadtools/partrotation.py` — per-LCSC CPL rotation overrides stored in SQLite
