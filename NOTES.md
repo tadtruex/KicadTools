@@ -62,7 +62,7 @@ ten build steps. Step 1 (mounting per part, `mounting.py`) is committed as
 7b6f779; step 2 is dropped; step 3 (footprint signatures, `thtfootprint.py`)
 as b349980; step 4 (DigiKey rate limiter and filtered search,
 `dkfilters.py`, `suppliers.py`) as e668722; step 5 (header and socket search
-and the run's series, `headersearch.py`) is built, not yet committed; the
+and the run's series, `headersearch.py`) as 11e9a5f, all pushed; the
 next step is step 6 (part-named footprints). See the "as built" sections in
 the plan. Suite 1546 passing.
 
