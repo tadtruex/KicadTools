@@ -427,8 +427,8 @@ def test_capacitor_flow_existing_part(tmp_path):
 
 
 def test_capacitor_flow_existing_part_below_stock_floor(tmp_path):
-    """The same symbol with only 300 at JLCPCB: the current part is passed
-    over with the stock-floor reason, and the keyword search runs."""
+    """The same symbol with only 300 at JLCPCB: the current part stays,
+    with the stock-floor reason as a warning, and the keyword search runs."""
     from kicadtools.partsearch import CURRENT_LABEL, assess
 
     class LowStock(FakeTaiyoSuppliers):
@@ -448,8 +448,10 @@ def test_capacitor_flow_existing_part_below_stock_floor(tmp_path):
     fake = LowStock()
     result = assess(group, defaults, db=db, jlc_search=fake.jlc_search, jlc_filtered=fake.jlc_filtered,
                     jlc_part=fake.jlc_part, digikey=fake, needed=group.quantity)
-    assert result.candidates == []
-    assert (CURRENT_LABEL, "JLCPCB stock 300, need at least 1000") in result.rejected
+    current = result.candidates[0]
+    assert (current.mpn, current.source) == (TY_MPN, "current")
+    assert current.stock_warning == "JLCPCB stock 300, need at least 1000"
+    assert CURRENT_LABEL not in dict(result.rejected)
     assert fake.searches[0] == TY_MPN
     assert len(fake.searches) > 1               # the keyword search ran
     db.close()

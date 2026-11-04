@@ -280,14 +280,16 @@ def test_database_hit_returned_without_supplier_search():
     assert res.problem == ""
 
 
-def test_database_hit_without_live_data_fails_stock_floor():
-    # Unknown stock does not meet the stock floor; with no candidate left the
-    # supplier search is attempted, which needs DigiKey.
+def test_database_hit_without_live_data_kept_with_stock_warning():
+    # Unknown stock is a warning on a stored part; with no part meeting the
+    # floor the supplier search is attempted, which needs DigiKey.
     db = _db()
     db.accept_part(_choice(lib="basic"))
     res = _run(db=db, dk=FakeDigiKey(configured=False))
-    assert res.candidates == []
-    assert _reasons(res) == {"C77047 GRM188R71H104KA93D": "JLCPCB stock unknown"}
+    (c,) = res.candidates
+    assert (c.mpn, c.source) == ("GRM188R71H104KA93D", DATABASE)
+    assert c.stock_warning == "JLCPCB stock unknown; DigiKey stock unknown"
+    assert _reasons(res) == {}
     assert "DigiKey credentials are not set" in res.problem
 
 
@@ -327,15 +329,16 @@ def test_database_miss_runs_search():
 
 
 def test_digikey_unconfigured_sets_problem_database_stock_unknown():
-    # Without DigiKey the database part's DigiKey stock is unknown, so it does
-    # not meet the stock floor.
+    # Without DigiKey the database part's DigiKey stock is unknown: it stays
+    # listed with that warning.
     db = _db()
     db.accept_part(_choice())
     jlc = FakeJlc(default=[_jlc()], parts={"C77047": _live_grm()})
     res = _run(db=db, jlc=jlc, dk=FakeDigiKey(configured=False),
                search_suppliers=True)
-    assert res.candidates == []
-    assert _reasons(res) == {"C77047 GRM188R71H104KA93D": "DigiKey stock unknown"}
+    assert [(c.mpn, c.stock_warning) for c in res.candidates] == [
+        ("GRM188R71H104KA93D", "DigiKey stock unknown")]
+    assert _reasons(res) == {}
     assert "DigiKey credentials are not set" in res.problem
     assert jlc.searches == []
 
@@ -628,7 +631,7 @@ def test_search_without_mpn_rejected():
     assert _reasons(res) == {"C14663": "JLCPCB lists no MPN"}
 
 
-def test_database_hit_not_orderable_rejected_with_zero_stock():
+def test_database_hit_not_orderable_rejected():
     db = _db()
     db.accept_part(_choice())
     gone = _jlc("C77047", "GRM188R71H104KA93D", no_buy="discontinued")
@@ -636,7 +639,16 @@ def test_database_hit_not_orderable_rejected_with_zero_stock():
                dk=FakeDigiKey({"490-1519-1-ND": _dk("GRM188R71H104KA93D")}))
     assert res.candidates == []
     assert _reasons(res)["C77047 GRM188R71H104KA93D"] == (
-        "JLCPCB stock 0, need at least 1000")
+        "not orderable at JLCPCB (discontinued)")
+
+
+def test_database_hit_not_active_at_digikey_rejected():
+    db = _db()
+    db.accept_part(_choice())
+    res = _run(db=db, jlc=FakeJlc(parts={"C77047": _live_grm()}),
+               dk=FakeDigiKey({"490-1519-1-ND": _dk("GRM188R71H104KA93D", status="Obsolete")}))
+    assert res.candidates == []
+    assert _reasons(res)["C77047 GRM188R71H104KA93D"] == "DigiKey status 'Obsolete'"
 
 
 # --------------------------------------------------------------------------- #
@@ -735,16 +747,18 @@ def test_stock_floor_passes_at_exactly_min_stock():
     assert len(res.candidates) == 1
 
 
-def test_database_hit_low_digikey_stock_rejected_and_search_runs():
+def test_database_hit_low_digikey_stock_warned_and_search_runs():
     db = _db()
     db.accept_part(_choice())
     jlc = FakeJlc(default=[_jlc()], parts={"C77047": _live_grm()})
     dk = FakeDigiKey({"490-1519-1-ND": _dk("GRM188R71H104KA93D", qty=12),
                       "CL10B104KB8NNNC": _dk()})
     res = _run(db=db, jlc=jlc, dk=dk)
-    assert [(c.mpn, c.source) for c in res.candidates] == [("CL10B104KB8NNNC", SEARCH)]
-    assert _reasons(res) == {
-        "C77047 GRM188R71H104KA93D": "DigiKey stock 12, need at least 1000"}
+    # The stored part stays, warned; no part met the floor, so the search ran.
+    assert sorted((c.mpn, c.source, c.stock_warning) for c in res.candidates) == [
+        ("CL10B104KB8NNNC", SEARCH, ""),
+        ("GRM188R71H104KA93D", DATABASE, "DigiKey stock 12, need at least 1000")]
+    assert _reasons(res) == {}
     assert jlc.searches == ["100nF 0603"]
 
 
@@ -990,15 +1004,16 @@ def test_assess_current_part_listed_before_database_part():
     assert [c.source for c in res.candidates] == [CURRENT, DATABASE]
 
 
-def test_assess_current_part_low_jlc_stock_rejected_and_search_runs():
+def test_assess_current_part_low_jlc_stock_warned_and_search_runs():
     jlc, dk = _tdk_suppliers(stock=33)
     alt = _jlc("C7", "ALT", cap="4.7uF", volts="25V", diel="X7R", library="base")
     jlc.by_keyword["4.7uF 0603 X6S"] = []
     jlc.by_keyword["4.7uF 0603 X7R"] = [alt]
     dk.products["ALT"] = _dk("ALT", cap="4.7 µF", volts="25V")
     res = _assess(_group(MPN=TDK), jlc=jlc, dk=dk)
-    assert _reasons(res) == {"current part": "JLCPCB stock 33, need at least 1000"}
-    assert [c.mpn for c in res.candidates] == ["ALT"]
+    assert _reasons(res) == {}
+    assert [(c.mpn, c.source, c.stock_warning) for c in res.candidates] == [
+        (TDK, CURRENT, "JLCPCB stock 33, need at least 1000"), ("ALT", SEARCH, "")]
     assert jlc.searches == [TDK, "4.7uF 0603"]
 
 
@@ -1147,8 +1162,9 @@ def test_fitting_parts_give_the_loosest_requirement():
 
 
 def test_two_current_parts_failing_are_labelled_by_mpn():
-    a = _dk("CL21A106KAYNNNE", cap="10 µF", pns=("1276-1871-1-ND",))
-    b = _dk("CL21B106KOQNNNE", cap="10 µF", pns=("1276-1869-1-ND",), qty=5)
+    a = _dk("CL21A106KAYNNNE", cap="10 µF", pns=("1276-1871-1-ND",), status="Obsolete")
+    b = _dk("CL21B106KOQNNNE", cap="10 µF", pns=("1276-1869-1-ND",),
+            status="Not For New Designs")
     dk = FakeDigiKey({"1276-1871-1-ND": a, "1276-1869-1-ND": b})
     jlc = FakeJlc(by_keyword={
         "CL21A106KAYNNNE": [_jlc("C1", "CL21A106KAYNNNE", cap="10uF", stock=10)],
@@ -1336,3 +1352,12 @@ def test_tolerance_from_the_current_part_is_relaxed_too():
     res = _run(_req(tol=10.0, tol_source=PART), jlc=jlc, dk=dk)
     assert [c.params.tolerance_pct for c in res.candidates] == [20.0]
     assert res.relaxed_tolerance_pct == 10.0
+
+
+def test_assess_current_part_out_of_stock_at_jlcpcb_kept_with_warning():
+    # Out of stock (no JLCPCB no-buy reason) is a stock warning: the part the
+    # symbol names stays selectable months before an order.
+    jlc, dk = _tdk_suppliers(stock=0)
+    res = _assess(_group(MPN=TDK), jlc=jlc, dk=dk, search_suppliers=False)
+    assert [(c.mpn, c.source) for c in res.candidates][0] == (TDK, CURRENT)
+    assert res.candidates[0].stock_warning == "JLCPCB stock 0, need at least 1000"

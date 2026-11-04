@@ -75,6 +75,16 @@ through-hole, substitute and Autopopulate tables and the values popup tree.
 The main window's proxy uses the same key. Committed with Autopopulate as
 c8b94c7 and pushed on 2026-11-04. Suite 1661 passing.
 
+## Low stock is a warning on named and stored parts (2026-11-04)
+
+MotorDriver L1 (`SRP3020TA-4R7M`, 232 at JLCPCB) listed nothing: the
+current part failed the 1000 stock floor. User decision: a current or stored
+capacitor, resistor or inductor below the floor stays selectable with a
+warning ("much of this work is done months in advance of actually
+ordering"). Search hits keep the floor. `CAPACITOR_PLAN.md`, revision 7.
+The 25 in "Units needed" is the LCSC tab's Boards box
+(`DEFAULT_BUILD_QTY`), not remembered between runs.
+
 ## Class upgrades from every source (2026-11-04)
 
 A stated or default dielectric (or shielding) now means "this or better" in

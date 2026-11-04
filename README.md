@@ -430,11 +430,17 @@ remembered `cap.voltage_min` can't be searched until one is entered.
   covering the build, then price. The status line counts the candidates from
   each source, the search hits checked, the hits rejected, and the hits past
   the DigiKey lookup limit (10).
-- **Stock floor.** Every candidate (current part, database part or search hit)
-  needs a known stock of at least 1000, and at least the units the build
-  needs, at both JLCPCB and DigiKey (`partsearch.MIN_STOCK`). A part below that
-  is rejected with the reason, for example `JLCPCB stock 33, need at least
-  1000` or `DigiKey stock unknown`.
+- **Stock floor.** A search hit needs a known stock of at least 1000, and at
+  least the units the build needs, at both JLCPCB and DigiKey
+  (`partsearch.MIN_STOCK`); below that it is rejected with the reason, for
+  example `JLCPCB stock 33, need at least 1000` or `DigiKey stock unknown`.
+  The current part and stored parts below the floor stay selectable with
+  that reason as a warning: their stock cells are amber, and selecting one
+  shows the warning above the buttons. When no listed part meets the floor
+  the suppliers are searched too. A part JLCPCB marks unbuyable, or DigiKey
+  lists as other than Active, is rejected.
+- **Units needed** is the group's symbol count times **Boards:** on the LCSC
+  tab (25 when the Cockpit opens, `substitute.DEFAULT_BUILD_QTY`).
 - When no part meets a tolerance limit that came from a default, the search
   runs again without it. An amber line under the status line names the limit
   that was dropped, and on Accept the chosen part's own tolerance is written to

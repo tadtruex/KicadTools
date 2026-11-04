@@ -715,3 +715,18 @@ def test_dialog_values_popup_fills_the_field(app):
     assert dialog._fields["dielectric"].text() == "X5R"
     assert dialog.current_requirement().dielectrics == Sourced(("X5R",), EDITED)
     popup.close()
+
+
+def test_dialog_stock_warning_line_and_tint(app):
+    from dataclasses import replace
+    from kicadtools.gui.assign_dialog import COL_JLC_STOCK, AssignDialog
+
+    dialog = AssignDialog(_group(), _req(volts=(16.0, DEFAULT)), 1, None)
+    assert dialog.request_search()
+    low = replace(_cand(mpn="LOW"), stock_warning="JLCPCB stock 232, need at least 1000")
+    dialog.show_result(SearchResult([low, _cand(mpn="OK")]), dialog.request_id)
+    assert dialog.chosen().mpn == "LOW"              # selectable
+    assert "JLCPCB stock 232" in dialog.stock_text()
+    assert dialog._table.item(0, COL_JLC_STOCK).toolTip() == low.stock_warning
+    dialog._table.selectRow(1)
+    assert dialog.stock_text() == ""

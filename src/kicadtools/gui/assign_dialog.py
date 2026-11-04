@@ -78,6 +78,7 @@ from PySide6.QtWidgets import (
 
 from kicadtools.assign import assignment_plan
 from kicadtools.evidence import ExistingPart
+from kicadtools.gui.parts import UNVERIFIED_TINT
 from kicadtools.gui.sorting import (
     SortItem,
     SortTreeItem,
@@ -121,6 +122,13 @@ CANDIDATE_COLUMNS = [
 ]
 COL_LCSC = CANDIDATE_COLUMNS.index("LCSC")
 COL_DIGIKEY = CANDIDATE_COLUMNS.index("DigiKey PN")
+COL_JLC_STOCK = CANDIDATE_COLUMNS.index("JLC stock")
+COL_DK_STOCK = CANDIDATE_COLUMNS.index("DigiKey stock")
+
+# A current or stored part below the stock floor: the IC dialog's warning
+# tint and text style.
+_WARN_TINT = UNVERIFIED_TINT
+_WARN_STYLE = "color: #c07000; font-weight: bold;"
 
 # The same amber as the LCSC tab's "fewer than the build needs" tint.
 _SHORT_TINT = QColor(230, 160, 0, 70)
@@ -406,6 +414,14 @@ def stock_shortfall(candidate: Candidate, needed: int) -> str:
     return f"The build needs {needed:,}; " + ", ".join(notes) + "."
 
 
+def stock_warning_text(candidate: Optional[Candidate]) -> str:
+    """The warning line for a selected current or stored part below the
+    stock floor (``""`` when none applies)."""
+    if candidate is None or not candidate.stock_warning:
+        return ""
+    return f"Low stock: {candidate.stock_warning}. Selectable; check stock before ordering."
+
+
 def current_part_text(existing: ExistingPart,
                       lookup: Optional[ExistingLookup] = None) -> str:
     """The header's Current part line: the lookup's notes, one per line; before
@@ -587,6 +603,10 @@ class AssignDialog(QDialog):
         self._relaxed.setWordWrap(True)
         self._relaxed.setStyleSheet("color: #c07000; font-weight: bold;")
         self._relaxed.hide()
+        self._stock = QLabel("")
+        self._stock.setWordWrap(True)
+        self._stock.setStyleSheet(_WARN_STYLE)
+        self._stock.hide()
         # Shown while the requirement has conflicts between its sources.
         self._conflicts = QLabel("")
         self._conflicts.setWordWrap(True)
@@ -628,6 +648,7 @@ class AssignDialog(QDialog):
         layout.addWidget(self._relaxed)
         layout.addWidget(self._conflicts)
         layout.addWidget(self._table)
+        layout.addWidget(self._stock)
         layout.addWidget(self._buttons)
 
         self._fill_fields()
@@ -872,6 +893,9 @@ class AssignDialog(QDialog):
                     if short:
                         item.setBackground(_SHORT_TINT)
                         item.setToolTip(short)
+                    if col in (COL_JLC_STOCK, COL_DK_STOCK) and cand.stock_warning:
+                        item.setBackground(_WARN_TINT)
+                        item.setToolTip(cand.stock_warning)
                     url = self._url(cand, col)
                     if url:
                         item.setForeground(link)
@@ -1003,6 +1027,14 @@ class AssignDialog(QDialog):
         problem = self.accept_problem(cand) if cand is not None else ""
         self._accept_btn.setEnabled(cand is not None and not problem)
         self._accept_btn.setToolTip(problem)
+        stock = stock_warning_text(cand)
+        self._stock.setText(stock)
+        self._stock.setVisible(bool(stock))
+
+    def stock_text(self) -> str:
+        """The stock-warning line above the buttons (``""`` when the selected
+        part meets the floor or none is selected)."""
+        return self._stock.text()
 
     def chosen(self) -> Optional[Candidate]:
         """The selected candidate when it can be accepted for the current

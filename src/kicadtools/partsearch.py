@@ -108,8 +108,11 @@ DATABASE = "database"
 SEARCH = "search"
 CURRENT = "current"
 
-# Generic parts (every capacitor and resistor) need at least this many in stock at
-# JLCPCB and at DigiKey, and at least the build quantity.
+# A capacitor, resistor or inductor found by search needs at least this many
+# in stock at JLCPCB and at DigiKey, and at least the build quantity. The
+# symbol's current part and stored parts below it are kept with a stock
+# warning (Candidate.stock_warning): part choices are made months before an
+# order, when stock may have changed.
 MIN_STOCK = 1000
 
 # find_candidates confirms up to *limit* hits at DigiKey, trying at most this
@@ -161,8 +164,11 @@ class Candidate:
     datasheet_url: str = ""
     # Why the part cannot be ordered although both suppliers list it (DigiKey
     # status not Active, JLCPCB marks it unbuyable); "" when it can. Set by
-    # read_existing on the current part only.
+    # read_existing on the current part, _from_database on a stored part.
     unavailable_reason: str = ""
+    # The stock-floor reasons of a current or stored part kept below the
+    # floor (see MIN_STOCK); "" when it meets the floor.
+    stock_warning: str = ""
 
     def choice(self) -> PartChoice:
         """This candidate as a :class:`~kicadtools.partsdb.PartChoice` for
@@ -340,9 +346,11 @@ def _stock_reason(supplier: str, stock: Optional[int], needed: int) -> str:
 
 def _stock_floor(cand: Candidate, needed: int) -> str:
     """``""`` when *cand* meets the stock floor at both suppliers, else the
-    first reason it does not."""
-    return (_stock_reason("JLCPCB", cand.jlc_stock, needed)
-            or _stock_reason("DigiKey", cand.digikey_stock, needed))
+    reasons it does not (``"JLCPCB stock 232, need at least 1000"``), joined
+    with ``"; "``."""
+    reasons = (_stock_reason("JLCPCB", cand.jlc_stock, needed),
+               _stock_reason("DigiKey", cand.digikey_stock, needed))
+    return "; ".join(r for r in reasons if r)
 
 
 def _jlc_library(library: Optional[str]) -> Optional[str]:
@@ -363,7 +371,9 @@ def _label(lcsc: str, mpn: str) -> str:
 
 def _from_database(hit: DbPart, jlc_part, digikey) -> Candidate:
     """A database part as a :class:`Candidate`, with JLCPCB stock and price
-    from *jlc_part* and DigiKey stock from *digikey* when configured."""
+    from *jlc_part* and DigiKey stock from *digikey* when configured.
+    ``unavailable_reason`` is set when JLCPCB marks the part unbuyable or
+    DigiKey lists it with a status other than Active."""
     cand = Candidate(
         kind=hit.kind,
         mpn=hit.mpn,
@@ -390,10 +400,15 @@ def _from_database(hit: DbPart, jlc_part, digikey) -> Candidate:
             cand.jlc_price = part.unit_price
             cand.jlc_preferred = part.preferred
             cand.jlc_library = _jlc_library(part.library) or cand.jlc_library
+            if part.no_buy_reason:
+                cand.unavailable_reason = f"not orderable at JLCPCB ({part.no_buy_reason})"
     if hit.digikey_pn and getattr(digikey, "configured", False):
         product: Optional[DigiKeyProduct] = digikey.product_for(hit.digikey_pn)
         if product is not None:
             cand.digikey_stock = product.quantity_available
+            status = (product.product_status or "").strip()
+            if status and status.lower() != "active" and not cand.unavailable_reason:
+                cand.unavailable_reason = f"DigiKey status '{status}'"
     return cand
 
 
@@ -661,12 +676,13 @@ def _find(
     current_failed: Dict[str, str] = {}   # normalized MPN -> reason
     for current in currents:
         cand = replace(current)  # a copy: the database merge below edits it
-        why = _current_check(req, cand, db, needed)
+        why = _current_check(req, cand, db)
         if why:
             label = CURRENT_LABEL if len(currents) == 1 else f"{CURRENT_LABEL} {cand.mpn}"
             result.rejected.append((label, why))
             current_failed[_norm_mpn(cand.mpn)] = why
         else:
+            cand.stock_warning = _stock_floor(cand, needed)
             candidates.append(cand)
 
     hits = db.find_parts(
@@ -692,13 +708,15 @@ def _find(
             same[0].db_part_id = cand.db_part_id
             same[0].usage_count = cand.usage_count
             continue
-        why = _stock_floor(cand, needed)
-        if why:
-            result.rejected.append((_label(cand.lcsc or "", cand.mpn), why))
+        if cand.unavailable_reason:
+            result.rejected.append((_label(cand.lcsc or "", cand.mpn), cand.unavailable_reason))
             continue
+        cand.stock_warning = _stock_floor(cand, needed)
         candidates.append(cand)
 
-    if candidates and not search_suppliers:
+    # The suppliers are searched when asked, or when no part so far meets the
+    # stock floor (a part below it stays listed, with its warning).
+    if any(not c.stock_warning for c in candidates) and not search_suppliers:
         candidates.sort(key=lambda c: rank_key(c, needed))
         return result
     if not getattr(digikey, "configured", False):
@@ -782,10 +800,10 @@ def _find(
 # The symbol's existing part.
 # --------------------------------------------------------------------------- #
 
-def _current_check(req: PartRequirement, cand: Candidate, db: PartsDb,
-                   needed: int) -> str:
-    """``""`` when the current part *cand* can be ordered, meets *req* and the
-    stock floor and is not rejected in the parts database, else the reason.
+def _current_check(req: PartRequirement, cand: Candidate, db: PartsDb) -> str:
+    """``""`` when the current part *cand* can be ordered, meets *req* and is
+    not rejected in the parts database, else the reason. Stock is not checked
+    here: a current part below the floor is kept with a stock warning.
     Its parameters are the DigiKey ones (see :func:`read_existing`), checked
     with the same rules as a search hit's."""
     if cand.unavailable_reason:
@@ -808,7 +826,7 @@ def _current_check(req: PartRequirement, cand: Candidate, db: PartsDb,
         return why
     if db.is_rejected(cand.manufacturer, cand.mpn):
         return "rejected in the parts database"
-    return _stock_floor(cand, needed)
+    return ""
 
 
 @dataclass
@@ -1080,8 +1098,9 @@ def _option(ptype: PartType, f: _Found, existing: ExistingPart,
     unavailable = ""
     if status.lower() != "active":
         unavailable = f"DigiKey status '{status or 'unknown'}'"
-    elif not part.orderable:
-        unavailable = f"not orderable at JLCPCB ({part.no_buy_reason or 'out of stock'})"
+    elif part.no_buy_reason:
+        # Out of stock alone is a stock warning, not a reason to pass it over.
+        unavailable = f"not orderable at JLCPCB ({part.no_buy_reason})"
     mpn = (product.mpn or "").strip()
     option.candidate = Candidate(
         kind=ptype.name,

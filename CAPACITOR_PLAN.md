@@ -375,7 +375,8 @@ stale `MPN`) are each a current-part option:
 
 Generic parts (every capacitor and resistor) need at least **1000** in stock at
 JLCPCB and at DigiKey, and at least the build quantity. Parts below that are
-not candidates; the rejection reason says so. `MIN_STOCK = 1000`.
+not candidates; the rejection reason says so. `MIN_STOCK = 1000`. Revision 7
+keeps the current and stored parts below the floor, with a warning.
 
 ## Revision 3: filtered search, manufacturers, cleared fields (2026-10-30)
 
@@ -534,6 +535,28 @@ did only when it came from the existing part or the Description.
   earlier one wrote `X5R, X7R`; MotorDriver C30/C34 (saved after) and
   C13/C14/C29 (saved before) were two rows and are now one. Across every
   board this was the only merge.
+
+## Revision 7: low stock is a warning on named and stored parts (2026-11-04)
+
+User decision: a part the symbol names, or one stored in the parts database,
+stays selectable below the stock floor, with a warning. Part choices are made
+months before an order; the aim is fewer changes just before ordering.
+Found on MotorDriver L1 (MPN `SRP3020TA-4R7M`, 232 at JLCPCB): the search
+listed nothing, because the current part failed the 1000 floor and every
+other 4.7 µH hit failed the maker list, the package or the floor.
+
+- `Candidate.stock_warning`: the floor reasons (`JLCPCB stock 232, need at
+  least 1000`), joined with `; `. Set on the current part and on database
+  parts; unknown stock and out of stock are warnings too.
+- Still rejected: a JLCPCB no-buy reason (`not orderable at JLCPCB
+  (discontinued)`), a DigiKey status other than Active (now checked for
+  stored parts too), a requirement mismatch, a part rejected in the
+  database.
+- Search hits keep the hard floor, so new choices come with stock.
+- The suppliers are searched when no listed part meets the floor, so a
+  warned part is listed next to alternatives that meet it.
+- Assign dialog: the stock cells of a warned part are amber with the
+  reason as tooltip, and selecting it shows the warning above the buttons.
 
 ## TBD (after the main loop is working)
 
