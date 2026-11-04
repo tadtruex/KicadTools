@@ -132,6 +132,37 @@ Parse KiCad footprint names into a signature:
 - No-part footprints: `SolderWirePad`, `MountingHole_*`, `Fiducial`,
   `TestPoint_THTPad`, `TestPoint_Pad`.
 
+### Step 3 — as built (2026-11-03)
+
+`src/kicadtools/thtfootprint.py`: `parse_signature(lib_id, pad_count=None)`
+→ `FootprintSignature` (family, rows, per_row, `positions`, pitch, orientation,
+smd variant, passive style, polarized, diameter/length/width/height, lead
+spacings, maker, mpn, and `what` for no-part footprints). Tests:
+`tests/test_thtfootprint.py`. Pure, no I/O.
+
+- Families: header, socket, terminal block, capacitor, resistor, named part,
+  test point, no part, other.
+- No part, added beyond the plan's list: solder jumpers, net ties, KiCad's
+  `Connector_Wire` `SolderWire-…` pads, `TestPoint_Plated_Hole`,
+  `TestPoint_Bridge`. Loop test points (`TestPoint_Loop_…`) are family
+  "test point", a real part with no number; Keystone test points are named
+  parts.
+- Named part: a maker token from a fixed list followed by a token with a digit
+  or hyphen (`JST_PH_S3B-PH-K` → JST, `S3B-PH-K`), or a name of at most two
+  tokens whose last token is a part number (`691137710002`,
+  `SW_SLW-118562-4A-N-D`). `MountingHole:HARWIN_H9051-01` is a named part, not
+  a hole. `Bourns_3386P` gives `3386P`, a series prefix; step 6's prefix
+  match handles it.
+- Terminal blocks whose name has no `1xNN` (`Terminal_Block_D1.3mm_P5mm` on the
+  boards, Dinkle, old `bornier-N` names) take positions from `pad_count`.
+- Checked on all 39 through-hole footprint names on the boards and on every
+  footprint in KiCad's header, socket, terminal block, `Capacitor_THT`,
+  `Resistor_THT`, test point, mounting hole, fiducial, wire, net tie and
+  jumper libraries. Gaps: SIP resistor arrays give no pitch; `Connector_Pin`
+  press pins, tactile switches, crystals and the unnamed barrel jack are
+  "other".
+- Not done: the exports still list solder jumpers and net ties as SMD parts.
+
 ### Step 4 — DigiKey filtered search (`suppliers.py`)
 
 `DigiKeyClient.category_search(keyword, category_id, filters, *,

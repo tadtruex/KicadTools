@@ -58,9 +58,10 @@ to-do list. State on 2026-11-03:
 ## Through-hole part assignment: planned (2026-11-03)
 
 `THT_PLAN.md` holds the decisions, the board survey, the DigiKey API test and
-ten build steps. Step 1 (mounting per part, `mounting.py`) is built, not yet
-committed; step 2 is dropped; the next step is step 3 (footprint signatures).
-See "Step 1 — as built" in the plan. Suite 1462 passing.
+ten build steps. Step 1 (mounting per part, `mounting.py`) is committed as
+7b6f779; step 2 is dropped; step 3 (footprint signatures, `thtfootprint.py`) is
+built, not yet committed; the next step is step 4 (DigiKey filtered search).
+See the "as built" sections in the plan. Suite 1505 passing.
 
 - Decisions: DigiKey only, no LCSC; the JLCPCB BOM and CPL keep their SMD-only
   choices (revised 2026-11-03); headers take one series per run, set by the
