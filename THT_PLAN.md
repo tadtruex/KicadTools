@@ -162,6 +162,13 @@ spacings, maker, mpn, and `what` for no-part footprints). Tests:
   press pins, tactile switches, crystals and the unnamed barrel jack are
   "other".
 - Not done: the exports still list solder jumpers and net ties as SMD parts.
+- 2026-11-04: package names no longer read as named parts. The short-name
+  rule (no maker token) now needs a digit, skips KiCad's `Package_*`
+  libraries, and skips package and size tokens (`TO-92`, `TO56-3`,
+  `SDIP-10C`, `PLCC-20`, `HC35-U`, `PG-LLGA-5-1`, `D5.0mm-3`, `15x7.5RM7.6`,
+  `PUSH-12mm`). Over KiCad's through-hole libraries the makerless named parts
+  went from 234 to 143, almost all real parts (displays, LEM sensors,
+  modules). `looks_like_part_number(token)` is public for step 6.
 
 ### Step 4 — DigiKey filtered search (`suppliers.py`)
 
@@ -274,6 +281,46 @@ Tests: `tests/test_headersearch.py`.
 Search the MPN token from the footprint (or the Value) with the IC search
 (`icsearch.py`): same prefix match, same pad-count check.
 
+### Step 6 — as built (2026-11-04)
+
+`src/kicadtools/namedsearch.py`: `find_named_candidates(signature, props, *,
+digikey, needed, pad_count)` → `NamedSearchResult` (ranked `candidates`,
+`proposed`, `rejected`, notes, `problem`). Tests: `tests/test_namedsearch.py`.
+It does not call `icsearch.find_ic_candidates`: that path also searches
+JLCPCB and the parts database, and checks packages by IC family. It reuses
+the IC stock rules (`stock_minimum`, `stock_floor`).
+
+- Texts tried, the first that gives a part ends the search: the MPN field
+  (exact `product_for`); Value tokens that fit the footprint token; the
+  footprint token; the other Value tokens. A Value token is kept when
+  `looks_like_part_number` (5+ characters, a digit or hyphen, not geometry,
+  package or size), so `USB-A-S-F-B-TH` counts though it has no digit.
+- A partial text is one keyword search, keeping MPNs that start with it
+  (`norm_mpn`, hyphens kept), exact first then shortest, confirmed with
+  `product_for` up to `MAX_LOOKUPS` (5) per group. Placeholder segments
+  (`X`, `XX`) match any segment; the keyword is the text before the first.
+- Rejected: status not Active, stock below 10 × the build quantity. Below
+  build + 1000: kept with a warning.
+- Pad check: pads against "Number of Positions" or the IC pin parameters.
+  Equal is a match; more pads is "cannot verify" (mounting and shield pads);
+  fewer is a mismatch. It ranks, never removes.
+- Rank: exact MPN, pad check, stock floor met, DigiKey stock, price.
+- Live check (2026-11-04, about 24 calls, build quantity 5):
+  - Breakout J101 (`JST_PH_S3B-PH-K`): `S3B-PH-K-S`, 36 852 in stock, pads
+    match. The exact `S3B-PH-K` and three other variants have no stock.
+  - Breakout J102 (`CUI_PJ-002B`): `PJ-002B` (Same Sky, `CP-002B-ND`), then
+    `PJ-002BH`; three SMT variants rejected as obsolete. DigiKey gives barrel
+    jacks no positions, so the pad check cannot verify.
+  - Breakout J2 (`SAMTEC_USB-A-S-X-X-TH`, Value `USB-A-S-F-B-TH`, already
+    has a DigiKey PN): the footprint keyword `USB-A-S` alone returns other
+    USB parts; the Value finds `USB-A-S-F-B-TH` exactly. This is why fitting
+    Value tokens go first.
+  - BuckConverter RV1 (`Bourns_3386P`, Value `200K`, already has a DigiKey
+    PN): 50 hits for `3386P`; the five looked up are the shortest MPNs, not
+    the 200 kΩ one. See TBD 5.
+- Not done: accepted parts are not stored (step 8); the Cockpit wiring is
+  step 9.
+
 ### Step 7 — through-hole passives
 
 Value and intent from the existing requirement, with the footprint signature
@@ -303,3 +350,9 @@ BarrelJackAdapter J2/J4, SX1509 J5/J7, MiDi J1/J2, Breakout J101/J102/J5.
 2. Mating parts (JST housings and crimp contacts) are not assigned.
 3. BlackBox and NeoPMOD footprints are not resolved (see "Evidence").
 4. Whether a series picked in one run is offered as the default for the next.
+5. Series-prefix footprints (`Bourns_3386P`) give many variants that differ
+   by value; the search does not use the Value (`200K`) to choose which five
+   to look up. A resistance or capacitance code in the MPN (`204` = 200 kΩ)
+   or DigiKey's Resistance parameter on the keyword hits could.
+6. MiDi J1 (`DIN5_MIDI`, Value `DIN-5_180degree`) names no part; it is
+   "other" and is not searched.

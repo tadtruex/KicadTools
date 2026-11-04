@@ -55,16 +55,18 @@ to-do list. State on 2026-11-03:
   pad, and `ECG/Library/footprints.pretty/CP_20_10_ADI_NOTH.kicad_mod` has 20
   pads and none. Check the datasheet's exposed-pad recommendation.
 
-## Through-hole part assignment: steps 1–5 built (2026-11-03)
+## Through-hole part assignment: steps 1–6 built (2026-11-04)
 
 `THT_PLAN.md` holds the decisions, the board survey, the DigiKey API test and
 ten build steps. Step 1 (mounting per part, `mounting.py`) is committed as
 7b6f779; step 2 is dropped; step 3 (footprint signatures, `thtfootprint.py`)
 as b349980; step 4 (DigiKey rate limiter and filtered search,
 `dkfilters.py`, `suppliers.py`) as e668722; step 5 (header and socket search
-and the run's series, `headersearch.py`) as 11e9a5f, all pushed; the
-next step is step 6 (part-named footprints). See the "as built" sections in
-the plan. Suite 1546 passing.
+and the run's series, `headersearch.py`) as 11e9a5f, all pushed. Step 6
+(part-named footprints, `namedsearch.py`) and the package-name fix in
+`thtfootprint.py` were committed on 2026-11-04 and not pushed. The next
+step is step 7 (through-hole passives). See the "as built" sections in the
+plan. Suite 1582 passing.
 
 - DigiKey limits: 120 calls a minute, 1000 a day. Every DigiKey call now goes
   through one limiter (0.6 s apart, stops at 50 left for the day, waits out a

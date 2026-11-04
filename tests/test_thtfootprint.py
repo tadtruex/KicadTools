@@ -195,6 +195,39 @@ def test_other(lib_id):
     assert parse_signature(lib_id).family == OTHER
 
 
+@pytest.mark.parametrize(
+    "lib_id",
+    [
+        "Package_TO_SOT_THT:TO-8-2",
+        "Package_TO_SOT_THT:TO-92",
+        "Package_DIP:Toshiba_11-7A9",
+        "Package_SIP:PowerIntegrations_eSIP-7C",
+        "OptoDevice:LaserDiode_TO56-3",
+        "LED_THT:LED_D5.0mm-3",
+        "Package_LCC:PLCC-20_THT-Socket",
+        "Buzzer_Beeper:Buzzer_15x7.5RM7.6",
+        "Crystal:Crystal_HC35-U",
+        "Sensor_Audio:Infineon_PG-LLGA-5-1",
+        "Button_Switch_THT:SW_PUSH-12mm",
+    ],
+)
+def test_package_names_are_not_named_parts(lib_id):
+    assert parse_signature(lib_id).family == OTHER
+
+
+@pytest.mark.parametrize(
+    "lib_id, mpn",
+    [
+        ("Display_7Segment:MAN73A", "MAN73A"),
+        ("Sensor_Current:LEM_HX15-NP", "HX15-NP"),
+        ("Display:HDSP-4832", "HDSP-4832"),
+    ],
+)
+def test_short_part_names_stay_named(lib_id, mpn):
+    s = parse_signature(lib_id)
+    assert (s.family, s.maker, s.mpn) == (NAMED_PART, "", mpn)
+
+
 def test_mounting_hole_library_part_is_not_a_hole():
     # Same library as the holes, but a Harwin part.
     assert parse_signature("MountingHole:HARWIN_H9051-01").family == NAMED_PART

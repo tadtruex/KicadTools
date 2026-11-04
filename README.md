@@ -629,6 +629,10 @@ Test schematics live in `tests/data/`.
 - `src/kicadtools/digikey_bom.py` — DigiKey BOM grouping and CSV writer (`digikey`)
 - `src/kicadtools/pcb.py` — read SMD/THT mounting and footprint placements from the `.kicad_pcb`
 - `src/kicadtools/mounting.py` — SMD/THT mounting per part, from the board's footprint or the library `.kicad_mod`
+- `src/kicadtools/thtfootprint.py` — footprint signatures from through-hole footprint names (`THT_PLAN.md`)
+- `src/kicadtools/dkfilters.py` — DigiKey category filter options, value names to filter IDs
+- `src/kicadtools/headersearch.py` — pin header and socket search at DigiKey, with one series per run
+- `src/kicadtools/namedsearch.py` — DigiKey search for through-hole parts whose footprint names the part
 - `src/kicadtools/cpl.py` — JLCPCB CPL centroid and rotation math (`cpl`)
 - `src/kicadtools/rotations.py` — per-footprint-family CPL rotation offsets
 - `src/kicadtools/partrotation.py` — per-LCSC CPL rotation overrides stored in SQLite

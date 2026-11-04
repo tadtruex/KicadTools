@@ -84,6 +84,13 @@ _SPACING_XY = re.compile(r"^P[xy](\d+(?:\.\d+)?)mm$")
 _DIM = re.compile(r"^([DLWH])(\d+(?:\.\d+)?)mm$")
 _BARE_SIZE = re.compile(r"^\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?mm$")
 _SIP = re.compile(r"^SIP(\d+)$")
+# Package and size tokens that the short-name rule must not read as part
+# numbers (see _named_part).
+_PACKAGE_TOKEN = re.compile(
+    r"^(?:TO|DO|SOD|SOT|SC|DIP|PDIP|SDIP|eDIP|SIP|eSIP|SIL|PLCC|LCC|DPAK|D2PAK|HC|PG)\d*-", re.I
+)
+_SIZE_TOKEN = re.compile(r"^(?:[DLWH]\d+(?:\.\d+)?mm|\d+(?:\.\d+)?x\d)", re.I)
+_MM_END = re.compile(r"\dmm$", re.I)
 _ORIENTATIONS = {
     "vertical": VERTICAL,
     "horizontal": HORIZONTAL,
@@ -174,10 +181,31 @@ def _geometry(tokens: List[str]) -> Dict[str, object]:
     return out
 
 
-def _named_part(tokens: List[str]) -> Optional[Tuple[str, str]]:
+def _package_name(token: str) -> bool:
+    """A token that names a package or a size, not a part: ``TO-92``,
+    ``TO56-3``, ``SDIP-10C``, ``PLCC-20``, ``HC35-U``, ``PG-LLGA-5-1``,
+    ``D5.0mm-3``, ``15x7.5RM7.6``, ``PUSH-12mm``."""
+    return bool(_PACKAGE_TOKEN.match(token) or _SIZE_TOKEN.match(token)
+                or _MM_END.search(token))
+
+
+def looks_like_part_number(token: str) -> bool:
+    """A token that can be a part number on its own: at least 5 characters,
+    a digit or a hyphen, and not a geometry, package or size token
+    (``S3B-PH-K``, ``USB-A-S-F-B-TH``; not ``01x04``, ``TO-92``,
+    ``P2.54mm``)."""
+    return len(token) >= 5 and _looks_like_mpn(token) and not _package_name(token)
+
+
+def _named_part(lib: str, tokens: List[str]) -> Optional[Tuple[str, str]]:
     """``(maker, mpn)`` when the name names a part: a maker token followed by
     a part-number token, or a short name whose last token is a part number
-    (``691137710002``, ``SW_SLW-118562-4A-N-D``)."""
+    (``691137710002``, ``SW_SLW-118562-4A-N-D``).
+
+    The short-name case has no maker to go by, so it also needs a digit in
+    the token, and it does not apply to package names (:func:`_package_name`)
+    or to KiCad's ``Package_*`` libraries, whose names are packages
+    (``Package_TO_SOT_THT:TO-8-2``, ``Package_DIP:Toshiba_11-7A9``)."""
     for i, token in enumerate(tokens):
         maker = _MAKERS.get(token.lower())
         if maker is None:
@@ -185,9 +213,10 @@ def _named_part(tokens: List[str]) -> Optional[Tuple[str, str]]:
         for later in tokens[i + 1:]:
             if _looks_like_mpn(later):
                 return maker, later
-    if len(tokens) <= 2:
+    if len(tokens) <= 2 and not lib.startswith("Package_"):
         last = tokens[-1]
-        if _looks_like_mpn(last) and len(last) >= 5:
+        if (_looks_like_mpn(last) and len(last) >= 5
+                and any(ch.isdigit() for ch in last) and not _package_name(last)):
             return "", last
     return None
 
@@ -279,7 +308,7 @@ def parse_signature(lib_id: str, pad_count: Optional[int] = None) -> FootprintSi
     if lib == "Resistor_THT" or (tokens[0] == "R" and len(tokens) > 1 and tokens[1] in ("Axial", "Array", "Box", "Bare", "Radial")):
         return _resistor(lib_id, tokens, geometry)
 
-    named = _named_part(tokens)
+    named = _named_part(lib, tokens)
     if named:
         maker, mpn = named
         return FootprintSignature(family=NAMED_PART, lib_id=lib_id, maker=maker, mpn=mpn, **geometry)
