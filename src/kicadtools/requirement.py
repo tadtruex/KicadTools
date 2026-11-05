@@ -102,6 +102,10 @@ BUILTIN_DEFAULTS: Dict[str, str] = {
     # LEDs (kicadtools.ledrequirement): the package of a symbol with no
     # footprint. There is no default colour or brightness.
     "led.package": "0603",
+    "led.manufacturers": (
+        "Wurth, Lite-On, Kingbright, Everlight, OSRAM, Rohm, Vishay, "
+        "Broadcom, SunLED, QT Brightek, Inolux, Dialight"
+    ),
     "ind.shielding": "Shielded",
     "ind.tolerance": "20%",
     "ind.manufacturers": (

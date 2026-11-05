@@ -86,9 +86,10 @@ lists the LED category per package (987 parts for 0603 in 9 s) and matches
 locally. Nothing built yet. The Intents tab's Accept column now sorts
 checked, unchecked, then rows without a box.
 
-Steps 1 (`ledcolor.py`) and 2 (`ledrequirement.py`) are built, not
-committed; see "as built" in the plan. Suite 1804 passing. Next: step 3
-(search). Found on the way: Hub (KiCad 6 format) reads as no parts.
+Steps 1 (`ledcolor.py`) and 2 (`ledrequirement.py`) are committed as
+29534af. Step 3 (`ledsearch.py`) is built, not committed. See "as built" in
+the plan. Next: step 4 (parts database). Hub (KiCad 6 format) reads as no
+parts.
 
 ## Low stock is a warning on named and stored parts (2026-11-04)
 

@@ -171,6 +171,29 @@ DigiKey (`product_for("150060RS75000")`): `Color`, `Wavelength - Dominant`,
 - Named LEDs: the IC lookups (`find_ics`-style at JLCPCB and DigiKey), and
   a pad-count check of the footprint where the part's package gives one.
 
+### Step 3 — as built (2026-11-04)
+
+`src/kicadtools/ledsearch.py`, tests `tests/test_ledsearch.py`. Built-in
+setting `led.manufacturers` (Würth, Lite-On, Kingbright, Everlight, OSRAM,
+Rohm, Vishay, Broadcom, SunLED, QT Brightek, Inolux, Dialight).
+
+- `assess_led(group, defaults, db=, jlc_listing=, jlc_part=, jlc_search=,
+  digikey=, needed=)` → `partsearch.SearchResult` of `LedCandidate`
+  (a `Candidate` with the LED's supplier values in `led`). Ranking is
+  `partsearch.rank_key`.
+- `read_existing_led`: DigiKeyPN, then MPN, at DigiKey; LCSC at JLCPCB, else
+  the MPN searched there. An LCSC naming another MPN is noted and not used.
+- `cached_listing(jlcpcb_category_search)`: one empty-keyword listing per
+  package per run (987 parts for 0603, 11 s).
+- `check_led`: one die, package, band, intensity, Vf, lens; a stated limit the
+  part does not list rejects it at JLCPCB; at DigiKey a missing value passes.
+- Named LEDs need nothing new: `icsearch.assess_ic` takes a `NamedLedGroup`.
+- Stored parts: step 4.
+- Live (10 DigiKey calls): AtTinyDemo D3 → Lite-On `LTST-C190TGKT`
+  (525 nm, C364559); SX1509 D9 → its current Würth `150060RS75000`
+  (C3030991), no listing fetched. Of 987 0603 parts, 46 list no dominant
+  wavelength and are rejected for it.
+
 ### Step 4 — parts database
 
 - Table `led` (`CREATE TABLE IF NOT EXISTS`, as `tht` was added): package,
