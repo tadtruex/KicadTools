@@ -87,8 +87,8 @@ locally. Nothing built yet. The Intents tab's Accept column now sorts
 checked, unchecked, then rows without a box.
 
 Steps 1 (`ledcolor.py`) and 2 (`ledrequirement.py`) are committed as
-29534af. Step 3 (`ledsearch.py`) is built, not committed. See "as built" in
-the plan. Next: step 4 (parts database). Hub (KiCad 6 format) reads as no
+29534af, step 3 (`ledsearch.py`) as ff0bd4f. Step 4 (table `led`) is built,
+not committed. See "as built" in the plan. Next: step 5 (Cockpit). Hub (KiCad 6 format) reads as no
 parts.
 
 ## Low stock is a warning on named and stored parts (2026-11-04)

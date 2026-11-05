@@ -56,6 +56,9 @@ class FakeDb:
     def is_rejected(self, manufacturer, mpn):
         return mpn.upper() in self.rejected
 
+    def find_leds(self, package):
+        return []
+
 
 def _group(**props):
     p = {"Reference": "D1", "dnp": False, "in_bom": True, "Intent:Type": "led",
@@ -189,3 +192,51 @@ def test_two_die_part_rejected():
     req = _group().requirement
     ev = jlc_evidence(_jlc("C1", "BI", nm="569nm、621nm", color="Yellow Green, Red"))
     assert check_led(req, ev, "JLCPCB") == "JLCPCB lists 2 dies"
+
+
+# --- parts database (step 4) -------------------------------------------- #
+
+def test_accepted_led_is_found_again_and_listing_skipped(tmp_path):
+    from kicadtools.partsdb import PartsDb
+    from kicadtools.partsearch import DATABASE
+    dk = FakeDigiKey([_dk("LTST-C191KGKT")])
+    first = _run(_group(), [_jlc("C2", "LTST-C191KGKT")], dk)
+    cand = first.candidates[0]
+    db = PartsDb(tmp_path / "parts.sqlite")
+    pid = db.accept_part(cand.choice())
+    db.record_usage(pid, "b.kicad_sch", ["D1"])
+    stored = db.find_leds("0603")
+    assert [(h.mpn, h.color, h.dominant_nm, h.lcsc) for h in stored] == [
+        ("LTST-C191KGKT", "green", 525.0, "C2")]
+
+    called = []
+    r = assess_led(_group(), DEFAULTS, db=db,
+                   jlc_listing=lambda pkg: called.append(pkg) or [],
+                   jlc_part=lambda code: _jlc("C2", "LTST-C191KGKT"),
+                   jlc_search=lambda kw: [], digikey=dk, needed=25)
+    assert [(c.mpn, c.source, c.usage_count) for c in r.candidates] == [
+        ("LTST-C191KGKT", DATABASE, 1)]
+    assert r.candidates[0].led.dominant == (525.0,)
+    assert called == []
+
+    # A red LED does not take the stored green one.
+    red = _group(Value="LED_Red")
+    r = assess_led(red, DEFAULTS, db=db, jlc_listing=lambda pkg: [],
+                   jlc_part=lambda code: None, jlc_search=lambda kw: [],
+                   digikey=dk, needed=25)
+    assert r.candidates == []
+
+
+def test_existing_file_gains_the_led_table(tmp_path):
+    import sqlite3
+    from kicadtools.partsdb import PartsDb
+    path = tmp_path / "parts.sqlite"
+    PartsDb(path).close()
+    con = sqlite3.connect(path)
+    con.execute("DROP TABLE led")
+    con.execute("INSERT INTO settings VALUES ('led.package', '0805')")
+    con.commit()
+    con.close()
+    db = PartsDb(path)
+    assert db.find_leds("0603") == []
+    assert db.get_setting("led.package") == "0805"

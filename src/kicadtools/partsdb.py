@@ -25,6 +25,10 @@ Tables (see ``CAPACITOR_PLAN.md`` and ``IC_PLAN.md`` step 7):
 - ``tht`` — a through-hole part (``part.type`` = ``"tht"``; ``THT_PLAN.md``
   step 8): the footprint signature it was accepted for, the Value key when
   the family needs one, the footprint, the family and the positions;
+- ``led`` — a one-colour LED (``part.type`` = ``"led"``; ``LED_PLAN.md``
+  step 4): its colour, dominant and peak wavelength, intensity, forward
+  voltage and lens. Multicolour and smart LEDs are found by part number and
+  stored as ICs;
 - ``supplier_pn`` — DigiKey and LCSC part numbers of a part. An IC first
   accepted while JLCPCB does not stock it has no LCSC row; an LCSC row
   recorded earlier is kept when the IC is accepted again without one (the
@@ -37,7 +41,8 @@ in one transaction, and every existing row is kept. A file of any other
 version is refused without being changed. The ``inductor`` table was added
 within version 2: the schema text is run on every open and holds only
 ``CREATE TABLE IF NOT EXISTS``, so a version-2 file without the table gains
-it and keeps every row. The ``tht`` table was added the same way.
+it and keeps every row. The ``tht`` and ``led`` tables were added the same
+way.
 
 Stock and price are not stored; they change by the hour and are fetched from
 the suppliers (through the existing JLCPCB cache) when candidates are listed.
@@ -71,6 +76,9 @@ IC = "ic"
 # ``part.type`` of a through-hole part found by footprint (headers, sockets,
 # terminal blocks, part-named footprints; ``THT_PLAN.md`` step 8).
 THT = "tht"
+
+# ``part.type`` of a one-colour LED (``LED_PLAN.md`` step 4).
+LED = "led"
 
 # Environment variable naming an alternative database file.
 ENV_VAR = "KICADTOOLS_PARTS_DB"
@@ -140,6 +148,17 @@ CREATE TABLE IF NOT EXISTS tht (
   positions     INTEGER
 );
 CREATE INDEX IF NOT EXISTS tht_signature ON tht(signature, value_key);
+-- A one-colour LED. color is a kicadtools.ledcolor colour name, lens is
+-- "clear", "diffused" or NULL, and the numbers are NULL when not listed.
+CREATE TABLE IF NOT EXISTS led (
+  part_id       INTEGER PRIMARY KEY REFERENCES part(id) ON DELETE CASCADE,
+  color         TEXT NOT NULL DEFAULT '',
+  dominant_nm   REAL,
+  peak_nm       REAL,
+  intensity_mcd REAL,
+  vf_v          REAL,
+  lens          TEXT
+);
 CREATE TABLE IF NOT EXISTS supplier_pn (
   part_id       INTEGER NOT NULL REFERENCES part(id) ON DELETE CASCADE,
   supplier      TEXT NOT NULL,
@@ -178,7 +197,7 @@ _TABLES: Dict[str, _Table] = {
 
 
 # Every per-type parameter table; a part has a row in at most one of them.
-_PARAM_TABLES = tuple(t.name for t in _TABLES.values()) + (IC, THT)
+_PARAM_TABLES = tuple(t.name for t in _TABLES.values()) + (IC, THT, LED)
 
 
 def _table(kind: str) -> _Table:
@@ -347,6 +366,62 @@ class DbTht:
     datasheet_url: str = ""
 
 
+def _opt_float(x: object) -> Optional[float]:
+    return None if x is None else float(x)
+
+
+@dataclass(frozen=True)
+class LedChoice:
+    """A one-colour LED to record as accepted or rejected."""
+
+    kind: ClassVar[str] = LED
+    mpn: str
+    manufacturer: str
+    package: str
+    color: str = ""
+    dominant_nm: Optional[float] = None
+    peak_nm: Optional[float] = None
+    intensity_mcd: Optional[float] = None
+    vf_v: Optional[float] = None
+    lens: Optional[str] = None
+    digikey_pn: Optional[str] = None
+    digikey_packaging: Optional[str] = None
+    lcsc: Optional[str] = None
+    jlc_library: Optional[str] = None
+    description: str = ""
+    datasheet_url: str = ""
+
+
+@dataclass(frozen=True)
+class DbLed:
+    """An accepted LED read back from the database; fields as in
+    :class:`LedChoice`. ``params`` gives the shape
+    :func:`kicadtools.partsearch._from_database` reads (dominant wavelength
+    as the value, colour as the class)."""
+
+    kind: ClassVar[str] = LED
+    part_id: int
+    mpn: str
+    manufacturer: str
+    package: str
+    color: str
+    dominant_nm: Optional[float]
+    peak_nm: Optional[float]
+    intensity_mcd: Optional[float]
+    vf_v: Optional[float]
+    lens: Optional[str]
+    digikey_pn: Optional[str]
+    lcsc: Optional[str]
+    jlc_library: Optional[str]
+    usage_count: int
+    description: str = ""
+    datasheet_url: str = ""
+
+    @property
+    def params(self) -> PartParams:
+        return PartParams(self.dominant_nm or 0.0, None, self.color, None)
+
+
 @dataclass(frozen=True)
 class DbPart:
     """An accepted part read back from the database. ``usage_count`` is
@@ -457,14 +532,14 @@ class PartsDb:
 
     # ----- decisions -------------------------------------------------------
 
-    def accept_part(self, choice: Union[PartChoice, IcChoice, ThtChoice]) -> int:
+    def accept_part(self, choice: Union[PartChoice, IcChoice, ThtChoice, LedChoice]) -> int:
         """Record *choice* (a capacitor, resistor, inductor, IC or
         through-hole part) as accepted and
         return its part id. An existing row for the same (manufacturer, MPN)
         is updated in place, including one previously rejected."""
         return self._upsert(choice, ACCEPTED)
 
-    def reject_part(self, choice: Union[PartChoice, IcChoice, ThtChoice]) -> int:
+    def reject_part(self, choice: Union[PartChoice, IcChoice, ThtChoice, LedChoice]) -> int:
         """Record *choice* as rejected and return its part id. A rejected part
         is excluded from :meth:`find_parts`, :meth:`find_ics` and
         :meth:`find_tht`."""
@@ -479,11 +554,13 @@ class PartsDb:
             ).fetchone()
         return row is not None and row[0] == REJECTED
 
-    def _upsert(self, choice: Union[PartChoice, IcChoice, ThtChoice], status: str) -> int:
+    def _upsert(self, choice: Union[PartChoice, IcChoice, ThtChoice, LedChoice], status: str) -> int:
         if isinstance(choice, IcChoice):
             table_name, row = IC, self._ic_row
         elif isinstance(choice, ThtChoice):
             table_name, row = THT, self._tht_row
+        elif isinstance(choice, LedChoice):
+            table_name, row = LED, self._led_row
         else:
             table_name, row = _table(choice.kind).name, self._param_row
         mpn = (choice.mpn or "").strip()
@@ -567,6 +644,16 @@ class PartsDb:
                 [part_id, choice.family, choice.signature.strip(),
                  (choice.value_key or "").strip(), (choice.footprint or "").strip(),
                  positions])
+
+    @staticmethod
+    def _led_row(part_id: int, choice: LedChoice) -> tuple:
+        """Columns and values of a led row."""
+        return (["part_id", "color", "dominant_nm", "peak_nm", "intensity_mcd",
+                 "vf_v", "lens"],
+                [part_id, (choice.color or "").strip(),
+                 _opt_float(choice.dominant_nm), _opt_float(choice.peak_nm),
+                 _opt_float(choice.intensity_mcd), _opt_float(choice.vf_v),
+                 _opt_text(choice.lens)])
 
     def _replace_pn(self, part_id: int, supplier: str, pn: str,
                     packaging: Optional[str], jlc_library: Optional[str],
@@ -735,6 +822,41 @@ class PartsDb:
                   digikey_pn=dk, usage_count=int(uses),
                   description=desc or "", datasheet_url=url or "")
             for (pid, m, mfr, pkg, desc, url, fam, sig, vk, fp, pos, dk, uses) in rows
+        ]
+
+    def find_leds(self, package: str) -> List[DbLed]:
+        """Accepted one-colour LEDs in chip *package*, ordered by usage count
+        (highest first), then JLCPCB Basic, then the latest decision. The
+        caller checks colour and limits
+        (:func:`kicadtools.ledsearch.check_led`)."""
+        package = (package or "").strip()
+        if not package:
+            return []
+        sql = (
+            "SELECT p.id, p.mpn, p.manufacturer, p.package, p.description,"
+            " p.datasheet_url, l.color, l.dominant_nm, l.peak_nm, l.intensity_mcd,"
+            " l.vf_v, l.lens,"
+            " (SELECT pn FROM supplier_pn WHERE part_id = p.id"
+            "   AND supplier = 'digikey' ORDER BY pn LIMIT 1),"
+            " (SELECT pn FROM supplier_pn WHERE part_id = p.id"
+            "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1),"
+            " (SELECT jlc_library FROM supplier_pn WHERE part_id = p.id"
+            "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS lib,"
+            " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
+            " FROM part p JOIN led l ON l.part_id = p.id"
+            " WHERE p.status = ? AND p.type = ? AND p.package = ?"
+            " ORDER BY usage_count DESC, (lib = 'basic') DESC, p.decided_at DESC"
+        )
+        with self._lock:
+            rows = self.conn.execute(sql, (ACCEPTED, LED, package)).fetchall()
+        return [
+            DbLed(part_id=int(pid), mpn=m, manufacturer=mfr, package=pkg or "",
+                  color=col or "", dominant_nm=dom, peak_nm=peak,
+                  intensity_mcd=mcd, vf_v=vf, lens=lens, digikey_pn=dk,
+                  lcsc=lcsc, jlc_library=lib, usage_count=int(uses),
+                  description=desc or "", datasheet_url=url or "")
+            for (pid, m, mfr, pkg, desc, url, col, dom, peak, mcd, vf, lens, dk,
+                 lcsc, lib, uses) in rows
         ]
 
     # ----- usage -----------------------------------------------------------

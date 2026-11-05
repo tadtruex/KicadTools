@@ -7,7 +7,11 @@ The order follows :mod:`kicadtools.partsearch`:
    DigiKey and JLCPCB (:func:`read_existing_led`). Listed first when it can
    be ordered and meets the limits; below the stock floor it is kept with a
    warning.
-1. **Stored parts** — the parts database (step 4).
+1. **Stored parts** — accepted LEDs in the package from the parts database
+   (:meth:`~kicadtools.partsdb.PartsDb.find_leds`) that pass
+   :func:`check_led` on their stored values, with stock and status refreshed
+   at JLCPCB and DigiKey. Always listed; below the stock floor with a
+   warning.
 2. **JLCPCB listing** — when nothing so far meets the stock floor, or when
    asked. JLCPCB's colour keyword does not filter, so the whole LED category
    is listed for the package with an empty keyword (*jlc_listing*, cached per
@@ -42,7 +46,7 @@ from kicadtools.ledrequirement import (
     LedRequirement,
     lens_kind,
 )
-from kicadtools.partsdb import PartParams, PartsDb
+from kicadtools.partsdb import DbLed, LedChoice, PartParams, PartsDb
 from kicadtools.partsearch import (
     CURRENT,
     CURRENT_LABEL,
@@ -51,7 +55,9 @@ from kicadtools.partsearch import (
     SEARCH,
     Candidate,
     SearchResult,
+    _CUT_TAPE_RE,
     _best_jlc_hit,
+    _from_database,
     _current_digikey_pn,
     _jlc_library,
     _label,
@@ -139,6 +145,39 @@ class LedCandidate(Candidate):
     values. ``params`` holds the dominant wavelength as ``nominal`` (0 when
     none is listed) and the colour as ``dielectric``, for display."""
     led: LedEvidence = field(default_factory=lambda: LedEvidence(""))
+
+    def choice(self) -> LedChoice:
+        """This candidate for :meth:`PartsDb.accept_part` /
+        :meth:`PartsDb.reject_part`."""
+        ev = self.led
+        return LedChoice(
+            mpn=self.mpn, manufacturer=self.manufacturer, package=self.package,
+            color=ev.color or "",
+            dominant_nm=ev.dominant[0] if ev.dominant else None,
+            peak_nm=ev.peak[0] if ev.peak else None,
+            intensity_mcd=ev.intensity_mcd[0] if ev.intensity_mcd else None,
+            vf_v=ev.vf[0] if ev.vf else None,
+            lens=ev.lens,
+            digikey_pn=self.digikey_pn,
+            digikey_packaging=("cut tape" if self.digikey_pn
+                               and _CUT_TAPE_RE.search(self.digikey_pn) else None),
+            lcsc=self.lcsc, jlc_library=self.jlc_library,
+            description=self.description, datasheet_url=self.datasheet_url,
+        )
+
+
+def stored_evidence(hit: DbLed) -> LedEvidence:
+    """A stored LED's values as :class:`LedEvidence`."""
+    return LedEvidence(
+        label=_label(hit.lcsc or "", hit.mpn),
+        package=hit.package or None,
+        dominant=(hit.dominant_nm,) if hit.dominant_nm is not None else (),
+        peak=(hit.peak_nm,) if hit.peak_nm is not None else (),
+        labels=(hit.color,) if hit.color else (),
+        intensity_mcd=(hit.intensity_mcd,) if hit.intensity_mcd is not None else (),
+        vf=(hit.vf_v,) if hit.vf_v is not None else (),
+        lens=hit.lens,
+    )
 
 
 def _params(ev: LedEvidence) -> PartParams:
@@ -354,6 +393,7 @@ def find_led_candidates(
     *,
     db: PartsDb,
     jlc_listing: Callable[[str], Sequence[JlcPart]],
+    jlc_part: Callable[[str], Optional[JlcPart]],
     digikey,
     needed: int,
     limit: int = 10,
@@ -361,7 +401,8 @@ def find_led_candidates(
     currents: Sequence[LedCandidate] = (),
     manufacturers: Sequence[str] = (),
 ) -> SearchResult:
-    """The parts meeting *req*, best first; see the module docstring."""
+    """The parts meeting *req*, best first; see the module docstring.
+    *jlc_part* refreshes stored parts' JLCPCB stock."""
     if not req.searchable:
         return SearchResult([], problem=req.problem())
     result = SearchResult([])
@@ -378,7 +419,27 @@ def find_led_candidates(
         cand.stock_warning = _stock_floor(cand, needed)
         candidates.append(cand)
 
+    for hit in db.find_leds(req.package.value):
+        ev = stored_evidence(hit)
+        if check_led(req, ev, "parts database", missing_ok=True):
+            continue
+        same = [c for c in candidates if _norm_mpn(c.mpn) == _norm_mpn(hit.mpn)]
+        if same:
+            same[0].db_part_id = hit.part_id
+            same[0].usage_count = hit.usage_count
+            continue
+        base = _from_database(hit, jlc_part, digikey)
+        cand = LedCandidate(**{k: getattr(base, k) for k in base.__dataclass_fields__},
+                            led=ev)
+        if cand.unavailable_reason:
+            result.rejected.append((_label(cand.lcsc or "", cand.mpn),
+                                    cand.unavailable_reason))
+            continue
+        cand.stock_warning = _stock_floor(cand, needed)
+        candidates.append(cand)
+
     if any(not c.stock_warning for c in candidates) and not search_suppliers:
+        candidates.sort(key=lambda c: rank_key(c, needed))
         return result
     if not getattr(digikey, "configured", False):
         result.problem = DIGIKEY_UNCONFIGURED
@@ -465,7 +526,8 @@ def assess_led(
         return SearchResult([], problem=req.problem(), requirement=req,
                             existing=lookup)
     result = find_led_candidates(
-        req, db=db, jlc_listing=jlc_listing, digikey=digikey, needed=needed,
+        req, db=db, jlc_listing=jlc_listing, jlc_part=jlc_part, digikey=digikey,
+        needed=needed,
         limit=limit, search_suppliers=search_suppliers, currents=currents,
         manufacturers=parse_manufacturers(defaults.get("led.manufacturers")),
     )

@@ -201,6 +201,20 @@ Rohm, Vishay, Broadcom, SunLED, QT Brightek, Inolux, Dialight).
   and the colour list for multicolour parts. Stored parts are found by
   package and band.
 
+### Step 4 — as built (2026-11-04)
+
+`partsdb.py`: table `led` (color, dominant_nm, peak_nm, intensity_mcd,
+vf_v, lens), `part.type` = `"led"`, `LedChoice` / `DbLed`,
+`PartsDb.find_leds(package)` (usage, then Basic, then the latest decision).
+Added with `CREATE TABLE IF NOT EXISTS`; a copy of `parts.sqlite` gained the
+table and kept its 8 parts. `ledsearch.py`: `LedCandidate.choice()`, and
+stored parts listed after the current part when `check_led` passes on their
+stored values, with stock and status refreshed (`partsearch._from_database`).
+A stored part that passes skips the JLCPCB listing.
+
+Multicolour and smart LEDs take the IC path and are stored as ICs (found by
+MPN), so the plan's colour-list column is not added.
+
 ### Step 5 — Cockpit
 
 - Parts-tab rows with class `LED`; plain rows show the colour in the Value
