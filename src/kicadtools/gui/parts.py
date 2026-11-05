@@ -40,6 +40,14 @@ symbol has a DigiKeyPN or MPN, ``assigned`` when every member has an MPN,
 Manufacturer and DigiKeyPN, else ``unassigned``.
 :class:`ThtCandidateWorker` runs its search.
 
+A plain-LED row (:class:`~kicadtools.ledrequirement.LedGroup`, ``LED_PLAN.md``
+step 5) shows the colour under Value (``green`` from ``LED_Green`` is marked
+``(value)``), the package, the stated intensity minimum and Vf maximum under
+Rating, and the wavelength band under Class. It is ``not searchable`` when
+the footprint has no chip size; a missing colour leaves it ``unassigned``
+(the dialog asks for one). :class:`LedCandidateWorker` runs its search.
+Multicolour and smart LEDs are IC rows.
+
 An IC row (:class:`~kicadtools.icrequirement.IcGroup`) shows the MPN field,
 else the Value, under Value; the package parsed from the footprint name (or
 the queued part's DigiKey package) under Package; Rating, Dielectric and
@@ -79,6 +87,8 @@ from kicadtools.icsearch import (
     assess_ic,
     board_pads,
 )
+from kicadtools.ledrequirement import TEXT, LedGroup, LedRequirement
+from kicadtools.ledsearch import LedLookup, assess_led
 from kicadtools.package import PackageInfo, parse_footprint
 from kicadtools.partnum import extract_part_numbers
 from kicadtools.partsdb import PartsDb
@@ -153,6 +163,7 @@ _SOURCE_MARKERS = {
     RELAXED: "limit dropped",
     PART: "part",
     DESCRIPTION: "description",
+    TEXT: "value",
 }
 
 # The plan shape: {source_file: {symbol_uuid: {property_key: value or None}}}.
@@ -160,9 +171,17 @@ Plan = Dict[Path, Dict[str, Dict[str, Optional[str]]]]
 
 # A Parts-tab row: a capacitor/resistor/inductor group, an IC group or a
 # through-hole group.
-Group = Union[RequirementGroup, IcGroup, ThtGroup]
+Group = Union[RequirementGroup, IcGroup, ThtGroup, LedGroup]
 
 THT_CLASS = "through-hole"
+
+
+class _NoClass:
+    """Stands in for a PartType in :func:`sourced_cell` for an LED package."""
+    has_class = False
+
+
+_NO_CLASS = _NoClass()
 
 
 # --------------------------------------------------------------------------- #
@@ -292,6 +311,45 @@ def is_tht(group: object) -> bool:
     return isinstance(group, ThtGroup)
 
 
+def is_led(group: object) -> bool:
+    """True for a plain-LED group (a row searched by colour)."""
+    return isinstance(group, LedGroup)
+
+
+def _marked(text: str, source: str) -> str:
+    marker = _SOURCE_MARKERS.get(source)
+    return f"{text} ({marker})" if marker else text
+
+
+def led_value_cell(req: LedRequirement) -> str:
+    """The colour, marked by source (``green (value)``); the Value followed
+    by ``(no colour)`` when no source names one."""
+    if req.colors.value:
+        return _marked(", ".join(req.colors.value), req.colors.source)
+    if req.colors.source == SCHEMATIC:
+        return "unreadable"
+    return f"{req.value_text or DASH} (no colour)"
+
+
+def led_rating_cell(req: LedRequirement) -> str:
+    """``≥ 100 mcd, ≤ 2.2 V``; ``any`` when neither is stated."""
+    parts = []
+    if req.intensity_min.value is not None:
+        parts.append(_marked(f"≥ {req.intensity_min.value:g} mcd", req.intensity_min.source))
+    if req.vf_max.value is not None:
+        parts.append(_marked(f"≤ {req.vf_max.value:g} V", req.vf_max.source))
+    return ", ".join(parts) or "any"
+
+
+def led_class_cell(req: LedRequirement) -> str:
+    """The wavelength band (``510–540 nm``), with the lens when stated."""
+    bands = "; ".join(t.split(" ", 1)[1] if " " in t else t
+                      for t in req.band_text().split("; ") if t)
+    if req.lenses.value:
+        bands = f"{bands}, {', '.join(req.lenses.value)}" if bands else ", ".join(req.lenses.value)
+    return bands or DASH
+
+
 def footprint_name(footprint: str) -> str:
     """A KiCad lib id without its library: ``"SOT-23-5"`` for
     ``"Package_TO_SOT_SMD:SOT-23-5"``; ``""`` stays ``""``."""
@@ -407,10 +465,15 @@ class PartsTableModel(QAbstractTableModel):
         group = self._groups[row]
         if is_ic(group) or is_tht(group):
             return      # an IC or through-hole requirement has no defaults
+        if is_led(group):
+            lookup = self._lookups.get(row)
+            group.requirement = group.requirement_with_part(
+                lookup.evidence if lookup is not None else None, defaults)
+            return
         lookup = self._lookups.get(row)
         group.requirement = requirement_from_lookup(group, lookup, defaults)[0]
 
-    def record_lookup(self, row: int, lookup: ExistingLookup,
+    def record_lookup(self, row: int, lookup: "ExistingLookup | LedLookup",
                       defaults: Mapping[str, str]) -> None:
         """Keep *lookup* (an assign dialog's existing-part lookup) for *row*
         and rebuild the row's requirement from it (:func:`requirement_from_lookup`)."""
@@ -418,7 +481,7 @@ class PartsTableModel(QAbstractTableModel):
         self._recompute(row, defaults)
         self.dataChanged.emit(self.index(row, 0), self.index(row, self.columnCount() - 1))
 
-    def lookup_at(self, row: int) -> Optional[ExistingLookup]:
+    def lookup_at(self, row: int) -> "Optional[ExistingLookup | LedLookup]":
         """The lookup recorded for *row*, ``None`` before one."""
         return self._lookups.get(row)
 
@@ -516,6 +579,10 @@ class PartsTableModel(QAbstractTableModel):
             return STATUS_UNASSIGNED if req.searchable else STATUS_NOT_SEARCHABLE
         if is_ic(group):
             return STATUS_NOT_SEARCHABLE if not req.searchable else STATUS_UNASSIGNED
+        if is_led(group):
+            if req.footprint and not req.package.value:
+                return STATUS_NOT_SEARCHABLE
+            return STATUS_UNASSIGNED
         if (req.footprint and not req.package.value
                 and not package_editable(req.ptype, req.footprint)):
             return STATUS_NOT_SEARCHABLE
@@ -580,6 +647,8 @@ class PartsTableModel(QAbstractTableModel):
             return self._ic_cell_text(row, col, group, req)
         if is_tht(group):
             return self._tht_cell_text(row, col, group, req)
+        if is_led(group):
+            return self._led_cell_text(row, col, group, req)
         if col == COL_VALUE:
             return value_cell(req)
         t = req.ptype
@@ -644,6 +713,58 @@ class PartsTableModel(QAbstractTableModel):
         if col == COL_MPN:
             return self.chosen_mpn(row)
         return ""
+
+    def _led_cell_text(self, row: int, col: int, group: LedGroup,
+                       req: LedRequirement) -> str:
+        if col == COL_VALUE:
+            return led_value_cell(req)
+        if col == COL_PACKAGE:
+            return sourced_cell(req.package, "package", _NO_CLASS)
+        if col == COL_RATING:
+            return led_rating_cell(req)
+        if col == COL_DIELECTRIC:
+            return led_class_cell(req)
+        if col == COL_TOLERANCE:
+            return ""
+        if col == COL_QTY:
+            return str(group.quantity)
+        if col == COL_REFERENCES:
+            return ", ".join(group.references)
+        if col == COL_CURRENT:
+            return current_part_cell(group)
+        if col == COL_STATUS:
+            return self.status(row)
+        if col == COL_MPN:
+            return self.chosen_mpn(row)
+        return ""
+
+    def _led_tooltip(self, row: int, col: int) -> Optional[str]:
+        group = self._groups[row]
+        req = self.requirement_at(row)
+        status = self.status(row)
+        if col == COL_FOOTPRINT:
+            return req.footprint or "No footprint."
+        if col == COL_REFERENCES:
+            return ", ".join(group.references)
+        if status == STATUS_CONFLICT:
+            return ("Conflict:\n" + "\n".join(req.conflicts)
+                    + "\nFix it on the schematic. Double-click for details.")
+        if col == COL_DIELECTRIC:
+            return ("Dominant wavelength band a part must fall in"
+                    + (f": {req.band_text()}." if req.band_text() else "."))
+        if col == COL_CURRENT:
+            e = group.existing
+            lines = [f"{name}: {v}" for name, v in (
+                ("MPN", e.mpn), ("DigiKeyPN", e.digikey_pn), ("LCSC", e.lcsc)) if v]
+            return "\n".join(lines) if lines else "No part number on the schematic."
+        if status == STATUS_NOT_SEARCHABLE:
+            return f"Not searchable: {req.problem()}."
+        if status == STATUS_UNASSIGNED:
+            problem = req.problem()
+            if problem:
+                return f"Before a search: {problem}. Double-click to assign a part."
+            return "Double-click to assign a part."
+        return None
 
     def _tht_tooltip(self, row: int, col: int) -> Optional[str]:
         group = self._groups[row]
@@ -725,6 +846,8 @@ class PartsTableModel(QAbstractTableModel):
                 return self._ic_tooltip(r, col)
             if is_tht(self._groups[r]):
                 return self._tht_tooltip(r, col)
+            if is_led(self._groups[r]):
+                return self._led_tooltip(r, col)
             req = self.requirement_at(r)
             if col == COL_FOOTPRINT and req.footprint:
                 return req.footprint
@@ -921,6 +1044,58 @@ class ThtCandidateWorker(QObject):
         except Exception as exc:  # noqa: BLE001 — report any failure in the dialog
             self.failed.emit(str(exc))
         finally:
+            if db is not None:
+                db.close()
+            QThread.currentThread().quit()
+
+
+class LedCandidateWorker(QObject):
+    """Runs :func:`kicadtools.ledsearch.assess_led` for one plain-LED group
+    off the GUI thread; emits ``found`` (a ``SearchResult``) or ``failed``.
+    *listing* is the window's per-run JLCPCB listing
+    (:func:`kicadtools.ledsearch.cached_listing`), so each package is listed
+    once a session."""
+
+    found = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, *, group: LedGroup, defaults: Mapping[str, str],
+                 requirement: Optional[LedRequirement], needed: int, db_path: Path,
+                 listing, search_suppliers: bool = False,
+                 cache_path: Optional[Path] = None,
+                 existing: Optional[LedLookup] = None):
+        super().__init__()
+        self._group = group
+        self._defaults = dict(defaults)
+        self._req = requirement
+        self._needed = needed
+        self._db_path = db_path
+        self._listing = listing
+        self._search_suppliers = search_suppliers
+        self._cache_path = cache_path
+        self._existing = existing
+
+    def run(self) -> None:
+        db: Optional[PartsDb] = None
+        cache: Optional[Cache] = None
+        try:
+            db = PartsDb(self._db_path)
+            if self._cache_path is not None:
+                self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache = Cache(self._cache_path)
+            result = assess_led(
+                self._group, self._defaults, db=db, jlc_listing=self._listing,
+                jlc_part=lambda code: cached_jlcpcb_part(code, cache),
+                jlc_search=jlcpcb_search, digikey=DigiKeyClient(),
+                needed=self._needed, search_suppliers=self._search_suppliers,
+                requirement=self._req, existing=self._existing,
+            )
+            self.found.emit(result)
+        except Exception as exc:  # noqa: BLE001 — report any failure in the dialog
+            self.failed.emit(str(exc))
+        finally:
+            if cache is not None:
+                cache.close()
             if db is not None:
                 db.close()
             QThread.currentThread().quit()

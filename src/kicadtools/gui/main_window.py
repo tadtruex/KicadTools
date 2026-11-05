@@ -70,6 +70,7 @@ from kicadtools.gui.assign_dialog import AssignDialog
 from kicadtools.gui.autopopulate_dialog import AutopopulateDialog
 from kicadtools.gui.ic_assign_dialog import IcAssignDialog
 from kicadtools.gui.tht_assign_dialog import ThtAssignDialog
+from kicadtools.gui.led_assign_dialog import LedAssignDialog
 from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.gui.parts import (
     STATUS_ASSIGNED,
@@ -81,9 +82,11 @@ from kicadtools.gui.parts import (
     IcCandidateWorker,
     PartsTableModel,
     ThtCandidateWorker,
+    LedCandidateWorker,
     board_label,
     is_ic,
     is_tht,
+    is_led,
     requirement_settings,
 )
 from kicadtools.gui.param_editor import ElectricalParamsDialog
@@ -91,6 +94,9 @@ from kicadtools.gui.substitute_dialog import SubstituteDialog, describe_part
 from kicadtools.autopopulate import find_matches
 from kicadtools.headersearch import HEADER_MAKERS, HeaderRun
 from kicadtools.icrequirement import group_ics
+from kicadtools.ledassign import led_assignment_plan
+from kicadtools.ledrequirement import group_leds
+from kicadtools.ledsearch import cached_listing
 from kicadtools.mounting import BoardMounting
 from kicadtools.icsearch import MATCH, board_pads, ic_assignment_plan
 from kicadtools.naturalsort import natural_key
@@ -137,6 +143,8 @@ class MainWindow(QMainWindow):
         # Header and socket searches for the open board: one series per run,
         # reset when a schematic is opened (THT_PLAN.md step 5).
         self._header_run: Optional[HeaderRun] = None
+        # The JLCPCB LED listing, fetched once per package per session.
+        self._led_listing = cached_listing(suppliers.jlcpcb_category_search)
         self._search_running = False
         # The dialog and request number of the running search, so an outcome is
         # shown only in the dialog (and for the request) it was made for.
@@ -342,11 +350,15 @@ class MainWindow(QMainWindow):
         self.table.resizeColumnsToContents()  # sensible initial widths; still draggable
         self.lcsc_model.load(self._records)
         self.lcsc_table.resizeColumnsToContents()
-        # Capacitor, resistor and inductor groups first, then ICs, then
-        # through-hole parts, each in reference order.
-        self.parts_model.load(group_parts(self._records, self._part_defaults())
-                              + group_ics(self._records)
-                              + group_tht(self._records, BoardMounting.for_schematic(path)))
+        # Capacitor, resistor and inductor groups first, then plain LEDs, ICs,
+        # multicolour and smart LEDs (IC rows), and through-hole parts, each
+        # in reference order.
+        board = BoardMounting.for_schematic(path)
+        defaults = self._part_defaults()
+        leds, named_leds = group_leds(self._records, defaults, board=board)
+        self.parts_model.load(group_parts(self._records, defaults) + leds
+                              + group_ics(self._records) + named_leds
+                              + group_tht(self._records, board))
         self._header_run = HeaderRun(DigiKeyClient(), makers=self._header_makers())
         self.parts_table.resizeColumnsToContents()
         self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
@@ -691,6 +703,19 @@ class MainWindow(QMainWindow):
                 return
             self._assign_group(row)
             return
+        if is_led(group):
+            status = self.parts_model.status(row)
+            if status == STATUS_ASSIGNED:
+                self.statusBar().showMessage(
+                    "That LED already has its part numbers and footprint on the schematic.")
+                return
+            if status == STATUS_NOT_SEARCHABLE:
+                self.statusBar().showMessage(
+                    f"Not searchable: {group.requirement.problem()}. LEDs on chip "
+                    "footprints (0402–1210) only.")
+                return
+            self._assign_group(row)
+            return
         if is_ic(group):
             # An assigned IC opens too: the dialog shows its footprint check.
             if self.parts_model.status(row) == STATUS_NOT_SEARCHABLE:
@@ -729,6 +754,7 @@ class MainWindow(QMainWindow):
         if is_tht(self.parts_model.group_at(row)):
             self._assign_tht_group(row)
             return
+        led = is_led(self.parts_model.group_at(row))
         # Re-read the remembered settings, so a defaulted field starts with the
         # last value used (an earlier accept this session may have changed it).
         defaults = self._part_defaults()
@@ -739,8 +765,12 @@ class MainWindow(QMainWindow):
 
         # The lookup recorded for this row by an earlier dialog is reused, so
         # the existing part is looked up once per session.
-        dialog = AssignDialog(group, req, build_qty, self, defaults=defaults,
-                              existing=self.parts_model.lookup_at(row))
+        if led:
+            dialog = LedAssignDialog(group, req, build_qty, self,
+                                     existing=self.parts_model.lookup_at(row))
+        else:
+            dialog = AssignDialog(group, req, build_qty, self, defaults=defaults,
+                                  existing=self.parts_model.lookup_at(row))
         cand, final_req = self._run_assign_dialog(dialog)
         lookup = dialog.existing_lookup
         dialog.deleteLater()
@@ -848,6 +878,9 @@ class MainWindow(QMainWindow):
             elif is_ic(group):
                 req = group.requirement
                 plan = ic_assignment_plan(group, cand)
+            elif is_led(group):
+                req = group.requirement
+                plan = led_assignment_plan(group, req, cand)
             else:
                 req = group.requirement
                 plan = assignment_plan(group, req, cand)
@@ -888,11 +921,14 @@ class MainWindow(QMainWindow):
         :func:`kicadtools.icsearch.ic_assignment_plan` for an IC)."""
         ic = is_ic(group)
         tht = is_tht(group)
+        led = is_led(group)
         try:
             if tht:
                 plan = tht_assignment_plan(group, cand)
             elif ic:
                 plan = ic_assignment_plan(group, cand)
+            elif led:
+                plan = led_assignment_plan(group, req, cand)
             else:
                 plan = assignment_plan(group, req, cand)
         except ValueError as exc:
@@ -902,7 +938,7 @@ class MainWindow(QMainWindow):
         if db is None:
             return
         # An IC or through-hole part has no rating or dielectric to remember.
-        settings = {} if ic or tht else requirement_settings(req)
+        settings = {} if ic or tht or led else requirement_settings(req)
         try:
             part_id = db.accept_part(cand.choice())
             if self._board is not None:
@@ -967,6 +1003,22 @@ class MainWindow(QMainWindow):
             tht_worker.found.connect(self._on_candidates)
             tht_worker.failed.connect(self._on_candidates_failed)
             self._start(tht_worker)
+            return
+        if isinstance(dialog, LedAssignDialog):
+            led_worker = LedCandidateWorker(
+                group=dialog.group,
+                defaults=self._part_defaults(),
+                requirement=req,
+                needed=needed,
+                db_path=self._parts_db_path,
+                listing=self._led_listing,
+                search_suppliers=search_suppliers,
+                cache_path=_LCSC_CACHE,
+                existing=dialog.existing_lookup,
+            )
+            led_worker.found.connect(self._on_candidates)
+            led_worker.failed.connect(self._on_candidates_failed)
+            self._start(led_worker)
             return
         if isinstance(dialog, IcAssignDialog):
             # The pad count is read on the worker from the board's .kicad_pcb

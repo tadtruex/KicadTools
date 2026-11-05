@@ -799,9 +799,9 @@ def _accepting_exec(dialog):
 def test_window_ic_rows_and_status(window):
     win, _board = window
     model = win.parts_model
-    assert model.rowCount() == 21   # 16 plus 5 through-hole header groups
-    assert sum(is_ic(model.group_at(r)) for r in range(21)) == 3
-    assert "21 part groups, 21 unassigned" in win.statusBar().currentMessage()
+    assert model.rowCount() == 22   # 16, 1 LED group, 5 through-hole header groups
+    assert sum(is_ic(model.group_at(r)) for r in range(22)) == 3
+    assert "22 part groups, 22 unassigned" in win.statusBar().currentMessage()
 
 
 def test_window_assign_ic_end_to_end(window, fake_ic, monkeypatch):

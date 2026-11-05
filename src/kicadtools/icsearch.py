@@ -993,7 +993,8 @@ def ic_assignment_plan(
     :func:`kicadtools.writer.write_properties` (``None`` removes the
     property).
 
-    Per symbol: ``Intent:Type = ic`` when the type was guessed; ``MPN``,
+    Per symbol: ``Intent:Type`` = the group's kind (``ic``; ``led`` for a
+    named LED) when the type was guessed; ``MPN``,
     ``Manufacturer`` and ``DigiKeyPN`` from the candidate; ``LCSC`` when the
     part is at JLCPCB (:attr:`IcCandidate.at_jlcpcb`: listed, orderable, stock
     at least the minimum), else ``None`` (removed when the symbol has one), so its
@@ -1022,7 +1023,8 @@ def ic_assignment_plan(
             continue
         props: Dict[str, Optional[str]] = {}
         if getattr(m.intent, "intent_guessed", False):
-            props["Intent:Type"] = IC
+            # A named LED (ledrequirement.NamedLedGroup) stays an LED.
+            props["Intent:Type"] = getattr(group, "kind", IC)
         props.update(part_props)
         # A part JLCPCB does not stock writes LCSC None even when the symbol
         # has no LCSC yet: None removes the property or leaves the symbol

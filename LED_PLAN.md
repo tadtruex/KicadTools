@@ -228,6 +228,28 @@ MPN), so the plan's colour-list column is not added.
   equal the part's, near when it exceeds one (brighter, lower Vf), less sure
   when a field is unstated.
 
+### Step 5 — as built (2026-11-04)
+
+- `ledassign.py`: `led_assignment_plan` writes MPN, Manufacturer, DigiKeyPN,
+  LCSC; `Color:Preferred` when the colour came from the Value, the part or an
+  edit; `Wavelength`, `Intensity:Min`, `Vf:Max`, `Lens:Preferred` when
+  edited; `Intent:Type` = `led` when guessed; a footprint only when the
+  symbol has none. `icsearch.ic_assignment_plan` now writes the group's kind,
+  so a named LED stays `led`.
+- `gui/parts.py`: LED rows (colour under Value marked `(value)`, limits
+  under Rating, band under Class), `LedCandidateWorker`.
+- `gui/led_assign_dialog.py`: `LedAssignDialog`, the THT dialog's interface
+  plus editable colour (band shown beside it), wavelength, intensity, Vf and
+  lens. The first search lists the current or stored part; **Search**
+  applies the fields and searches the JLCPCB listing.
+- `gui/main_window.py`: rows load as passives, plain LEDs, ICs, named LEDs,
+  through-hole; one JLCPCB LED listing per package per session; accept,
+  reject and Autopopulate take LED rows.
+- `autopopulate.py`: `_led_matches` / `led_tier` (unsure while intensity,
+  Vf or lens is unstated).
+- Offscreen Cockpit, no supplier calls: SX1509, MotorDriver and AtTinyDemo
+  rows read as expected. Not yet tried by hand: step 6.
+
 ### Step 6 — live check
 
 SX1509, ECG, MotorDriver and AtTinyDemo on scratch copies, then a Cockpit

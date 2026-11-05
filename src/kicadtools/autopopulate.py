@@ -10,7 +10,9 @@ only:
 - ICs: :meth:`PartsDb.find_ics` for the MPN field and each MPN-shaped token
   of the Value;
 - through-hole parts: :meth:`PartsDb.find_tht` for the footprint signature
-  (and Value, :func:`kicadtools.thtdb.db_key`).
+  (and Value, :func:`kicadtools.thtdb.db_key`);
+- one-colour LEDs: :meth:`PartsDb.find_leds` for the package, kept when
+  :func:`kicadtools.ledsearch.check_led` passes (colour band and limits).
 
 Each match gets a tier, which the dialog shows as the Accept cell's colour:
 
@@ -26,6 +28,10 @@ Each match gets a tier, which the dialog shows as the Accept cell's colour:
   class or tolerance not stated anywhere), or a header, socket or terminal
   block found by footprint alone.
 
+An LED is exact when it is the part the symbol names, or when intensity, Vf
+and lens are all stated and the part equals them; near when it exceeds one
+(brighter, lower Vf); unsure when one is not stated.
+
 Matches are ordered by usage (most first), then tier. Stock and price are
 not checked: nothing here calls a supplier.
 """
@@ -38,6 +44,8 @@ from kicadtools.icrequirement import IcGroup
 from kicadtools.icsearch import DATABASE as IC_DATABASE
 from kicadtools.icsearch import IcCandidate, check_footprint
 from kicadtools.package import parse_footprint
+from kicadtools.ledrequirement import LedGroup
+from kicadtools.ledsearch import check_led, stored_candidate
 from kicadtools.partsdb import PartsDb, norm_mpn
 from kicadtools.partsearch import Candidate, _from_database
 from kicadtools.requirement import (
@@ -209,6 +217,40 @@ def _tht_matches(group: ThtGroup, db: PartsDb) -> List[Match]:
     return out
 
 
+def led_tier(group: LedGroup, cand) -> Tuple[str, str]:
+    """The tier of a stored LED for *group* (see the module docstring)."""
+    if _names_current(group, cand.mpn, cand.digikey_pn, cand.lcsc):
+        return EXACT, "the part the symbol already names"
+    req = group.requirement
+    fields = (("intensity", req.intensity_min), ("Vf", req.vf_max), ("lens", req.lenses))
+    loose = [name for name, f in fields if f.source not in STATED]
+    if loose:
+        return UNSURE, "not stated: " + ", ".join(loose)
+    ev = cand.led
+    exceeds = []
+    if ev.intensity_mcd and ev.intensity_mcd[0] > req.intensity_min.value + _EPS:
+        exceeds.append(f"{ev.intensity_mcd[0]:g} mcd for {req.intensity_min.value:g}")
+    if ev.vf and ev.vf[0] < req.vf_max.value - _EPS:
+        exceeds.append(f"Vf {ev.vf[0]:g} V for {req.vf_max.value:g}")
+    if exceeds:
+        return NEAR, "exceeds: " + "; ".join(exceeds)
+    return EXACT, "values equal the stated requirement"
+
+
+def _led_matches(group: LedGroup, db: PartsDb) -> List[Match]:
+    req = group.requirement
+    if not req.searchable:
+        return []
+    out = []
+    for hit in db.find_leds(req.package.value):
+        cand = stored_candidate(hit, lambda code: None, None)
+        if check_led(req, cand.led, "parts database", missing_ok=True):
+            continue
+        tier, why = led_tier(group, cand)
+        out.append(Match(cand, tier, why, hit.part_id, hit.usage_count))
+    return out
+
+
 def find_matches(groups: Sequence[Any], db: PartsDb, *, open_rows: Sequence[int],
                  pad_count=None) -> List[RowMatches]:
     """The stored matches for each row in *open_rows* (indexes into *groups*),
@@ -224,6 +266,8 @@ def find_matches(groups: Sequence[Any], db: PartsDb, *, open_rows: Sequence[int]
             matches = _ic_matches(group, db, pads)
         elif isinstance(group, ThtGroup):
             matches = _tht_matches(group, db)
+        elif isinstance(group, LedGroup):
+            matches = _led_matches(group, db)
         elif isinstance(group, RequirementGroup):
             matches = _passive_matches(group, db)
         else:

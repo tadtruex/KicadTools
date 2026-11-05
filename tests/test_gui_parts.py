@@ -258,10 +258,10 @@ def window(tmp_path, monkeypatch):
 def test_main_window_parts_tab_round_trip(window, tmp_path):
     win, board = window
     model = win.parts_model
-    # ECG: 4 capacitor groups, 9 resistor groups, 3 IC groups, then 5
-    # through-hole header groups (THT_PLAN.md step 9).
-    assert model.rowCount() == 21
-    assert "21 part groups, 21 unassigned" in win.statusBar().currentMessage()
+    # ECG: 4 capacitor groups, 9 resistor groups, 1 LED group (D1/D4), 3 IC
+    # groups, then 5 through-hole header groups (THT_PLAN.md step 9).
+    assert model.rowCount() == 22
+    assert "22 part groups, 22 unassigned" in win.statusBar().currentMessage()
 
     group = model.group_at(0)
     req = group.requirement.edited(rating_min=16.0)

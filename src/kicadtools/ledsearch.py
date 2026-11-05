@@ -230,6 +230,15 @@ def check_led(req: LedRequirement, ev: LedEvidence, supplier: str, *,
     return ""
 
 
+def stored_candidate(hit: DbLed, jlc_part, digikey) -> LedCandidate:
+    """A stored LED as a candidate (source ``database``), with JLCPCB stock
+    from *jlc_part* and DigiKey stock from *digikey* when configured
+    (:func:`kicadtools.partsearch._from_database`)."""
+    base = _from_database(hit, jlc_part, digikey)
+    return LedCandidate(**{k: getattr(base, k) for k in base.__dataclass_fields__},
+                        led=stored_evidence(hit))
+
+
 # --------------------------------------------------------------------------- #
 # The symbol's existing part.
 # --------------------------------------------------------------------------- #
@@ -428,9 +437,7 @@ def find_led_candidates(
             same[0].db_part_id = hit.part_id
             same[0].usage_count = hit.usage_count
             continue
-        base = _from_database(hit, jlc_part, digikey)
-        cand = LedCandidate(**{k: getattr(base, k) for k in base.__dataclass_fields__},
-                            led=ev)
+        cand = stored_candidate(hit, jlc_part, digikey)
         if cand.unavailable_reason:
             result.rejected.append((_label(cand.lcsc or "", cand.mpn),
                                     cand.unavailable_reason))
