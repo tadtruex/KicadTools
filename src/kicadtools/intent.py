@@ -332,13 +332,21 @@ _LED_WAVELENGTH_RE = re.compile(r"\b(\d{3,4}\s*nm)\b")
 class LedIntent(ElectricalIntent):
     """Light-emitting diode.
 
-    All fields optional. Colour and wavelength are parsed out of the ``Value`` /
-    ``Description`` text (``"LED_Green"``, ``"1515 rgb led"``, ``"Red 630nm"`` …)
-    when present.
+    All fields optional. ``color`` and ``wavelength`` are parsed out of the
+    ``Value`` / ``Description`` text (``"LED_Green"``, ``"1515 rgb led"``,
+    ``"Red 630nm"`` …) when present. The stated fields are read from
+    ``Color:Preferred``, ``Wavelength``, ``Intensity:Min`` (mcd), ``Vf:Max``
+    and ``Lens:Preferred`` (``clear``, ``diffused``) as written; see
+    :mod:`kicadtools.ledrequirement` for how they are used.
     """
     value: str | None = None
     color: str | None = None
     wavelength: str | None = None
+    color_preferred: List[str] = field(default_factory=list)
+    wavelength_stated: str | None = None
+    intensity_min: str | None = None
+    vf_max: str | None = None
+    lens_preferred: List[str] = field(default_factory=list)
 
     @classmethod
     def _from_dict_impl(cls, data: Dict[str, Any]) -> "LedIntent":
@@ -361,6 +369,11 @@ class LedIntent(ElectricalIntent):
             value=value,
             color=color,
             wavelength=wavelength,
+            color_preferred=_parse_preferred(data.get("Color:Preferred") or ""),
+            wavelength_stated=data.get("Wavelength") or None,
+            intensity_min=data.get("Intensity:Min") or None,
+            vf_max=data.get("Vf:Max") or None,
+            lens_preferred=_parse_preferred(data.get("Lens:Preferred") or ""),
         )
 
     def description(self) -> str:

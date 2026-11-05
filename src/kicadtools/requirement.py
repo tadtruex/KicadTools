@@ -99,6 +99,9 @@ BUILTIN_DEFAULTS: Dict[str, str] = {
     "res.manufacturers": (
         "Yageo, Vishay, Panasonic, Stackpole, Rohm, TE Connectivity, Bourns"
     ),
+    # LEDs (kicadtools.ledrequirement): the package of a symbol with no
+    # footprint. There is no default colour or brightness.
+    "led.package": "0603",
     "ind.shielding": "Shielded",
     "ind.tolerance": "20%",
     "ind.manufacturers": (

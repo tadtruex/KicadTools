@@ -92,6 +92,29 @@ DigiKey (`product_for("150060RS75000")`): `Color`, `Wavelength - Dominant`,
 - `in_band(color, part)`: the part's dominant wavelength (peak for
   infrared) is in the band, or its label is the colour for label-only ones.
 
+### Step 1 — as built (2026-11-04)
+
+`src/kicadtools/ledcolor.py`, tests `tests/test_ledcolor.py`.
+
+- `COLORS` (name → `Color`: band, label-only, peak for infrared),
+  `SPELLINGS` (also `uv`, `purple`, `aqua`, `lime`, `ir`, `cold white`),
+  `LETTERS` (R G B Y W O A).
+- `parse_colors(text, letters=)` / `parse_color`: longest spelling first, so
+  `Yellow Green` is one colour; letter tokens (`G`, `RG`, `RGB`; upper case,
+  no repeats) only with `letters`. `colors_of(props)` allows letters on an
+  `LED*` footprint or when the Value or Description says LED.
+- `led_kind(props)`: smart on a driver name or word; multicolour on
+  `bicolor`, `RGB` or two colours; else plain. The reference designator is
+  not used (user: the letter is more or less arbitrary), so MotorDriver
+  U5–U8 (`1515 rgb led`, no driver name) are multicolour. Both kinds take
+  the named (IC-style) path, so this changes only the label until smart-LED
+  search (TBD 1).
+- `parse_nm` (a range gives its midpoint), `parse_mcd` (lower end),
+  `parse_vf` (upper end), `parse_labels`: one entry per die.
+- `in_band(name, dominant=, peak=, labels=, wavelength=)` → True, False, or
+  None when the part gives nothing to decide by. Two dies are never in band.
+  `warm white` and `cool white` accept a plain `white` label (TBD 3).
+
 ### Step 2 — LED requirement and grouping (`ledrequirement.py`)
 
 - Fields, each with a source as for passives: package (from the footprint),
@@ -105,6 +128,37 @@ DigiKey (`product_for("150060RS75000")`): `Color`, `Wavelength - Dominant`,
 - Multicolour and smart LEDs become IC-style groups: identifiers from the
   fields, the Value tokens and the footprint-name token
   (`thtfootprint.looks_like_part_number`).
+
+### Step 2 — as built (2026-11-04)
+
+`src/kicadtools/ledrequirement.py`, tests `tests/test_ledrequirement.py`.
+`LedIntent` gained `color_preferred`, `wavelength_stated`, `intensity_min`,
+`vf_max`, `lens_preferred`; `requirement.BUILTIN_DEFAULTS` gained
+`led.package` = `0603` (used only without a footprint).
+
+- `LedRequirement`: `package`, `colors` (a tuple; any one will do),
+  `wavelength`, `intensity_min`, `vf_max`, `lenses`, each `Sourced`. A colour
+  read from the Value or Description has the new source tag `text`, so the
+  write plan can write `Color:Preferred` for it. `bands()`, `band_text()`,
+  `color_matches(evidence)`, `edited(...)`.
+- `LedEvidence`: the existing part's supplier values per die; `color` is
+  the colour whose band holds the dominant wavelength, the narrowest when
+  bands overlap (590 nm is amber).
+- Conflicts: `Color:Preferred` against the Value's colour, the existing
+  part out of band, a two-die part on a plain LED, package disagreements.
+- `group_leds(records, defaults, board=)` → `(plain, named)`. Through-hole
+  LEDs are skipped (they are through-hole rows); without a `BoardMounting`
+  an `*_THT` library decides. Named groups (`NamedLedGroup`, an `IcGroup`
+  of kind `led`) take the footprint-name token first (`LTST-C155GEKT`),
+  then the Value tokens; `LED*` library names are geometry and give none.
+- Real boards: SX1509 D1–D8 green and D9 red, ECG D1/D4 red, MotorDriver
+  D6/D8 green and U5–U8 RGB (DigiKey PN and LCSC on the symbol),
+  AtTinyDemo D3 green from `G`; all searchable.
+- Board findings: the bicolour `LED_RG_LTSTC155GEKT` parts are on Hub
+  (D1–D4), not MotorDriver (only its library copy is in `hbridge.kicad_sch`).
+  Hub is a KiCad 6 schematic (version 20211123) and
+  `iter_bom_part_records` reads no parts from it. The MotorDriver test
+  fixture states `Intent:Type` = `diode` on D6/D8; the real board does not.
 
 ### Step 3 — search (`ledsearch.py`)
 
