@@ -5,7 +5,6 @@ import pytest
 from kicadtools.components import build_intent, get_components
 from kicadtools.icrequirement import (
     IC_KIND,
-    NO_FOOTPRINT,
     NO_PART_NUMBER,
     IcRequirement,
     Identifiers,
@@ -149,12 +148,13 @@ def test_requirement_no_part_number():
     assert req.problem() == NO_PART_NUMBER == "no part number"
 
 
-def test_requirement_no_footprint():
-    req = ic_requirement({"Value": "LMC7101BYM5", "Footprint": ""})
-    assert req.problem() == NO_FOOTPRINT == "no footprint"
+def test_requirement_without_footprint_is_searchable():
+    # LabBoard U1: Value L7805, no footprint yet.
+    req = ic_requirement({"Value": "L7805", "Footprint": ""})
+    assert req.searchable and req.problem() == ""
 
 
-def test_requirement_no_part_number_reported_before_no_footprint():
+def test_requirement_without_footprint_or_part_number():
     assert ic_requirement({"Value": "op amp"}).problem() == NO_PART_NUMBER
 
 

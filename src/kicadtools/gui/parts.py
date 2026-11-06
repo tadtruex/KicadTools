@@ -113,6 +113,9 @@ from kicadtools.requirement import (
 from kicadtools.resolve import Cache, cached_jlcpcb_part
 from kicadtools.suppliers import DigiKeyClient, jlcpcb_category_search, jlcpcb_search
 from kicadtools.thtassign import ThtGroup, assess_tht, signature_text
+from kicadtools.impliedfootprint import DEFAULT as IMPLIED_DEFAULT
+from kicadtools.impliedfootprint import VALUE as IMPLIED_VALUE
+from kicadtools.othergroup import FOOTPRINT_NOT_FOUND, NO_FOOTPRINT, NO_PART, OtherGroup
 from kicadtools.units import fmt_percent
 
 PARTS_COLUMNS = ["Value", "Package", "Footprint", "Rating", "Class", "Tolerance",
@@ -141,6 +144,10 @@ STATUS_NOT_SEARCHABLE = "not searchable"
 # A through-hole footprint with nothing to buy: solder-wire pad, mounting
 # hole, bare test pad (THT_PLAN.md step 9).
 STATUS_NO_PART = "no part"
+# A BOM part with no assignment path (othergroup.py): its path needs a
+# footprint, or its type has none yet.
+STATUS_NO_FOOTPRINT = "no footprint"
+STATUS_NOT_SUPPORTED = "type not supported yet"
 
 DASH = "—"
 
@@ -171,7 +178,7 @@ Plan = Dict[Path, Dict[str, Dict[str, Optional[str]]]]
 
 # A Parts-tab row: a capacitor/resistor/inductor group, an IC group or a
 # through-hole group.
-Group = Union[RequirementGroup, IcGroup, ThtGroup, LedGroup]
+Group = Union[RequirementGroup, IcGroup, ThtGroup, LedGroup, OtherGroup]
 
 THT_CLASS = "through-hole"
 
@@ -316,6 +323,11 @@ def is_led(group: object) -> bool:
     return isinstance(group, LedGroup)
 
 
+def is_other(group: object) -> bool:
+    """True for a BOM part with no assignment path (:mod:`kicadtools.othergroup`)."""
+    return isinstance(group, OtherGroup)
+
+
 def _marked(text: str, source: str) -> str:
     marker = _SOURCE_MARKERS.get(source)
     return f"{text} ({marker})" if marker else text
@@ -348,6 +360,11 @@ def led_class_cell(req: LedRequirement) -> str:
     if req.lenses.value:
         bands = f"{bands}, {', '.join(req.lenses.value)}" if bands else ", ".join(req.lenses.value)
     return bands or DASH
+
+
+# The marker on an implied footprint (impliedfootprint.py): the Value named
+# the series, or the Cockpit's default filled what the text leaves open.
+_IMPLIED_MARKERS = {IMPLIED_VALUE: "from value", IMPLIED_DEFAULT: "default"}
 
 
 def footprint_name(footprint: str) -> str:
@@ -463,8 +480,8 @@ class PartsTableModel(QAbstractTableModel):
 
     def _recompute(self, row: int, defaults: Mapping[str, str]) -> None:
         group = self._groups[row]
-        if is_ic(group) or is_tht(group):
-            return      # an IC or through-hole requirement has no defaults
+        if is_ic(group) or is_tht(group) or is_other(group):
+            return      # an IC, through-hole or other requirement has no defaults
         if is_led(group):
             lookup = self._lookups.get(row)
             group.requirement = group.requirement_with_part(
@@ -551,7 +568,7 @@ class PartsTableModel(QAbstractTableModel):
         """The row's conflict lines: a capacitor, resistor or inductor requirement's
         conflicts; an IC's from its recorded search."""
         group = self._groups[row]
-        if is_tht(group):
+        if is_tht(group) or is_other(group):
             return []
         if is_ic(group):
             res = self._ic_results.get(row)
@@ -573,6 +590,10 @@ class PartsTableModel(QAbstractTableModel):
             return STATUS_CONFLICT
         if group.assigned:
             return STATUS_ASSIGNED
+        if is_other(group):
+            return {NO_PART: STATUS_NO_PART, NO_FOOTPRINT: STATUS_NO_FOOTPRINT,
+                    FOOTPRINT_NOT_FOUND: STATUS_NOT_SEARCHABLE}.get(
+                        req.reason, STATUS_NOT_SUPPORTED)
         if is_tht(group):
             if req.no_part:
                 return STATUS_NO_PART
@@ -591,7 +612,8 @@ class PartsTableModel(QAbstractTableModel):
     def summary(self) -> Dict[str, int]:
         """Row counts by status."""
         counts = {STATUS_ASSIGNED: 0, STATUS_QUEUED: 0, STATUS_UNASSIGNED: 0,
-                  STATUS_CONFLICT: 0, STATUS_NOT_SEARCHABLE: 0, STATUS_NO_PART: 0}
+                  STATUS_CONFLICT: 0, STATUS_NOT_SEARCHABLE: 0, STATUS_NO_PART: 0,
+                  STATUS_NO_FOOTPRINT: 0, STATUS_NOT_SUPPORTED: 0}
         for r in range(len(self._groups)):
             counts[self.status(r)] += 1
         return counts
@@ -642,6 +664,9 @@ class PartsTableModel(QAbstractTableModel):
         group = self._groups[row]
         req = self.requirement_at(row)
         if col == COL_FOOTPRINT:
+            implied = getattr(req, "implied", None)
+            if not req.footprint and implied is not None:
+                return f"{footprint_name(implied.lib_id)} ({_IMPLIED_MARKERS[implied.source]})"
             return footprint_name(req.footprint) or DASH
         if is_ic(group):
             return self._ic_cell_text(row, col, group, req)
@@ -649,6 +674,8 @@ class PartsTableModel(QAbstractTableModel):
             return self._tht_cell_text(row, col, group, req)
         if is_led(group):
             return self._led_cell_text(row, col, group, req)
+        if is_other(group):
+            return self._other_cell_text(row, col, group, req)
         if col == COL_VALUE:
             return value_cell(req)
         t = req.ptype
@@ -714,6 +741,39 @@ class PartsTableModel(QAbstractTableModel):
             return self.chosen_mpn(row)
         return ""
 
+    def _other_cell_text(self, row: int, col: int, group: OtherGroup, req) -> str:
+        if col == COL_VALUE:
+            return req.value_text or DASH
+        if col == COL_PACKAGE:
+            if req.no_part:
+                return f"no part ({req.what})" if req.what else "no part"
+            return req.type_name
+        if col in (COL_RATING, COL_DIELECTRIC, COL_TOLERANCE):
+            return ""
+        if col == COL_QTY:
+            return str(group.quantity)
+        if col == COL_REFERENCES:
+            return ", ".join(group.references)
+        if col == COL_CURRENT:
+            return current_part_cell(group)
+        if col == COL_STATUS:
+            return self.status(row)
+        if col == COL_MPN:
+            return self.chosen_mpn(row)
+        return ""
+
+    def _other_tooltip(self, row: int, col: int) -> Optional[str]:
+        group = self._groups[row]
+        req = group.requirement
+        if col == COL_FOOTPRINT:
+            return req.footprint or "No footprint."
+        if col == COL_REFERENCES:
+            return ", ".join(group.references)
+        lines = [req.problem()[0].upper() + req.problem()[1:] + "."]
+        if req.description:
+            lines.append(f"Description: {req.description}")
+        return "\n".join(lines)
+
     def _led_cell_text(self, row: int, col: int, group: LedGroup,
                        req: LedRequirement) -> str:
         if col == COL_VALUE:
@@ -771,7 +831,12 @@ class PartsTableModel(QAbstractTableModel):
         req = group.requirement
         status = self.status(row)
         if col == COL_FOOTPRINT:
-            lines = [req.footprint or "No footprint."]
+            if not req.footprint and req.implied is not None:
+                lines = ["No footprint on the symbol.",
+                         f"Searched as {req.implied.lib_id}: {req.implied.basis}.",
+                         "Written on accept when the chosen part fits it."]
+            else:
+                lines = [req.footprint or "No footprint."]
             if req.pad_count is not None:
                 lines.append(f"{req.pad_count} pads.")
             if req.mounting_note:
@@ -780,6 +845,8 @@ class PartsTableModel(QAbstractTableModel):
         if col == COL_REFERENCES:
             return ", ".join(group.references)
         if col == COL_PACKAGE:
+            if not req.footprint and req.implied is not None:
+                return f"Read from the implied footprint: {req.implied.basis}."
             return "Read from the footprint name."
         if col == COL_CURRENT:
             e = group.existing
@@ -793,6 +860,9 @@ class PartsTableModel(QAbstractTableModel):
             return f"Not searchable: {req.problem()}."
         if status == STATUS_ASSIGNED:
             return "MPN, Manufacturer and DigiKeyPN on the schematic."
+        if status == STATUS_UNASSIGNED and not req.footprint and group.existing.mpn:
+            return ("Part numbers on the schematic, no footprint: add one in KiCad, "
+                    "or double-click to choose a part that fits the implied footprint.")
         if status == STATUS_UNASSIGNED:
             return "Through-hole, soldered by hand: DigiKey only. Double-click to assign a part."
         return None
@@ -802,7 +872,12 @@ class PartsTableModel(QAbstractTableModel):
         req = self.requirement_at(row)
         status = self.status(row)
         if col == COL_FOOTPRINT:
-            lines = [req.footprint or "No footprint."]
+            if not req.footprint and req.implied is not None:
+                lines = ["No footprint on the symbol.",
+                         f"Checked against {req.implied.lib_id}: {req.implied.basis}.",
+                         "Written on accept when the chosen part fits it."]
+            else:
+                lines = [req.footprint or "No footprint."]
             check = self.footprint_check(row)
             if check is not None:
                 lines.append(check.message or "Footprint matches the part's package.")
@@ -822,6 +897,14 @@ class PartsTableModel(QAbstractTableModel):
             return f"Not searchable: {req.problem()}."
         if status == STATUS_ASSIGNED:
             return "Part numbers on the schematic. Double-click to check the footprint."
+        if status == STATUS_UNASSIGNED and not req.footprint and req.implied is not None:
+            return (f"Surface-mount connector, searched at DigiKey and JLCPCB as "
+                    f"{footprint_name(req.implied.lib_id)} ({req.implied.basis}). "
+                    "Double-click to assign a part.")
+        if status == STATUS_UNASSIGNED and not req.footprint:
+            return ("No footprint: the search runs by part number and the footprint "
+                    "check cannot verify the candidates. The row reads as assigned "
+                    "once a footprint is added in KiCad. Double-click to assign a part.")
         if status == STATUS_UNASSIGNED:
             return "Double-click to assign a part."
         return None
@@ -848,6 +931,8 @@ class PartsTableModel(QAbstractTableModel):
                 return self._tht_tooltip(r, col)
             if is_led(self._groups[r]):
                 return self._led_tooltip(r, col)
+            if is_other(self._groups[r]):
+                return self._other_tooltip(r, col)
             req = self.requirement_at(r)
             if col == COL_FOOTPRINT and req.footprint:
                 return req.footprint

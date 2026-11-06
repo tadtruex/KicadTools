@@ -168,9 +168,16 @@ def check_message(check: Optional[FootprintCheck]) -> str:
 def footprint_header(req: IcRequirement) -> str:
     """The header's Footprint line: the lib id, the package parsed from its
     name and the pad count once read (``"Package_TO_SOT_SMD:SOT-23-5 —
-    SOT-23-5; 5 pads"``); ``"none"`` without a footprint."""
+    SOT-23-5; 5 pads"``); without a footprint, ``"none: the footprint check
+    cannot verify any candidate; add the footprint in KiCad"``."""
+    if not req.footprint and req.implied is not None:
+        info = req.package if req.package is not None else parse_footprint(req.implied.lib_id)
+        pads = f"{req.pad_count} pads" if req.pad_count is not None else "pad count unknown"
+        return (f"none on the symbol; checked against {req.implied.lib_id} "
+                f"({req.implied.basis}) — {package_text(info) or 'package not readable'}; "
+                f"{pads}; written on accept when the part fits it")
     if not req.footprint:
-        return "none"
+        return "none: the footprint check cannot verify any candidate; add the footprint in KiCad"
     info = req.package if req.package is not None else parse_footprint(req.footprint)
     parsed = package_text(info) or "package not readable from the name"
     pads = f"{req.pad_count} pads" if req.pad_count is not None else "pad count unknown"
@@ -266,7 +273,9 @@ class IcAssignDialog(QDialog):
         self._footprint_label = QLabel(footprint_header(requirement))
         self._footprint_label.setWordWrap(True)
         self._footprint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._footprint_label.setToolTip("Read-only: the footprint is never written.")
+        self._footprint_label.setToolTip(
+            "Read-only. A footprint on the symbol is never changed; a connector's implied "
+            "footprint is written when the chosen part fits it.")
         head.addRow("Footprint", self._footprint_label)
         head.addRow("Quantity", QLabel(f"{group.quantity} per board"))
         head.addRow("Build quantity", QLabel(f"{int(build_qty):,} boards"))

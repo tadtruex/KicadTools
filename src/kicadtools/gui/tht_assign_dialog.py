@@ -96,10 +96,18 @@ def tht_candidate_cells(c: ThtCandidate) -> List[str]:
 
 def footprint_header(req: ThtRequirement) -> str:
     """The header's Footprint line: ``"Connector_PinHeader_2.54mm:PinHeader_1x04_…
-    — header 1x04, 2.54 mm, vertical; 4 pads"``."""
+    — header 1x04, 2.54 mm, vertical; 4 pads"``. For a symbol with no
+    footprint, the implied one: ``"none on the symbol; searched as
+    Connector_JST:JST_PH_B3B-PH-K_… (JST PH, 3 positions, top entry) —
+    named part JST B3B-PH-K; 3 pads; written on accept when the part fits
+    it"``."""
+    pads = f"{req.pad_count} pads" if req.pad_count is not None else "pad count unknown"
+    if not req.footprint and req.implied is not None:
+        return (f"none on the symbol; searched as {req.implied.lib_id} "
+                f"({req.implied.basis}) — {signature_text(req.signature)}; {pads}; "
+                "written on accept when the part fits it")
     if not req.footprint:
         return "none"
-    pads = f"{req.pad_count} pads" if req.pad_count is not None else "pad count unknown"
     return f"{req.footprint} — {signature_text(req.signature)}; {pads}"
 
 
@@ -164,7 +172,8 @@ class ThtAssignDialog(QDialog):
         fp = QLabel(footprint_header(req))
         fp.setWordWrap(True)
         fp.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        fp.setToolTip("Read-only: the footprint is never written.")
+        fp.setToolTip("Read-only. A footprint on the symbol is never changed; an implied "
+                      "one is written when the chosen part fits it.")
         head.addRow("Footprint", fp)
         if req.mounting_note:
             note = QLabel(req.mounting_note)

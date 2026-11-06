@@ -55,6 +55,43 @@ to-do list. State on 2026-11-03:
   pad, and `ECG/Library/footprints.pretty/CP_20_10_ADI_NOTH.kicad_mod` has 20
   pads and none. Check the datasheet's exposed-pad recommendation.
 
+## Every BOM part on the Parts tab; parts with no footprint (2026-11-06)
+
+Found on LabBoard (`~/Documents/Work/Tads_Notes/ES28/Tads_Code/board/LabBoard`),
+a schematic drawn from generic KiCad symbols: 49 of 72 symbols never reached
+the Parts tab, most because they had no footprint yet.
+
+- `othergroup.py`: every BOM part no other grouping takes is a row, with a
+  status giving the reason: `no part` (mounting holes, solder jumpers from
+  their footprint filters), `no footprint`, `not searchable` (connector
+  footprint not found), `type not supported yet` (diodes, transistors,
+  switches, pots, jumpers, test points).
+- ICs: no footprint no longer blocks the search; each candidate's footprint
+  check reads cannot verify, `the symbol has no footprint`. LabBoard U1
+  `L7805` finds L7805CV / L7805ABV / L7805CP.
+- Connectors with no footprint: `impliedfootprint.py` reads the Value and
+  Description. User decisions: a generic `01xNN` connector is a 2.54 mm
+  vertical pin header by default; a JST series with no orientation is top
+  entry; the implied footprint is written on Save when the chosen part fits
+  it. Live searches: J5 `TMP235 (JST PH 3)` → B3B-PH-K-S; J4 `9V DC in` →
+  PJ-102AH; J6 1x02 header → 20 candidates.
+- Classifier: `Light emitting diode` is an LED (it matched `diode` too, so
+  the guess fell back to the D reference). LabBoard D1–D4 are LED rows.
+- Through-hole rows read as `assigned` only with a footprint.
+
+- Surface-mount connectors (`smdconnector.py`): an SMD footprint that names
+  a part, or an implied SMD footprint (Stemma QT, JST SH), is searched on
+  the IC path (DigiKey + JLCPCB, LCSC written); Save writes the implied
+  footprint when the MPN fits. Value tokens are not identifiers for a
+  connector. User decision (2026-11-06): the first build sent J3 down the
+  through-hole path, which removes LCSC; that was wrong for an SMD part.
+- `partsearch._best_jlc_hit`: a JLCPCB MPN with bracketed suffixes
+  (`SM04B-SRSS-TB(LF)(SN)`) matches; orderable first, then exact. J3 → C160404.
+
+Still open: types with no path (diodes, transistors, switches, pots, jumper
+shunts, test points); the Cockpit writes no footprint for ICs; SMD
+connectors whose footprint names no part (SMD pin headers).
+
 ## Autopopulate (2026-11-04)
 
 **Autopopulate…** on the Parts tab offers stored parts for every unassigned

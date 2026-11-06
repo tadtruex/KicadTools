@@ -13,8 +13,9 @@ symbol carries are:
 An :class:`IcRequirement` holds the identifiers, the ``Footprint`` (a guide
 for ranking and checking candidates; never written) and two fields the search
 step fills in: the package parsed from the footprint name and the
-footprint's pad count. It is searchable when it has at least one identifier
-and a footprint.
+footprint's pad count. It is searchable when it has at least one identifier;
+with no footprint the search runs and each candidate's footprint check reads
+"cannot verify" (:data:`kicadtools.icsearch.NO_FOOTPRINT_REASON`).
 
 :func:`group_ics` collects the BOM's IC records into :class:`IcGroup` s keyed
 on the normalized identifiers and the footprint, so the same part drawn with
@@ -38,9 +39,8 @@ from kicadtools.requirement import Member, _prop
 # The ``part.type`` / requirement kind of an IC.
 IC_KIND = "ic"
 
-# Problem lines (see IcRequirement.problem).
+# Problem line (see IcRequirement.problem).
 NO_PART_NUMBER = "no part number"
-NO_FOOTPRINT = "no footprint"
 
 # Separators the Value is split on to find MPN-shaped tokens. Hyphens, dots,
 # slashes and "#" stay inside a token: they are part of real MPNs
@@ -139,19 +139,28 @@ class IcRequirement:
     package: Optional[PackageInfo] = None  # from the footprint name
     pad_count: Optional[int] = None      # pads on the footprint
     kind: str = IC_KIND
+    # A connector with no footprint (smdconnector.py): the footprint its text
+    # implies (kicadtools.impliedfootprint.ImpliedFootprint), which the
+    # footprint check reads and the write plan writes when the part fits it.
+    implied: Optional[Any] = None
+
+    @property
+    def check_footprint(self) -> str:
+        """The footprint candidates are checked against: the symbol's, else
+        the implied one; ``""`` for neither."""
+        if self.footprint:
+            return self.footprint
+        return self.implied.lib_id if self.implied is not None else ""
 
     @property
     def searchable(self) -> bool:
-        """At least one identifier and a footprint."""
+        """At least one identifier."""
         return not self.problem()
 
     def problem(self) -> str:
-        """``""`` when searchable, else a one-line reason: ``"no part
-        number"`` before ``"no footprint"``."""
+        """``""`` when searchable, else ``"no part number"``."""
         if self.identifiers.empty:
             return NO_PART_NUMBER
-        if not self.footprint:
-            return NO_FOOTPRINT
         return ""
 
 

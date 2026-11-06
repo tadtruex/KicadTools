@@ -126,6 +126,9 @@ MAX_IC_LOOKUPS = 5
 MATCH = "match"
 MISMATCH = "mismatch"
 UNVERIFIED = "cannot verify"
+# The footprint check of a candidate for a symbol with no footprint: the
+# search runs, and the footprint is chosen in KiCad.
+NO_FOOTPRINT_REASON = "the symbol has no footprint"
 
 MISMATCH_TEXT = (
     "Footprint does not match the part — check it very carefully against "
@@ -791,7 +794,8 @@ def _candidate(f: _Found, ids, req: IcRequirement, needed: int) -> IcCandidate:
         source=DATABASE if hit is not None else f.source,
         current=f.current,
         fields=tuple(dict.fromkeys(lab.split(" ", 1)[0] for lab in f.labels)),
-        footprint=check_footprint(req.package, req.pad_count, info),
+        footprint=(check_footprint(req.package, req.pad_count, info) if req.check_footprint
+                   else FootprintCheck(UNVERIFIED, (NO_FOOTPRINT_REASON,))),
     )
     if product is not None:
         cand.digikey_pn = _current_digikey_pn(
@@ -863,7 +867,7 @@ def find_ic_candidates(
     :attr:`IcSearchResult.problem` says so. Nothing raises for a failed
     lookup: it becomes a note."""
     if req.package is None:
-        req = replace(req, package=parse_footprint(req.footprint))
+        req = replace(req, package=parse_footprint(req.check_footprint))
     result = IcSearchResult([], requirement=req)
     if not req.searchable:
         result.problem = req.problem()
@@ -952,13 +956,16 @@ def ic_requirement_for(group: IcGroup, pads=None) -> IcRequirement:
     footprint is found. ``pad_count`` stays ``None`` without *pads* or when no
     member's footprint is found."""
     req = group.requirement
+    lib_id = req.check_footprint
     count: Optional[int] = None
-    if pads is not None and req.footprint:
+    if pads is not None and lib_id:
         for ref in group.references:
-            count = pads.count(ref, req.footprint)
+            count = pads.count(ref, lib_id)
             if count is not None:
                 break
-    return replace(req, package=parse_footprint(req.footprint), pad_count=count)
+    if count is None and req.pad_count is not None:
+        count = req.pad_count       # read when the group was built
+    return replace(req, package=parse_footprint(lib_id), pad_count=count)
 
 
 def assess_ic(
@@ -1000,8 +1007,12 @@ def ic_assignment_plan(
     at least the minimum), else ``None`` (removed when the symbol has one), so its
     part numbers all name the chosen part; ``None`` for every
     other spelling of the four part-number fields
-    (:func:`kicadtools.assign._alias_removals`). ``Value``, ``Footprint``,
-    ``Datasheet`` and ``Reference`` are never written. Members without a
+    (:func:`kicadtools.assign._alias_removals`); ``Footprint`` = the implied
+    footprint of a surface-mount connector
+    (:attr:`~kicadtools.icrequirement.IcRequirement.implied`) on a member with
+    none, when the part's MPN fits the footprint's part number
+    (:func:`kicadtools.smdconnector.implied_fits`). ``Value``, ``Datasheet``,
+    ``Reference`` and a footprint the symbol has are never written. Members without a
     source file or symbol uuid are skipped. Raises ``ValueError`` when the
     candidate has no MPN, manufacturer or DigiKey PN."""
     part_props: Dict[str, Optional[str]] = {
@@ -1016,6 +1027,9 @@ def ic_assignment_plan(
             "MPN, Manufacturer and DigiKeyPN are required"
         )
     lcsc = _text(cand.lcsc) if cand.at_jlcpcb else None
+    from kicadtools.smdconnector import implied_fits
+    implied = group.requirement.implied
+    footprint = implied.lib_id if implied_fits(group.requirement, cand.mpn) else None
 
     plan: Dict[Path, Dict[str, Dict[str, Optional[str]]]] = {}
     for m in group.members:
@@ -1031,6 +1045,8 @@ def ic_assignment_plan(
         # unchanged, and it replaces an LCSC the LCSC tab resolved for the
         # old part when the window merges the tabs' edits.
         props[_LCSC_FIELD] = lcsc or None
+        if footprint and not _text(m.props.get("Footprint")):
+            props["Footprint"] = footprint
         props.update(_alias_removals(m.props))
         plan.setdefault(Path(m.source_file), {})[m.symbol_uuid] = props
     return plan

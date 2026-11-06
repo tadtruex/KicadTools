@@ -220,8 +220,10 @@ line. Rely on git as the backstop.
 
 ### Parts tab
 
-The table has one row per capacitor, resistor or inductor requirement group,
-and one per IC group (see **ICs** below). Capacitors, resistors and
+The table lists every BOM part. It has one row per capacitor, resistor or
+inductor requirement group, one per plain-LED, IC and through-hole group (see
+below), and one per group of parts with no assignment path (see **Parts with
+no search** below). Capacitors, resistors and
 inductors: parts of one type whose `Value`, `Footprint`, `Voltage:Min`,
 `Power:Min`, `Current:Min`, `Class:Preferred`, `Shielding:Preferred`,
 `Tolerance:Preferred`, `Package:Preferred` and existing
@@ -532,7 +534,7 @@ values, so nothing in its dialog is editable.
 - **Row.** Value is the `MPN` field, else the Value. Package is the chosen
   part's DigiKey package, else the package read from the footprint name,
   marked `(footprint)`. Rating, Class and Tolerance are empty. Status is
-  `not searchable` without an identifier or a footprint, `conflict` after a
+  `not searchable` without an identifier, `conflict` after a
   search found identifiers that name different parts, `assigned` when every
   symbol has `MPN`, `Manufacturer`, `DigiKeyPN` and a `Footprint` (an `LCSC`
   number is not required), and otherwise as for capacitors. The Footprint
@@ -575,7 +577,10 @@ values, so nothing in its dialog is editable.
   pitch, so a QFN, DFN, TSSOP, MSOP or SSOP footprint that names its pitch is
   always "cannot verify". The message for the selected candidate is shown
   above **Accept**. The check ranks candidates; it never removes one, and the
-  footprint is never changed.
+  footprint is never changed. A symbol with no footprint is searched too
+  (LabBoard's `L7805`): every candidate reads cannot verify, `the symbol has
+  no footprint`, and the row reads as `assigned` once a footprint is added
+  in KiCad.
 - **Columns.** MPN · Manufacturer · Source · DigiKey PN · DigiKey stock ·
   LCSC · JLC library · JLC stock · Package · Footprint · Unit price. Source
   is `database`, `current part` (an identifier names it exactly, with the
@@ -600,6 +605,27 @@ footprint is through-hole (see the export section for how mounting is read).
 Parts with the same footprint, Value and part numbers share a row. The
 design is in `THT_PLAN.md`.
 
+- **Connectors with no footprint.** A connector symbol with no footprint
+  gets a through-hole row searched as the KiCad footprint its text implies
+  (`impliedfootprint.py`). The Footprint cell shows it, marked `(from value)`
+  or `(default)`:
+  - KiCad's generic connector symbols (Description `Generic connector,
+    single row, 01x04`): a 2.54 mm vertical pin header with those rows and
+    positions (`PinHeader_1x04_P2.54mm_Vertical`) `(default)`;
+  - a JST series and position count in the Value (`TMP235 (JST PH 3)`):
+    the top-entry part, `JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical`; JST XH the
+    same `(from value)`. JST SH, and Stemma QT / Qwiic (JST SH, 4
+    positions), imply the side-entry SMD part, which is a surface-mount
+    connector row (see below), not a through-hole one;
+  - a barrel jack (`DC Barrel Jack`, `DC in`, a `BarrelJack*` footprint
+    filter): CUI `PJ-102AH` (2.1 mm) `(default)`.
+
+  On Accept + Save, the implied footprint is written to symbols with no
+  footprint when the chosen part fits it: any part the header or socket
+  search found, or a part whose MPN starts with the footprint's part number
+  (`B3B-PH-K-S` on `JST_PH_B3B-PH-K`). Otherwise the row keeps its part
+  numbers and needs a footprint added in KiCad. A through-hole row reads as
+  `assigned` only with a footprint.
 - **Row.** Value is the Value. Package is the footprint signature read from
   the footprint name: `header 1x04, 2.54 mm, vertical`, `named part JST
   S3B-PH-K`, `no part (solder wire pad)`. Class is `through-hole`; Rating and
@@ -608,7 +634,8 @@ design is in `THT_PLAN.md`.
   `not searchable` for a footprint family not searched yet (terminal blocks,
   loop test points, through-hole passives without an intent, footprints that
   name no part) unless the symbol has a `DigiKeyPN` or `MPN`, `assigned` when
-  every symbol has `MPN`, `Manufacturer` and `DigiKeyPN`, else `unassigned`.
+  every symbol has `MPN`, `Manufacturer`, `DigiKeyPN` and a `Footprint`,
+  else `unassigned`.
 - **Search.** Double-click the row to open the **Assign through-hole part**
   dialog. A part stored in the parts database for the same footprint
   signature (and, except for headers, sockets and terminal blocks, the same
@@ -640,6 +667,50 @@ design is in `THT_PLAN.md`.
   `Footprint` are never written.
 - The status bar shows the DigiKey call count for the session and the calls
   left today (DigiKey allows 1000 a day).
+
+#### Surface-mount connectors
+
+A connector whose footprint is surface mount and names a part
+(`Connector_JST:JST_SH_SM04B-SRSS-TB_…`), or that has an `MPN`, `DigiKeyPN`
+or `LCSC` field, is searched as an IC is: by part number at DigiKey and
+JLCPCB, and the chosen part gets an `LCSC` number when JLCPCB stocks it
+(`smdconnector.py`). A connector with no footprint whose implied footprint
+is surface mount (Stemma QT, JST SH) takes the same path, and Save writes
+that footprint when the part's MPN starts with its part number. The
+identifiers are the part-number fields and the footprint's part number; the
+Value is not read for part numbers, since on a connector it names what
+plugs in (`Stemma QT (LSM303AGR)` names a sensor). The row and dialog are
+the IC ones. DigiKey states no package for most connectors, so the
+footprint check reads cannot verify. LabBoard J3 finds `SM04B-SRSS-TB`,
+LCSC C160404.
+
+A JLCPCB listing whose MPN adds bracketed groups to the part's
+(`SM04B-SRSS-TB(LF)(SN)`, JST's plating codes) is the same part, for every
+search: an orderable listing comes first, then an exact MPN. The exact
+`SM04B-SRSS-TB` listings at JLCPCB are zero-stock placeholders.
+
+#### Parts with no search
+
+Every BOM part no other row takes is listed, so the gaps on a board are
+visible (`othergroup.py`). Parts with the same intent type, Value, Footprint
+and part numbers share a row. Package shows the intent type (`diode`,
+`transistor`, `switch`, `unknown`), and the tooltip gives the reason and the
+Description. Status:
+
+- `no part`: nothing to buy, read from the footprint (mounting hole,
+  fiducial, bare pad) or, with no footprint, from the symbol's footprint
+  filters (`SolderJumper*`, `MountingHole*`);
+- `no footprint`: a connector whose text implies no footprint;
+- `not searchable`: a connector whose footprint is neither on the board nor
+  in the libraries, so its mounting is unknown;
+- `type not supported yet`: a type with no assignment path (diodes,
+  transistors, switches, potentiometers, jumpers, test points, unknown
+  types), or a connector on a surface-mount footprint that names no part
+  (an SMD pin header);
+- `assigned` when the symbols already have `MPN`, `Manufacturer` and
+  `DigiKeyPN`.
+
+Double-clicking such a row shows the reason in the status bar.
 
 #### Parts database
 

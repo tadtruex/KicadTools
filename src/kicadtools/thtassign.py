@@ -5,7 +5,13 @@ this module.
 A through-hole group is a set of BOM parts that are not capacitors,
 resistors, inductors or ICs (those have their own rows), whose footprint is
 through-hole (:mod:`kicadtools.mounting`), and that share a footprint and a
-Value and the part numbers already on them. Each group has a
+Value and the part numbers already on them. A connector with no footprint
+joins with the footprint its text implies
+(:func:`kicadtools.impliedfootprint.implied_footprint`: a 2.54 mm header for
+KiCad's generic connector symbols, the JST series the Value names, a barrel
+jack), and the write plan writes that footprint when the chosen part fits it.
+An implied footprint that is surface mount (JST SH, Stemma QT) gives a
+surface-mount connector row instead (:mod:`kicadtools.smdconnector`). Each group has a
 :class:`ThtRequirement`: the footprint's signature
 (:mod:`kicadtools.thtfootprint`), its pad count, and the Value. What the row
 can do depends on the signature's family:
@@ -36,14 +42,16 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from kicadtools.assign import _alias_removals, _text
 from kicadtools.headersearch import HeaderRun
 from kicadtools.icsearch import MATCH, UNVERIFIED
-from kicadtools.intent import IcIntent
+from kicadtools.impliedfootprint import ImpliedFootprint, implied_footprint
+from kicadtools.intent import ConnectorIntent, IcIntent
 from kicadtools.mounting import BoardMounting
-from kicadtools.namedsearch import MPN_FIELD, NO_TEXT, PadCheck, find_named_candidates, named_texts, pad_check
+from kicadtools.namedsearch import (MPN_FIELD, NO_TEXT, PadCheck, find_named_candidates,
+                                   mpn_fits, named_texts, pad_check)
 from kicadtools.naturalsort import natural_key
 from kicadtools.partnum import CANONICAL_KEYS, extract_part_numbers
 from kicadtools.partsdb import PartsDb, ThtChoice, norm_mpn
 from kicadtools.parttypes import type_of_intent
-from kicadtools.pcb import THT
+from kicadtools.pcb import SMD, THT
 from kicadtools.requirement import Member
 from kicadtools.suppliers import DigiKeyProduct, preferred_digikey_pn
 from kicadtools.thtdb import DATABASE_LABEL, stock_warning, tht_choice, value_key
@@ -103,6 +111,9 @@ class ThtRequirement:
     pad_count: Optional[int] = None
     props: Mapping[str, object] = field(default_factory=dict)  # the first member's
     mounting_note: str = ""
+    # The footprint the text implies, for a symbol with none (the signature
+    # is read from it).
+    implied: Optional[ImpliedFootprint] = None
     kind: str = THT_KIND
 
     @property
@@ -124,7 +135,7 @@ class ThtRequirement:
         """``""`` when the group can be searched (or needs no part), else a
         one-line reason. A DigiKeyPN or MPN on the symbol makes any family
         searchable: the part it names is looked up."""
-        if not self.footprint:
+        if not self.footprint and self.implied is None:
             return NO_FOOTPRINT
         if self.no_part or self.identifiers:
             return ""
@@ -164,11 +175,13 @@ class ThtGroup:
 
     @property
     def assigned(self) -> bool:
-        """Every member has an MPN, Manufacturer and DigiKey PN (no LCSC
-        number: the part is soldered by hand)."""
+        """Every member has an MPN, Manufacturer, DigiKey PN (no LCSC
+        number: the part is soldered by hand) and a Footprint."""
         for m in self.members:
             pn = extract_part_numbers(m.props)
             if not (pn.mpn and pn.manufacturer and pn.digikey_pn):
+                return False
+            if not _prop(m.props, "Footprint"):
                 return False
         return True
 
@@ -194,9 +207,18 @@ def group_tht(records: Sequence[Any], board: BoardMounting) -> List[ThtGroup]:
         if _has_own_row(rec.intent):
             continue
         lib_id = _prop(rec.props, "Footprint")
-        mounting = board.mounting(rec.reference, lib_id or None)
-        if mounting.kind != THT:
-            continue
+        implied = None
+        if not lib_id and isinstance(rec.intent, ConnectorIntent):
+            implied = implied_footprint(rec.props)
+            if implied is None:
+                continue
+            mounting = board.mounting(rec.reference, implied.lib_id)
+            if mounting.kind == SMD:
+                continue    # a surface-mount connector row (smdconnector.py)
+        else:
+            mounting = board.mounting(rec.reference, lib_id or None)
+            if mounting.kind != THT:
+                continue
         key = group_key(rec.props)
         member = Member(reference=rec.reference, source_file=rec.source_file,
                         symbol_uuid=rec.symbol_uuid, props=rec.props, intent=rec.intent)
@@ -205,15 +227,22 @@ def group_tht(records: Sequence[Any], board: BoardMounting) -> List[ThtGroup]:
             group.members.append(member)
             continue
         placed = board.footprints.placed(rec.reference)
-        pads = (len({p.number for p in placed.pads if p.number}) if placed is not None
-                else board.footprints.count(rec.reference, lib_id) if lib_id else None)
+        search_lib = lib_id or (implied.lib_id if implied is not None else "")
+        if placed is not None:
+            pads = len({p.number for p in placed.pads if p.number})
+        elif implied is not None:
+            fp = board.footprints.library_footprint(implied.lib_id)
+            pads = len({p.number for p in fp.pads if p.number}) if fp is not None else None
+        else:
+            pads = board.footprints.count(rec.reference, lib_id) if lib_id else None
         req = ThtRequirement(
-            signature=parse_signature(lib_id, pads),
+            signature=parse_signature(search_lib, pads),
             footprint=lib_id,
             value_text=_prop(rec.props, "Value"),
             pad_count=pads,
             props=dict(rec.props),
-            mounting_note=mounting.note,
+            mounting_note=mounting.note if implied is None else "",
+            implied=implied,
         )
         by_key[key] = ThtGroup(req, [member])
     return sorted(by_key.values(), key=lambda g: natural_key(g.references[0]))
@@ -412,14 +441,31 @@ def _family_search(group: ThtGroup, run: HeaderRun, digikey, db: Optional[PartsD
 # --- write plan -------------------------------------------------------------------
 
 
+def implied_fits(req: ThtRequirement, mpn: str) -> bool:
+    """Whether a part with *mpn* fits *req*'s implied footprint: any part
+    the header or socket search found (it searched that signature), or a
+    part whose MPN fits the footprint's part-number token
+    (:func:`kicadtools.namedsearch.mpn_fits`: ``B3B-PH-K`` and
+    ``B3B-PH-K-S(LF)(SN)`` on ``JST_PH_B3B-PH-K``)."""
+    if req.implied is None:
+        return False
+    sig = req.signature
+    if sig.family in (HEADER, SOCKET):
+        return True
+    return bool(sig.mpn) and mpn_fits(mpn or "", sig.mpn)
+
+
 def tht_assignment_plan(group: ThtGroup, cand: ThtCandidate
                         ) -> Dict[Path, Dict[str, Dict[str, Optional[str]]]]:
     """The property writes that assign *cand* to every member of *group*,
     in the shape of :func:`kicadtools.writer.write_properties` (``None``
     removes the property): ``MPN``, ``Manufacturer``, ``DigiKeyPN``; ``LCSC``
-    removed; other spellings of the part-number fields removed. ``Value``,
-    ``Footprint`` and ``Reference`` are never written. Raises ``ValueError``
-    when the candidate has no MPN, manufacturer or DigiKey PN."""
+    removed; other spellings of the part-number fields removed; ``Footprint``
+    = the implied footprint (:attr:`ThtRequirement.implied`) on a member
+    with none, when the part fits it (:func:`implied_fits`). ``Value`` and
+    ``Reference`` are never written, nor a footprint the symbol has.
+    Raises ``ValueError`` when the candidate has no MPN, manufacturer or
+    DigiKey PN."""
     part_props: Dict[str, Optional[str]] = {
         CANONICAL_KEYS["mpn"]: _text(cand.mpn),
         CANONICAL_KEYS["manufacturer"]: _text(cand.manufacturer),
@@ -430,12 +476,17 @@ def tht_assignment_plan(group: ThtGroup, cand: ThtCandidate
         raise ValueError(
             f"candidate {cand.mpn or '?'} has no {', '.join(missing)}; "
             "MPN, Manufacturer and DigiKeyPN are required")
+    implied = group.requirement.implied
+    footprint = (implied.lib_id if implied is not None
+                 and implied_fits(group.requirement, cand.mpn) else None)
     plan: Dict[Path, Dict[str, Dict[str, Optional[str]]]] = {}
     for m in group.members:
         if m.source_file is None or not m.symbol_uuid:
             continue
         props: Dict[str, Optional[str]] = dict(part_props)
         props[CANONICAL_KEYS["lcsc"]] = None
+        if footprint and not _prop(m.props, "Footprint"):
+            props["Footprint"] = footprint
         props.update(_alias_removals(m.props))
         plan.setdefault(Path(m.source_file), {})[m.symbol_uuid] = props
     return plan

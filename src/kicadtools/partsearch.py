@@ -891,18 +891,35 @@ def _evidence(ptype: PartType, label: str, get: Callable[[str], Optional[str]],
     )
 
 
+# Bracketed groups after an MPN at JLCPCB (``SM04B-SRSS-TB(LF)(SN)``: JST's
+# lead-free and tin-plating codes) name the same part.
+_BRACKET_SUFFIX_RE = re.compile(r"(?:\([^()]*\))+$")
+
+
+def _base_mpn(mpn: str) -> str:
+    """*mpn* without trailing bracketed groups, normalized."""
+    return _norm_mpn(_BRACKET_SUFFIX_RE.sub("", (mpn or "").strip()))
+
+
 def _best_jlc_hit(hits: Sequence[JlcPart], mpn: str) -> Optional[JlcPart]:
-    """The JLCPCB hit whose MPN equals *mpn* (normalized), preferring an
-    orderable one, then Basic, then more stock; ``None`` when none matches.
-    Hits listed under JLCPCB's own name (``"JLCPCB Assembly"``, placeholder
-    entries such as C9900013546 with no stock) are skipped."""
+    """The JLCPCB hit whose MPN equals *mpn* (normalized), or equals it
+    with bracketed groups added (``SM04B-SRSS-TB(LF)(SN)`` for
+    ``SM04B-SRSS-TB``), preferring an orderable one, then an exact MPN, then
+    Basic, then more stock; ``None`` when none matches. Hits listed under
+    JLCPCB's own name (``"JLCPCB Assembly"``, placeholder entries such as
+    C9900013546 with no stock) are skipped."""
     want = _norm_mpn(mpn)
-    exact = [h for h in hits if want and _norm_mpn(h.mpn or "") == want
-             and not (h.manufacturer or "").strip().upper().startswith("JLCPCB")]
-    if not exact:
+    base = _base_mpn(mpn)
+    if not want or not base:
         return None
-    return min(exact, key=lambda h: (0 if h.orderable else 1,
-                                     0 if h.is_basic else 1, -h.stock))
+    same = [h for h in hits
+            if _base_mpn(h.mpn or "") == base
+            and not (h.manufacturer or "").strip().upper().startswith("JLCPCB")]
+    if not same:
+        return None
+    return min(same, key=lambda h: (0 if h.orderable else 1,
+                                    0 if _norm_mpn(h.mpn or "") == want else 1,
+                                    0 if h.is_basic else 1, -h.stock))
 
 
 def _current_digikey_pn(product: DigiKeyProduct, existing: ExistingPart) -> Optional[str]:

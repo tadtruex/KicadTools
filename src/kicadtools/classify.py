@@ -175,6 +175,10 @@ def _by_description(props: Dict[str, object]) -> Optional[IntentGuess]:
     if led is not None:
         matched["led"] = led
 
+    # An LED is a diode: "Light emitting diode" names one type, not two.
+    if "led" in matched:
+        matched.pop("diode", None)
+
     # Only trust the text when it points to exactly one type.
     if len(matched) != 1:
         return None

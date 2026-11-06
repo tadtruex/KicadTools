@@ -117,3 +117,12 @@ def test_transistor_bare_q_refdes_is_last_resort():
     g = guess_intent_type({"Reference": "Q7"})
     assert g.intent_type == "transistor"
     assert g.strategy == "refdes"
+
+
+def test_light_emitting_diode_description_is_an_led():
+    # LabBoard D1-D4: KiCad's LED symbol, no footprint yet. "Light emitting
+    # diode" names one type: the diode keyword does not make it ambiguous.
+    g = guess_intent_type({"Reference": "D1", "Value": "Green",
+                           "Description": "Light emitting diode"})
+    assert g.intent_type == "led"
+    assert g.strategy == "description"

@@ -213,11 +213,12 @@ def test_ic_not_searchable_rows():
     no_pn = _synthetic_group(footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", value="OLED")
     no_fp = _synthetic_group(ids=Identifiers(value_mpns=("LM358DR",)), value="LM358DR")
     model = PartsTableModel([no_pn, no_fp])
-    assert model.status(0) == model.status(1) == STATUS_NOT_SEARCHABLE
+    assert model.status(0) == STATUS_NOT_SEARCHABLE
+    # No footprint: searched by part number, footprint chosen in KiCad.
+    assert model.status(1) == STATUS_UNASSIGNED
     assert _cell(model, 1, COL_FOOTPRINT) == DASH
     assert model.data(model.index(0, COL_VALUE), Qt.ToolTipRole) == "Not searchable: no part number."
-    assert model.data(model.index(1, COL_VALUE), Qt.ToolTipRole) == "Not searchable: no footprint."
-    assert model.summary()[STATUS_NOT_SEARCHABLE] == 2
+    assert model.summary()[STATUS_NOT_SEARCHABLE] == 1
     # The Footprint tooltip gives the reason, not a double-click hint that
     # the window would refuse.
     tip = model.data(model.index(0, COL_FOOTPRINT), Qt.ToolTipRole)
@@ -359,7 +360,7 @@ def test_check_message_and_header():
     assert footprint_header(replace(req, pad_count=5)).endswith("; 5 pads")
     custom = replace(req, footprint="ECG_Footprints:CP_20_10_ADI_NOTH")
     assert "package not readable from the name" in footprint_header(custom)
-    assert footprint_header(replace(req, footprint="")) == "none"
+    assert footprint_header(replace(req, footprint="")).startswith("none: ")
     assert stock_floor(30) == 1030
 
 
@@ -799,9 +800,12 @@ def _accepting_exec(dialog):
 def test_window_ic_rows_and_status(window):
     win, _board = window
     model = win.parts_model
-    assert model.rowCount() == 22   # 16, 1 LED group, 5 through-hole header groups
-    assert sum(is_ic(model.group_at(r)) for r in range(22)) == 3
-    assert "22 part groups, 22 unassigned" in win.statusBar().currentMessage()
+    # 16, 1 LED group, 5 through-hole header groups, then 7 rows with no
+    # assignment path (diodes, transistors, a switch, a battery holder, an
+    # unfound connector footprint, shunts with no footprint).
+    assert model.rowCount() == 29
+    assert sum(is_ic(model.group_at(r)) for r in range(29)) == 3
+    assert "29 part groups, 22 unassigned" in win.statusBar().currentMessage()
 
 
 def test_window_assign_ic_end_to_end(window, fake_ic, monkeypatch):

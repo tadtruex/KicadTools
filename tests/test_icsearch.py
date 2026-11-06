@@ -20,6 +20,7 @@ from kicadtools.icsearch import (
     MISMATCH,
     MISMATCH_TEXT,
     NOT_AT_JLCPCB,
+    NO_FOOTPRINT_REASON,
     SEARCH,
     UNVERIFIED,
     UNVERIFIED_TEXT,
@@ -504,8 +505,17 @@ def test_not_searchable_makes_no_calls():
     result = _find(_req(Value="Arduino Nano"), dk, FakeJlc([]))
     assert result.problem == "no part number"
     assert dk.product_calls == [] and dk.keyword_calls == []
-    result = _find(ic_requirement({"MPN": "TPS1234"}), dk, FakeJlc([]))
-    assert result.problem == "no footprint"
+
+
+def test_symbol_without_footprint_is_searched_and_left_unverified():
+    # LabBoard U1: no footprint yet; the part is found and its footprint
+    # check says why it cannot be checked.
+    dk = FakeDigiKey({"X": _dk("TPS1234")})
+    result = _find(_req(footprint="", DigiKeyPN="X"), dk, FakeJlc([]))
+    assert result.problem == ""
+    (cand,) = result.candidates
+    assert cand.mpn == "TPS1234"
+    assert cand.footprint == FootprintCheck(UNVERIFIED, (NO_FOOTPRINT_REASON,))
 
 
 def test_digikey_unconfigured_reports_problem():

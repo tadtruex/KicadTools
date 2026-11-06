@@ -75,8 +75,10 @@ from kicadtools.gui.model import IntentTableModel, NaturalSortProxyModel
 from kicadtools.gui.parts import (
     STATUS_ASSIGNED,
     STATUS_CONFLICT,
+    STATUS_NO_FOOTPRINT,
     STATUS_NO_PART,
     STATUS_NOT_SEARCHABLE,
+    STATUS_NOT_SUPPORTED,
     STATUS_UNASSIGNED,
     CandidateWorker,
     IcCandidateWorker,
@@ -87,6 +89,7 @@ from kicadtools.gui.parts import (
     is_ic,
     is_tht,
     is_led,
+    is_other,
     requirement_settings,
 )
 from kicadtools.gui.param_editor import ElectricalParamsDialog
@@ -98,6 +101,8 @@ from kicadtools.ledassign import led_assignment_plan
 from kicadtools.ledrequirement import group_leds
 from kicadtools.ledsearch import cached_listing
 from kicadtools.mounting import BoardMounting
+from kicadtools.othergroup import claimed, group_others
+from kicadtools.smdconnector import group_smd_connectors
 from kicadtools.icsearch import MATCH, board_pads, ic_assignment_plan
 from kicadtools.naturalsort import natural_key
 from kicadtools.partrotation import PartRotationStore
@@ -351,14 +356,17 @@ class MainWindow(QMainWindow):
         self.lcsc_model.load(self._records)
         self.lcsc_table.resizeColumnsToContents()
         # Capacitor, resistor and inductor groups first, then plain LEDs, ICs,
-        # multicolour and smart LEDs (IC rows), and through-hole parts, each
-        # in reference order.
+        # multicolour and smart LEDs (IC rows), surface-mount connectors (IC
+        # rows), and through-hole parts, each in reference order.
         board = BoardMounting.for_schematic(path)
         defaults = self._part_defaults()
         leds, named_leds = group_leds(self._records, defaults, board=board)
-        self.parts_model.load(group_parts(self._records, defaults) + leds
-                              + group_ics(self._records) + named_leds
-                              + group_tht(self._records, board))
+        groups = (group_parts(self._records, defaults) + leds
+                  + group_ics(self._records) + named_leds
+                  + group_smd_connectors(self._records, board)
+                  + group_tht(self._records, board))
+        # Every other BOM part is listed too, with the reason it has no search.
+        self.parts_model.load(groups + group_others(self._records, claimed(groups), board))
         self._header_run = HeaderRun(DigiKeyClient(), makers=self._header_makers())
         self.parts_table.resizeColumnsToContents()
         self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
@@ -686,6 +694,10 @@ class MainWindow(QMainWindow):
     def _parts_double_clicked(self, index) -> None:
         row = self.parts_proxy.mapToSource(index).row()
         group = self.parts_model.group_at(row)
+        if is_other(group):
+            self.statusBar().showMessage(group.requirement.problem()[:1].upper()
+                                         + group.requirement.problem()[1:] + ".")
+            return
         if is_tht(group):
             status = self.parts_model.status(row)
             if status == STATUS_NO_PART:
@@ -748,6 +760,8 @@ class MainWindow(QMainWindow):
                 f"The parts database {self._parts_db_path} could not be opened.",
             )
             return
+        if is_other(self.parts_model.group_at(row)):
+            return      # no assignment path (othergroup.py)
         if is_ic(self.parts_model.group_at(row)):
             self._assign_ic_group(row)
             return
@@ -1483,4 +1497,8 @@ class MainWindow(QMainWindow):
                if p[STATUS_NOT_SEARCHABLE] else "")
             + (f", {p[STATUS_NO_PART]} with no part to buy"
                if p[STATUS_NO_PART] else "")
+            + (f", {p[STATUS_NO_FOOTPRINT]} with no footprint"
+               if p[STATUS_NO_FOOTPRINT] else "")
+            + (f", {p[STATUS_NOT_SUPPORTED]} of types not supported yet"
+               if p[STATUS_NOT_SUPPORTED] else "")
         )

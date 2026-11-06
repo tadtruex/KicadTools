@@ -141,7 +141,8 @@ def test_queue_changes_status_and_requirement():
     assert model.data(model.index(0, 0), Qt.BackgroundRole) is None
     assert model.status(1) == STATUS_UNASSIGNED
     assert model.summary() == {STATUS_ASSIGNED: 0, STATUS_QUEUED: 1, STATUS_UNASSIGNED: 3,
-                               "conflict": 0, "not searchable": 0, "no part": 0}
+                               "conflict": 0, "not searchable": 0, "no part": 0,
+                               "no footprint": 0, "type not supported yet": 0}
 
 
 def test_accepted_edits_shape_keeps_none_values():
@@ -260,8 +261,8 @@ def test_main_window_parts_tab_round_trip(window, tmp_path):
     model = win.parts_model
     # ECG: 4 capacitor groups, 9 resistor groups, 1 LED group (D1/D4), 3 IC
     # groups, then 5 through-hole header groups (THT_PLAN.md step 9).
-    assert model.rowCount() == 22
-    assert "22 part groups, 22 unassigned" in win.statusBar().currentMessage()
+    assert model.rowCount() == 29     # 22 with a search, 7 with none
+    assert "29 part groups, 22 unassigned" in win.statusBar().currentMessage()
 
     group = model.group_at(0)
     req = group.requirement.edited(rating_min=16.0)
@@ -787,3 +788,34 @@ def test_window_records_lookup_and_reuses_it(window, gated, monkeypatch):
     win._assign_group(0)
     _wait_idle(win)
     assert opened == [None, lookup]
+
+
+def test_rows_with_no_assignment_path_say_why():
+    from types import SimpleNamespace
+    from kicadtools.gui.parts import (COL_PACKAGE, STATUS_NO_FOOTPRINT, STATUS_NO_PART,
+                                      STATUS_NOT_SUPPORTED, is_other)
+    from kicadtools.intent import ElectricalIntent
+    from kicadtools.othergroup import group_others
+
+    def rec(ref, **props):
+        data = {"Reference": ref, "dnp": False, "in_bom": True, **props}
+        return SimpleNamespace(reference=ref, props=data, source_file=Path("/b/x.kicad_sch"),
+                               symbol_uuid=f"u-{ref}", intent=ElectricalIntent.from_dict(data))
+
+    groups = group_others([
+        rec("H1", Value="MountingHole", Footprint="MountingHole:MountingHole_3.2mm_M3"),
+        rec("J5", **{"Intent:Type": "connector", "Value": "TMP235 (JST PH 3)"}),
+        rec("Q1", **{"Intent:Type": "transistor", "Value": "KSC2073",
+                     "Description": "NPN transistor, base/collector/emitter"}),
+    ], set())
+    model = PartsTableModel(groups)
+    assert all(is_other(model.group_at(r)) for r in range(3))
+    assert [model.status(r) for r in range(3)] == [STATUS_NO_PART, STATUS_NO_FOOTPRINT,
+                                                   STATUS_NOT_SUPPORTED]
+    assert _cell(model, 0, COL_PACKAGE) == "no part (mounting hole)"
+    assert _cell(model, 2, COL_PACKAGE) == "transistor"
+    assert _cell(model, 2, COL_VALUE) == "KSC2073"
+    tip = model.data(model.index(2, COL_VALUE), Qt.ToolTipRole)
+    assert tip == ("Transistor: no assignment path yet.\n"
+                   "Description: NPN transistor, base/collector/emitter")
+    assert model.summary()[STATUS_NOT_SUPPORTED] == 1
