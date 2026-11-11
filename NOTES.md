@@ -165,6 +165,11 @@ out) is 3b689cc. All pushed on 2026-11-04.
 Next: step 10 (your live check in the Cockpit on BarrelJackAdapter, SX1509,
 MiDi and Breakout), then step 7 (through-hole passives). See the "as built"
 sections in the plan.
+- TODO (user, 2026-11-10): the through-hole path must tell pin headers from
+  sockets. They are different parts (male pins vs. female receptacles) and
+  must never be matched, grouped or offered for each other. Check the
+  grouping, the stored-part lookup and the series, not only the search
+  category.
 - The next Cockpit open adds the `tht` table to `~/Code/Boards/parts.sqlite`
   (no migration, every row kept; checked on a copy).
 
