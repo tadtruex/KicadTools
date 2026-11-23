@@ -11,7 +11,7 @@ Local copies exist only as backups and as the read-only offline copy
 (decision 1); nothing is ever written to them by the Cockpit except a fresh
 download.
 
-Status (2026-11-23): steps 1 and 2 built. Steps 3–9 not started.
+Status (2026-11-23): steps 1–3 built. Steps 4–9 not started.
 
 ## What was checked (2026-11-23)
 
@@ -200,9 +200,19 @@ step that runs in one transaction, as the version-1 → 2 step does now.
    KICADTOOLS_TEST_DB_USER=tadtruex_inventory \
    KICADTOOLS_DB_PASS=… pytest tests/test_partsdb.py tests/test_thtdb.py
    ```
-3. **Configuration and credentials.** `config.toml` reading, the password
-   file and its prompt (decision 3). (PyMySQL is already the optional
-   `server` extra, step 2.)
+3. **Configuration and credentials.** Done. `kicadtools/dbconfig.py`:
+   `load_config` reads `~/.kicadtools/config.toml` (`KICADTOOLS_CONFIG`
+   names another file; `KICADTOOLS_PARTS_DB` wins over both) into a
+   `DbConfig`, with a `ConfigError` naming the file and the missing field.
+   `obtain_password(check, ask)` tries `KICADTOOLS_DB_PASS`, else
+   `~/.kicadtools/db_password`; when there is none or the server refuses it
+   (MariaDB errors 1044, 1045) it asks, checks the answer, and writes the
+   file (mode `0600`, set before the password is written). An unreachable
+   server raises without asking. `PartsDb.check_mariadb_login` is the check
+   (a login that creates nothing); `gui/db_password.py` (a password dialog)
+   and `dbconfig.terminal_ask` are the two *ask*s. Checked against the
+   server through the tunnel: a wrong answer was refused and asked again, the
+   right one saved, and the next run asked nothing.
 4. **Tunnel.** `dbtunnel.py` (decision 2).
 5. **One-time import.** `kicadtools db import [--dry-run]`, run once when
    the server is set up: load today's `parts.sqlite` and the rotation

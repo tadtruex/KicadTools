@@ -730,6 +730,18 @@ class PartsDb:
         return cls(f"{user}@{host}:{port}/{database}", now=now, _conn=conn,
                    _dialect=MARIADB)
 
+    @staticmethod
+    def check_mariadb_login(*, host: str, port: int, user: str, password: str,
+                            database: str, connect_timeout: int = 10) -> None:
+        """Log in to MariaDB *database* and close the connection, creating
+        nothing: the check :func:`kicadtools.dbconfig.obtain_password` runs
+        on a password. Raises PyMySQL's ``OperationalError`` when the server
+        refuses the login (codes 1044, 1045) or cannot be reached."""
+        import pymysql
+
+        pymysql.connect(host=host, port=int(port), user=user, password=password,
+                        database=database, connect_timeout=connect_timeout).close()
+
     @property
     def backend(self) -> str:
         """``"sqlite"`` or ``"mariadb"``."""
