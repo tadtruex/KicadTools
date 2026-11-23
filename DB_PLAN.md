@@ -11,7 +11,7 @@ Local copies exist only as backups and as the read-only offline copy
 (decision 1); nothing is ever written to them by the Cockpit except a fresh
 download.
 
-Status (2026-11-23): steps 1–3 built. Steps 4–9 not started.
+Status (2026-11-23): steps 1–4 built. Steps 5–9 not started.
 
 ## What was checked (2026-11-23)
 
@@ -213,7 +213,18 @@ step that runs in one transaction, as the version-1 → 2 step does now.
    and `dbconfig.terminal_ask` are the two *ask*s. Checked against the
    server through the tunnel: a wrong answer was refused and asked again, the
    right one saved, and the next run asked nothing.
-4. **Tunnel.** `dbtunnel.py` (decision 2).
+4. **Tunnel.** Done. `kicadtools/dbtunnel.py`: `Tunnel(host, user).open()`
+   starts `ssh -N -L 127.0.0.1:<free port>:127.0.0.1:3306` and returns the
+   port once it answers; `close()` stops ssh. With a configured
+   `local_port` that already answers, the user's tunnel is used and left
+   running. With no *askpass*, ssh runs with `BatchMode=yes`; with one
+   (`gui/askpass.py`, through the wrapper `askpass_script` writes), ssh asks
+   for the SSH password in a dialog (`SSH_ASKPASS_REQUIRE=force`). New host
+   keys are accepted on first use; `ServerAlive` probes end a dead tunnel.
+   A failure is a `TunnelError` with ssh's message, without its
+   post-quantum warning. Checked live: up in 0.4 s with the key, a login
+   through it, closed cleanly; the 3307 tunnel adopted and left running.
+   The askpass dialog is exercised on a machine with no key (step 8).
 5. **One-time import.** `kicadtools db import [--dry-run]`, run once when
    the server is set up: load today's `parts.sqlite` and the rotation
    overrides into the empty server in one transaction, keeping part ids so
