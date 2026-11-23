@@ -60,7 +60,8 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, ClassVar, Dict, List, Optional, Sequence, Union
+from contextlib import contextmanager
+from typing import Any, Callable, ClassVar, Dict, Iterator, List, Optional, Sequence, Union
 
 from kicadtools.parttypes import CAPACITOR, INDUCTOR, RESISTOR, part_type
 
@@ -198,6 +199,54 @@ _TABLES: Dict[str, _Table] = {
 
 # Every per-type parameter table; a part has a row in at most one of them.
 _PARAM_TABLES = tuple(t.name for t in _TABLES.values()) + (IC, THT, LED)
+
+
+class _Dialect:
+    """The SQL that differs between database engines, for SQLite
+    (``DB_PLAN.md`` step 1; MariaDB is step 2). Statements elsewhere are
+    written with ``?`` placeholders and standard SQL; :meth:`sql` turns one
+    into this engine's text, and the methods below build the statements
+    that have no standard form."""
+
+    name = "sqlite"
+
+    def sql(self, text: str) -> str:
+        """*text* in this engine's placeholder style (SQLite: ``?``, as
+        written)."""
+        return text
+
+    def upsert(self, table: str, cols: Sequence[str], keys: Sequence[str]) -> str:
+        """Insert a row of *cols*, or update the row whose *keys* match:
+        every column of *cols* not in *keys* is set from the new row, and a
+        column not in *cols* keeps its value."""
+        head = (f"INSERT INTO {table}({', '.join(cols)})"
+                f" VALUES ({', '.join('?' * len(cols))})")
+        updates = [c for c in cols if c not in keys]
+        tail = (" DO UPDATE SET " + ", ".join(f"{c} = excluded.{c}" for c in updates)
+                if updates else " DO NOTHING")
+        return f"{head} ON CONFLICT({', '.join(keys)}){tail}"
+
+    def insert_ignore(self, table: str, cols: Sequence[str]) -> str:
+        """Insert a row of *cols* unless one with the same key exists."""
+        return (f"INSERT OR IGNORE INTO {table}({', '.join(cols)})"
+                f" VALUES ({', '.join('?' * len(cols))})")
+
+    def has_table(self) -> str:
+        """A query giving a row when the table named by its one parameter
+        exists."""
+        return "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+
+    def schema(self) -> List[str]:
+        """The ``CREATE … IF NOT EXISTS`` statements of the schema, in
+        order."""
+        return [stmt for stmt in _SCHEMA.split(";") if stmt.strip()]
+
+    def setup(self, conn: Any) -> None:
+        """Per-connection settings."""
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+SQLITE = _Dialect()
 
 
 def _table(kind: str) -> _Table:
@@ -463,41 +512,56 @@ class PartsDb:
         self._lock = threading.RLock()
         # check_same_thread=False: the GUI opens the database on the main
         # thread and searches it on a worker thread; self._lock serializes use.
+        self._dialect = SQLITE
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         try:
-            self.conn.execute("PRAGMA foreign_keys = ON")
-            # find_ics compares stored MPNs through the same function as its
-            # argument, so both sides are normalized alike.
-            self.conn.create_function("norm_mpn", 1, norm_mpn,
-                                      deterministic=True)
+            self._dialect.setup(self.conn)
             # The version is checked before the schema is applied, so a file of
             # another version is refused without tables added to it.
             if self._stored_version() == str(_MIGRATABLE_VERSION):
                 self._migrate_v1()
             self._check_version(path)
-            self.conn.executescript(_SCHEMA)
-            with self.conn:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO meta(key, value)"
-                    " VALUES ('schema_version', ?)",
-                    (str(SCHEMA_VERSION),),
-                )
+            with self._tx():
+                for statement in self._dialect.schema():
+                    self._execute(statement)
+                self._execute(self._dialect.insert_ignore("meta", ("key", "value")),
+                              ("schema_version", str(SCHEMA_VERSION)))
             self._check_version(path)
         except Exception:
             self.conn.close()
             raise
 
+    # ----- statements ------------------------------------------------------
+
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
+        """Run *sql* (``?`` placeholders) with *params*; the cursor."""
+        cur = self.conn.cursor()
+        cur.execute(self._dialect.sql(sql), tuple(params))
+        return cur
+
+    def _executemany(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
+        cur = self.conn.cursor()
+        cur.executemany(self._dialect.sql(sql), [tuple(r) for r in rows])
+
+    @contextmanager
+    def _tx(self) -> Iterator[None]:
+        """One transaction, holding the lock: committed when the block ends,
+        rolled back when it raises."""
+        with self._lock:
+            try:
+                yield
+            except BaseException:
+                self.conn.rollback()
+                raise
+            self.conn.commit()
+
     def _stored_version(self) -> Optional[str]:
-        """``meta.schema_version`` of the open file; ``None`` for a new file
-        (no ``meta`` table, or no version row in it)."""
-        has_meta = self.conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
-        ).fetchone()
-        if not has_meta:
+        """``meta.schema_version`` of the open database; ``None`` for a new
+        one (no ``meta`` table, or no version row in it)."""
+        if not self._execute(self._dialect.has_table(), ("meta",)).fetchone():
             return None
-        row = self.conn.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone()
+        row = self._execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         return None if row is None else row[0]
 
     def _check_version(self, path: Path | str) -> None:
@@ -515,7 +579,8 @@ class PartsDb:
         ``meta.schema_version``."""
         # The schema text holds only CREATE ... IF NOT EXISTS, so it adds the
         # ic table and leaves the version-1 tables as they are. It is run
-        # statement by statement because executescript commits first.
+        # statement by statement because executescript commits first. SQLite
+        # only: no other engine holds a version-1 database.
         self.conn.execute("BEGIN")
         try:
             for statement in _SCHEMA.split(";"):
@@ -548,7 +613,7 @@ class PartsDb:
     def is_rejected(self, manufacturer: str, mpn: str) -> bool:
         """True when (manufacturer, MPN) is recorded with status rejected."""
         with self._lock:
-            row = self.conn.execute(
+            row = self._execute(
                 "SELECT status FROM part WHERE manufacturer = ? AND mpn = ?",
                 ((manufacturer or "").strip(), (mpn or "").strip()),
             ).fetchone()
@@ -573,39 +638,31 @@ class PartsDb:
         jlc_library = _opt_text(choice.jlc_library)
         if jlc_library is not None:
             jlc_library = jlc_library.lower()
-        with self._lock, self.conn:
-            self.conn.execute(
-                "INSERT INTO part(mpn, manufacturer, type, package, description,"
-                " datasheet_url, status, decided_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(manufacturer, mpn) DO UPDATE SET"
-                " type = excluded.type, package = excluded.package,"
-                " description = excluded.description,"
-                " datasheet_url = excluded.datasheet_url,"
-                " status = excluded.status, decided_at = excluded.decided_at",
+        with self._tx():
+            self._execute(
+                self._dialect.upsert(
+                    "part", ("mpn", "manufacturer", "type", "package", "description",
+                             "datasheet_url", "status", "decided_at"),
+                    ("manufacturer", "mpn")),
                 (mpn, manufacturer, choice.kind, (choice.package or "").strip(),
                  choice.description, choice.datasheet_url, status, stamp),
             )
-            part_id = self.conn.execute(
+            part_id = self._execute(
                 "SELECT id FROM part WHERE manufacturer = ? AND mpn = ?",
                 (manufacturer, mpn),
             ).fetchone()[0]
             # A part whose type changed keeps no row in the other tables.
             for other in _PARAM_TABLES:
                 if other != table_name:
-                    self.conn.execute(
+                    self._execute(
                         f"DELETE FROM {other} WHERE part_id = ?", (part_id,))
             cols, values = row(part_id, choice)
-            self.conn.execute(
-                f"INSERT OR REPLACE INTO {table_name}({', '.join(cols)})"
-                f" VALUES ({', '.join('?' * len(cols))})",
-                values,
-            )
+            self._execute(self._dialect.upsert(table_name, cols, ("part_id",)), values)
             # A part has at most one PN per supplier: the rows for a supplier
             # named in the choice are replaced, so a changed PN leaves no stale
             # row behind. A supplier left as None or "" keeps its existing row.
             # A supplier PN identifies one part, so a PN recorded against
-            # another part moves to this one (INSERT OR REPLACE on the key).
+            # another part moves to this one (an upsert on the key).
             if digikey_pn:
                 self._replace_pn(part_id, "digikey", digikey_pn,
                                  _opt_text(choice.digikey_packaging), None, stamp)
@@ -658,14 +715,15 @@ class PartsDb:
     def _replace_pn(self, part_id: int, supplier: str, pn: str,
                     packaging: Optional[str], jlc_library: Optional[str],
                     stamp: str) -> None:
-        self.conn.execute(
+        self._execute(
             "DELETE FROM supplier_pn WHERE part_id = ? AND supplier = ?",
             (part_id, supplier),
         )
-        self.conn.execute(
-            "INSERT OR REPLACE INTO supplier_pn"
-            "(part_id, supplier, pn, packaging, jlc_library, verified_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+        self._execute(
+            self._dialect.upsert(
+                "supplier_pn",
+                ("part_id", "supplier", "pn", "packaging", "jlc_library", "verified_at"),
+                ("supplier", "pn")),
             (part_id, supplier, pn, packaging, jlc_library, stamp),
         )
 
@@ -734,7 +792,7 @@ class PartsDb:
             " p.mpn"
         )
         with self._lock:
-            rows = self.conn.execute(sql, args).fetchall()
+            rows = self._execute(sql, args).fetchall()
         out: List[DbPart] = []
         for row in rows:
             (pid, mpn, mfr, pkg, desc, url, value, rating, diel, tol,
@@ -774,16 +832,17 @@ class PartsDb:
             " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
             " FROM part p JOIN ic i ON i.part_id = p.id"
             " WHERE p.status = ? AND p.type = ?"
-            # Stored MPNs are stripped but may hold inner whitespace; the
-            # stored side goes through the same norm_mpn as the argument.
-            " AND norm_mpn(p.mpn) = ?"
             " ORDER BY usage_count DESC,"
             " CASE WHEN LOWER(jlc_library) = 'basic' THEN 0"
             "      WHEN lcsc IS NOT NULL THEN 1 ELSE 2 END,"
             " p.manufacturer"
         )
         with self._lock:
-            rows = self.conn.execute(sql, (ACCEPTED, IC, key)).fetchall()
+            rows = self._execute(sql, (ACCEPTED, IC)).fetchall()
+        # Stored MPNs are stripped but may hold inner whitespace; the stored
+        # side goes through the same norm_mpn as the argument. Compared here,
+        # not in SQL, so the query is the same on every engine.
+        rows = [r for r in rows if norm_mpn(r[1]) == key]
         return [
             DbIc(part_id=int(pid), mpn=m, manufacturer=mfr, package=pkg or "",
                  package_case=case or "", pins=None if pins is None else int(pins),
@@ -813,7 +872,7 @@ class PartsDb:
             " ORDER BY usage_count DESC, p.decided_at DESC, p.mpn"
         )
         with self._lock:
-            rows = self.conn.execute(
+            rows = self._execute(
                 sql, (ACCEPTED, THT, signature, (value_key or "").strip())).fetchall()
         return [
             DbTht(part_id=int(pid), mpn=m, manufacturer=mfr, family=fam,
@@ -848,7 +907,7 @@ class PartsDb:
             " ORDER BY usage_count DESC, (lib = 'basic') DESC, p.decided_at DESC"
         )
         with self._lock:
-            rows = self.conn.execute(sql, (ACCEPTED, LED, package)).fetchall()
+            rows = self._execute(sql, (ACCEPTED, LED, package)).fetchall()
         return [
             DbLed(part_id=int(pid), mpn=m, manufacturer=mfr, package=pkg or "",
                   color=col or "", dominant_nm=dom, peak_nm=peak,
@@ -867,10 +926,10 @@ class PartsDb:
         ``Boards/``) place part *part_id*. A pair already recorded has its
         ``used_at`` refreshed."""
         stamp = self._now()
-        with self._lock, self.conn:
-            self.conn.executemany(
-                "INSERT OR REPLACE INTO usage(part_id, board, reference, used_at)"
-                " VALUES (?, ?, ?, ?)",
+        with self._tx():
+            self._executemany(
+                self._dialect.upsert("usage", ("part_id", "board", "reference", "used_at"),
+                                     ("part_id", "board", "reference")),
                 [(part_id, board, ref, stamp) for ref in references],
             )
 
@@ -879,24 +938,22 @@ class PartsDb:
     def get_setting(self, key: str) -> Optional[str]:
         """The stored value of setting *key*, or ``None``."""
         with self._lock:
-            row = self.conn.execute(
+            row = self._execute(
                 "SELECT value FROM settings WHERE key = ?", (key,)
             ).fetchone()
         return row[0] if row else None
 
     def set_setting(self, key: str, value: str) -> None:
         """Store *value* under setting *key*, replacing any earlier value."""
-        with self._lock, self.conn:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
-                (key, value),
-            )
+        with self._tx():
+            self._execute(self._dialect.upsert("settings", ("key", "value"), ("key",)),
+                          (key, value))
 
     def settings(self) -> Dict[str, str]:
         """Every stored setting as ``{key: value}``."""
         with self._lock:
-            return {k: v for k, v in self.conn.execute(
-                "SELECT key, value FROM settings")}
+            return {k: v for k, v in self._execute(
+                "SELECT key, value FROM settings").fetchall()}
 
     def close(self) -> None:
         """Close the connection; the object is unusable afterwards."""

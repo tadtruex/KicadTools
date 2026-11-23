@@ -11,7 +11,7 @@ Local copies exist only as backups and as the read-only offline copy
 (decision 1); nothing is ever written to them by the Cockpit except a fresh
 download.
 
-Status: plan only (2026-11-23). Nothing is built.
+Status (2026-11-23): step 1 built. Steps 2–9 not started.
 
 ## What was checked (2026-11-23)
 
@@ -169,9 +169,17 @@ step that runs in one transaction, as the version-1 → 2 step does now.
 
 ## Steps
 
-1. **Dialect layer, SQLite only.** Move the 13 SQLite-only statements behind
-   the dialect object; no behaviour change. The whole suite passes
-   unchanged.
+1. **Dialect layer, SQLite only.** Done. `partsdb._Dialect` builds the
+   upserts (`INSERT … ON CONFLICT … DO UPDATE` in place of `INSERT OR
+   REPLACE`), `INSERT OR IGNORE`, the table-exists query, the schema
+   statements and the connection setup; every statement runs through
+   `PartsDb._execute` / `_executemany`, and transactions through
+   `PartsDb._tx` (PyMySQL's `with conn:` closes the connection rather than
+   committing). `find_ics` compares `norm_mpn` in Python: MariaDB cannot
+   call a Python function from SQL. The suite passes unchanged, and the old
+   and new code give the same results on a copy of `parts.sqlite` (58
+   checks, including an accept / reject / usage / settings sequence
+   compared table by table).
 2. **MariaDB dialect and DDL.** The table definitions above. Tests: the
    `PartsDb` tests run against both backends, the MariaDB run gated on an
    environment variable and pointed at a second, empty database
