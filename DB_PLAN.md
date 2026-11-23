@@ -11,7 +11,7 @@ Local copies exist only as backups and as the read-only offline copy
 (decision 1); nothing is ever written to them by the Cockpit except a fresh
 download.
 
-Status (2026-11-23): step 1 built. Steps 2–9 not started.
+Status (2026-11-23): steps 1 and 2 built. Steps 3–9 not started.
 
 ## What was checked (2026-11-23)
 
@@ -122,7 +122,7 @@ small dialect object:
 | `INTEGER PRIMARY KEY` (row id) | `INT AUTO_INCREMENT PRIMARY KEY` |
 | `TEXT` in keys and indexes | `VARCHAR(n)`: MariaDB indexes need a length (`mpn`, `manufacturer` 128; `pn` 64; `signature` 255) |
 | `REAL` | `DOUBLE` |
-| `COLLATE NOCASE` | the table collation `utf8mb4_unicode_ci`, which is case-insensitive |
+| `COLLATE NOCASE` on `mpn`, `manufacturer` | `utf8mb4_unicode_ci` on those two columns (case-insensitive); every other column `utf8mb4_bin`, compared as bytes, as SQLite compares them |
 | `INSERT … ON CONFLICT(…) DO UPDATE` | `INSERT … ON DUPLICATE KEY UPDATE` |
 | `INSERT OR REPLACE` | `INSERT … ON DUPLICATE KEY UPDATE`. MariaDB's `REPLACE` deletes the row first, and `ON DELETE CASCADE` would then delete the part's child rows. |
 | `INSERT OR IGNORE` | `INSERT IGNORE` |
@@ -139,9 +139,13 @@ unique key on (manufacturer, MPN) then treats the two spellings as one
 part. That is the intended behaviour; it is listed here because SQLite's
 `NOCASE` does not do it.
 
+`key` and `usage` are reserved words in MariaDB. Each MariaDB connection
+sets `ANSI_QUOTES`, and the shared SQL writes `"key"` and `"usage"`, which
+both engines read as names.
+
 Every table is created with `ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-COLLATE=utf8mb4_unicode_ci`, and the database default is changed once to
-the same (`ALTER DATABASE`), so a table created later by hand is UTF-8 too.
+COLLATE=utf8mb4_bin`, and the database default is changed once to
+`utf8mb4` (`ALTER DATABASE`), so a table created later by hand is UTF-8 too.
 
 ### Connections
 
@@ -180,11 +184,22 @@ step that runs in one transaction, as the version-1 → 2 step does now.
    and new code give the same results on a copy of `parts.sqlite` (58
    checks, including an accept / reject / usage / settings sequence
    compared table by table).
-2. **MariaDB dialect and DDL.** The table definitions above. Tests: the
-   `PartsDb` tests run against both backends, the MariaDB run gated on an
-   environment variable and pointed at a second, empty database
-   (`tadtruex_inventory_test`, created in cPanel), so the real data is never
-   touched by a test.
+2. **MariaDB dialect and DDL.** Done. `partsdb._MariaDialect` and
+   `_MARIA_SCHEMA`; `PartsDb.connect_mariadb(host, port, user, password,
+   database)` opens the server with the same methods as a file, and
+   `PartsDb.backend` names the engine. PyMySQL is the optional `server`
+   extra. `tests/dbbackends.py` runs `test_partsdb.py` and `test_thtdb.py`
+   on SQLite and, when `KICADTOOLS_TEST_DB_NAME` is set, on MariaDB; it
+   refuses a database name not ending `_test` and drops that database's
+   tables before each test. On `tadtruex_inventory_test` through the
+   tunnel: 118 passed, 8 SQLite-only skipped (about 90 s); the real
+   `tadtruex_inventory` was left empty. The test command:
+
+   ```
+   KICADTOOLS_TEST_DB_NAME=tadtruex_inventory_test \
+   KICADTOOLS_TEST_DB_USER=tadtruex_inventory \
+   KICADTOOLS_DB_PASS=… pytest tests/test_partsdb.py tests/test_thtdb.py
+   ```
 3. **Configuration and credentials.** `config.toml` reading, the password
    file and its prompt (decision 3), `PyMySQL` as an optional dependency
    (`pip install kicadtools[server]`).

@@ -17,12 +17,20 @@ from kicadtools.partsdb import (
     default_path,
     norm_mpn,
 )
+from tests.dbbackends import BACKENDS, integrity_errors, new_db, sqlite_only, use_backend
 
 STAMP = "2026-10-29T12:00:00+00:00"
 
 
+@pytest.fixture(autouse=True, params=BACKENDS)
+def backend(request):
+    """Every test runs on SQLite, and on MariaDB when one is configured
+    (tests/dbbackends.py)."""
+    yield from use_backend(request.param)
+
+
 def _db() -> PartsDb:
-    return PartsDb(":memory:", now=lambda: STAMP)
+    return new_db(now=lambda: STAMP)
 
 
 def _cap(mpn: str = "CL10B104KB8NNNC", *, manufacturer: str = "Samsung",
@@ -63,9 +71,9 @@ def test_accept_find_round_trip():
 def test_timestamps_from_injected_now():
     db = _db()
     pid = db.accept_part(_cap())
-    assert db.conn.execute(
+    assert db._execute(
         "SELECT decided_at FROM part WHERE id = ?", (pid,)).fetchone()[0] == STAMP
-    stamps = {r[0] for r in db.conn.execute("SELECT verified_at FROM supplier_pn")}
+    stamps = {r[0] for r in db._execute("SELECT verified_at FROM supplier_pn")}
     assert stamps == {STAMP}
 
 
@@ -98,7 +106,7 @@ def test_dielectric_set_normalized():
     db = _db()
     db.accept_part(_cap("C0G-PART", diel="cog", tol=5.0))
     # stored normalized
-    assert db.conn.execute("SELECT dielectric FROM capacitor").fetchone()[0] == "C0G"
+    assert db._execute("SELECT dielectric FROM capacitor").fetchone()[0] == "C0G"
     assert _find(db, dielectrics=["c0g"])
     assert _find(db, dielectrics=["COG", "NP0"])
     assert _find(db, dielectrics=[" C0G "])
@@ -150,9 +158,9 @@ def test_upsert_updates_without_duplicating():
     pid2 = db.accept_part(_cap(v=100.0, tol=5.0, dk="1276-9999-1-ND",
                                     lcsc="C99999", lib="extended"))
     assert pid2 == pid
-    assert db.conn.execute("SELECT COUNT(*) FROM part").fetchone()[0] == 1
-    assert db.conn.execute("SELECT COUNT(*) FROM capacitor").fetchone()[0] == 1
-    rows = sorted(db.conn.execute(
+    assert db._execute("SELECT COUNT(*) FROM part").fetchone()[0] == 1
+    assert db._execute("SELECT COUNT(*) FROM capacitor").fetchone()[0] == 1
+    rows = sorted(db._execute(
         "SELECT supplier, pn, jlc_library FROM supplier_pn").fetchall())
     assert rows == [("digikey", "1276-9999-1-ND", None),
                     ("lcsc", "C99999", "extended")]
@@ -204,17 +212,19 @@ def test_settings_round_trip():
 
 def test_schema_version_stamped():
     db = _db()
-    row = db.conn.execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    row = db._execute(
+        'SELECT value FROM meta WHERE "key" = \'schema_version\'').fetchone()
     assert row[0] == str(SCHEMA_VERSION)
 
 
 def test_foreign_keys_enabled():
+    sqlite_only()
     db = _db()
-    assert db.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert db._execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
 def test_schema_version_mismatch_raises(tmp_path: Path):
+    sqlite_only()
     path = tmp_path / "parts.sqlite"
     PartsDb(path, now=lambda: STAMP).close()
     conn = sqlite3.connect(str(path))
@@ -226,6 +236,7 @@ def test_schema_version_mismatch_raises(tmp_path: Path):
 
 
 def test_file_db_persists_across_reopen(tmp_path: Path):
+    sqlite_only()
     path = tmp_path / "sub" / "dir" / "parts.sqlite"   # parent created
     db = PartsDb(path, now=lambda: STAMP)
     pid = db.accept_part(_cap())
@@ -243,12 +254,13 @@ def test_file_db_persists_across_reopen(tmp_path: Path):
 def test_default_now_is_iso_utc():
     db = PartsDb()
     pid = db.accept_part(_cap())
-    stamp = db.conn.execute(
+    stamp = db._execute(
         "SELECT decided_at FROM part WHERE id = ?", (pid,)).fetchone()[0]
     assert stamp.endswith("+00:00") and "T" in stamp and "." not in stamp
 
 
 def test_default_path_honours_env(monkeypatch, tmp_path: Path):
+    sqlite_only()
     monkeypatch.setenv("KICADTOOLS_PARTS_DB", str(tmp_path / "x.sqlite"))
     assert default_path() == tmp_path / "x.sqlite"
     monkeypatch.delenv("KICADTOOLS_PARTS_DB")
@@ -260,7 +272,7 @@ def test_manufacturer_and_mpn_case_and_whitespace_insensitive():
     db = _db()
     pid = db.accept_part(_cap())
     assert db.accept_part(_cap(" cl10b104kb8nnnc ", manufacturer="SAMSUNG ")) == pid
-    assert db.conn.execute("SELECT COUNT(*) FROM part").fetchone()[0] == 1
+    assert db._execute("SELECT COUNT(*) FROM part").fetchone()[0] == 1
     db.reject_part(_cap())
     assert db.is_rejected(" samsung", "CL10B104KB8NNNC ")
 
@@ -269,7 +281,7 @@ def test_empty_mpn_raises():
     db = _db()
     with pytest.raises(ValueError):
         db.accept_part(_cap("  "))
-    assert db.conn.execute("SELECT COUNT(*) FROM part").fetchone()[0] == 0
+    assert db._execute("SELECT COUNT(*) FROM part").fetchone()[0] == 0
 
 
 def test_none_or_empty_supplier_pn_keeps_existing_row():
@@ -291,7 +303,7 @@ def test_supplier_pn_and_library_normalized():
 def test_multi_code_dielectric_stored_and_matched():
     db = _db()
     db.accept_part(_cap("NP0-PART", c=100e-12, diel="C0G/NP0", tol=5.0))
-    assert db.conn.execute("SELECT dielectric FROM capacitor").fetchone()[0] == "C0G, NP0"
+    assert db._execute("SELECT dielectric FROM capacitor").fetchone()[0] == "C0G, NP0"
     kw = dict(nominal=100e-12, tolerance_max_pct=5.0)
     assert _find(db, dielectrics=["NP0"], **kw)
     assert _find(db, dielectrics=["C0G"], **kw)
@@ -308,7 +320,7 @@ def test_package_whitespace_ignored():
 
 def test_record_usage_unknown_part_violates_foreign_key():
     db = _db()
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(integrity_errors()):
         db.record_usage(999, "ECG/ECG.kicad_sch", ["C1"])
 
 
@@ -325,10 +337,10 @@ def test_delete_part_cascades():
     db = _db()
     pid = db.accept_part(_cap())
     db.record_usage(pid, "ECG/ECG.kicad_sch", ["C1"])
-    with db.conn:
-        db.conn.execute("DELETE FROM part WHERE id = ?", (pid,))
+    with db._tx():
+        db._execute("DELETE FROM part WHERE id = ?", (pid,))
     for table in ("capacitor", "supplier_pn", "usage"):
-        assert db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        assert db._execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
 
 
 def test_accept_is_one_transaction(monkeypatch):
@@ -341,10 +353,11 @@ def test_accept_is_one_transaction(monkeypatch):
     with pytest.raises(RuntimeError):
         db.accept_part(_cap())
     for table in ("part", "capacitor", "supplier_pn"):
-        assert db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        assert db._execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
 
 
 def test_schema_version_mismatch_leaves_file_untouched(tmp_path: Path):
+    sqlite_only()
     path = tmp_path / "parts.sqlite"
     conn = sqlite3.connect(str(path))
     conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -408,11 +421,11 @@ def test_ic_accept_find_round_trip_without_lcsc():
         description="IC REG LINEAR 3.3V 200MA 6DFN",
         datasheet_url="https://x/ldl.pdf",
     )]
-    assert db.conn.execute("SELECT type FROM part").fetchone()[0] == "ic"
-    assert db.conn.execute("SELECT package, pins FROM ic").fetchone() == (
+    assert db._execute("SELECT type FROM part").fetchone()[0] == "ic"
+    assert db._execute("SELECT package, pins FROM ic").fetchone() == (
         "6-WDFN Exposed Pad", 6)
     # No LCSC row for a part JLCPCB does not stock.
-    assert [r[0] for r in db.conn.execute("SELECT supplier FROM supplier_pn")] == [
+    assert [r[0] for r in db._execute("SELECT supplier FROM supplier_pn")] == [
         "digikey"]
 
 
@@ -485,8 +498,8 @@ def test_ic_upsert_updates_and_keeps_unnamed_supplier_rows():
     db = _db()
     pid = db.accept_part(_ic(lcsc="C1", lib="basic"))
     assert db.accept_part(_ic(" ldl212pv33r ", pins=None, case="", lcsc=None)) == pid
-    assert db.conn.execute("SELECT COUNT(*) FROM part").fetchone()[0] == 1
-    assert db.conn.execute("SELECT COUNT(*) FROM ic").fetchone()[0] == 1
+    assert db._execute("SELECT COUNT(*) FROM part").fetchone()[0] == 1
+    assert db._execute("SELECT COUNT(*) FROM ic").fetchone()[0] == 1
     h = db.find_ics("LDL212PV33R")[0]
     assert (h.pins, h.package_case) == (None, "")
     assert (h.digikey_pn, h.lcsc) == ("497-19548-1-ND", "C1")
@@ -507,10 +520,10 @@ def test_type_change_moves_parameter_row():
     db = _db()
     pid = db.accept_part(_cap("SAME", manufacturer="X", dk=None, lcsc=None))
     assert db.accept_part(_ic("SAME", manufacturer="X", dk=None)) == pid
-    assert db.conn.execute("SELECT COUNT(*) FROM capacitor").fetchone()[0] == 0
+    assert db._execute("SELECT COUNT(*) FROM capacitor").fetchone()[0] == 0
     assert db.find_ics("SAME")[0].part_id == pid
     assert db.accept_part(_cap("SAME", manufacturer="X", dk=None, lcsc=None)) == pid
-    assert db.conn.execute("SELECT COUNT(*) FROM ic").fetchone()[0] == 0
+    assert db._execute("SELECT COUNT(*) FROM ic").fetchone()[0] == 0
     assert db.find_ics("SAME") == []
     assert [h.part_id for h in _find(db)] == [pid]
 
@@ -519,17 +532,17 @@ def test_ic_empty_mpn_raises():
     db = _db()
     with pytest.raises(ValueError):
         db.accept_part(_ic(" "))
-    assert db.conn.execute("SELECT COUNT(*) FROM part").fetchone()[0] == 0
+    assert db._execute("SELECT COUNT(*) FROM part").fetchone()[0] == 0
 
 
 def test_delete_ic_cascades():
     db = _db()
     pid = db.accept_part(_ic())
     db.record_usage(pid, "ECG/ECG.kicad_sch", ["U2"])
-    with db.conn:
-        db.conn.execute("DELETE FROM part WHERE id = ?", (pid,))
+    with db._tx():
+        db._execute("DELETE FROM part WHERE id = ?", (pid,))
     for table in ("ic", "supplier_pn", "usage"):
-        assert db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        assert db._execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] == 0
 
 
 # The version-1 schema exactly as shipped (no ic table).
@@ -611,13 +624,14 @@ def _v1_file(path: Path) -> dict:
 
 
 def test_migrates_version_1_file_keeping_rows(tmp_path: Path):
+    sqlite_only()
     path = tmp_path / "parts.sqlite"
     before = _v1_file(path)
     db = PartsDb(path, now=lambda: STAMP)
-    assert db.conn.execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "2"
+    assert db._execute(
+        'SELECT value FROM meta WHERE "key" = \'schema_version\'').fetchone()[0] == "2"
     for table, rows in before.items():
-        assert sorted(db.conn.execute(f"SELECT * FROM {table}").fetchall()) == rows
+        assert sorted(db._execute(f"SELECT * FROM {table}").fetchall()) == rows
     # Version-1 parts still found as before; the rejected one still excluded.
     hits = _find(db)
     assert [h.part_id for h in hits] == [1]
@@ -636,6 +650,7 @@ def test_migrates_version_1_file_keeping_rows(tmp_path: Path):
 
 
 def test_migration_failure_leaves_version_1_file(tmp_path: Path, monkeypatch):
+    sqlite_only()
     import kicadtools.partsdb as partsdb
 
     path = tmp_path / "parts.sqlite"
@@ -647,7 +662,7 @@ def test_migration_failure_leaves_version_1_file(tmp_path: Path, monkeypatch):
         PartsDb(path)
     conn = sqlite3.connect(str(path))
     assert conn.execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
+        'SELECT value FROM meta WHERE "key" = \'schema_version\'').fetchone()[0] == "1"
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert "ic" not in tables

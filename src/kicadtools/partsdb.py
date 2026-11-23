@@ -1,4 +1,6 @@
-"""Local SQLite database of parts accepted (or rejected) for use on the boards.
+"""Database of parts accepted (or rejected) for use on the boards: a SQLite
+file, or the MariaDB server of ``DB_PLAN.md`` (:meth:`PartsDb.connect_mariadb`;
+the SQL that differs between the two is in :class:`_Dialect`).
 
 A part accepted in the Cockpit's assign dialog is recorded here with its
 parameters and supplier part numbers, so a later search for the same
@@ -201,6 +203,23 @@ _TABLES: Dict[str, _Table] = {
 _PARAM_TABLES = tuple(t.name for t in _TABLES.values()) + (IC, THT, LED)
 
 
+def _q(name: str) -> str:
+    """*name* as a quoted identifier: ``key`` and ``usage`` are reserved
+    words in MariaDB. Both engines read double quotes as an identifier
+    (MariaDB with ``ANSI_QUOTES``, set by :meth:`_MariaDialect.setup`)."""
+    return f'"{name}"'
+
+
+def _names(cols: Sequence[str]) -> str:
+    return ", ".join(_q(c) for c in cols)
+
+
+def _insert(table: str, cols: Sequence[str]) -> str:
+    """``INSERT INTO "t"("a", "b") VALUES (?, ?)``."""
+    return (f"INSERT INTO {_q(table)}({_names(cols)})"
+            f" VALUES ({', '.join('?' * len(cols))})")
+
+
 class _Dialect:
     """The SQL that differs between database engines, for SQLite
     (``DB_PLAN.md`` step 1; MariaDB is step 2). Statements elsewhere are
@@ -219,17 +238,14 @@ class _Dialect:
         """Insert a row of *cols*, or update the row whose *keys* match:
         every column of *cols* not in *keys* is set from the new row, and a
         column not in *cols* keeps its value."""
-        head = (f"INSERT INTO {table}({', '.join(cols)})"
-                f" VALUES ({', '.join('?' * len(cols))})")
         updates = [c for c in cols if c not in keys]
-        tail = (" DO UPDATE SET " + ", ".join(f"{c} = excluded.{c}" for c in updates)
+        tail = (" DO UPDATE SET " + ", ".join(f"{_q(c)} = excluded.{_q(c)}" for c in updates)
                 if updates else " DO NOTHING")
-        return f"{head} ON CONFLICT({', '.join(keys)}){tail}"
+        return f"{_insert(table, cols)} ON CONFLICT({_names(keys)}){tail}"
 
     def insert_ignore(self, table: str, cols: Sequence[str]) -> str:
         """Insert a row of *cols* unless one with the same key exists."""
-        return (f"INSERT OR IGNORE INTO {table}({', '.join(cols)})"
-                f" VALUES ({', '.join('?' * len(cols))})")
+        return "INSERT OR IGNORE" + _insert(table, cols)[len("INSERT"):]
 
     def has_table(self) -> str:
         """A query giving a row when the table named by its one parameter
@@ -247,6 +263,141 @@ class _Dialect:
 
 
 SQLITE = _Dialect()
+
+
+# The MariaDB schema (DB_PLAN.md step 2): the SQLite schema's tables and
+# columns with MariaDB types. Text in a key or index is VARCHAR (an index
+# needs a length). Tables compare text as bytes (utf8mb4_bin), as SQLite
+# does; mpn and manufacturer ignore case (utf8mb4_unicode_ci), as SQLite's
+# COLLATE NOCASE does, and that collation ignores accents too. Strict mode
+# makes a value longer than its column an error.
+_TABLE_OPTS = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
+_CI = "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+_FK = "FOREIGN KEY (part_id) REFERENCES part(id) ON DELETE CASCADE"
+_MARIA_SCHEMA = [
+    'CREATE TABLE IF NOT EXISTS meta ("key" VARCHAR(64) PRIMARY KEY, value TEXT)' + _TABLE_OPTS,
+    'CREATE TABLE IF NOT EXISTS settings ("key" VARCHAR(128) PRIMARY KEY, value TEXT)'
+    + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS part (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  mpn           VARCHAR(128) {_CI} NOT NULL,
+  manufacturer  VARCHAR(128) {_CI} NOT NULL,
+  type          VARCHAR(16) NOT NULL,
+  package       VARCHAR(128) NOT NULL,
+  description   TEXT,
+  datasheet_url TEXT,
+  status        VARCHAR(16) NOT NULL,
+  decided_at    VARCHAR(32) NOT NULL,
+  notes         TEXT,
+  UNIQUE KEY part_mfr_mpn (manufacturer, mpn)
+)""" + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS capacitor (
+  part_id       INT PRIMARY KEY,
+  capacitance_f DOUBLE NOT NULL,
+  voltage_v     DOUBLE NOT NULL,
+  dielectric    VARCHAR(64) NOT NULL,
+  tolerance_pct DOUBLE,
+  {_FK}
+)""" + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS resistor (
+  part_id        INT PRIMARY KEY,
+  resistance_ohm DOUBLE NOT NULL,
+  power_w        DOUBLE,
+  tolerance_pct  DOUBLE,
+  {_FK}
+)""" + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS inductor (
+  part_id        INT PRIMARY KEY,
+  inductance_h   DOUBLE NOT NULL,
+  current_a      DOUBLE,
+  shielding      VARCHAR(32) NOT NULL,
+  tolerance_pct  DOUBLE,
+  {_FK}
+)""" + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS ic (
+  part_id       INT PRIMARY KEY,
+  package       VARCHAR(128),
+  pins          INT,
+  {_FK}
+)""" + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS tht (
+  part_id       INT PRIMARY KEY,
+  family        VARCHAR(32) NOT NULL,
+  signature     VARCHAR(255) NOT NULL,
+  value_key     VARCHAR(128) NOT NULL DEFAULT '',
+  footprint     VARCHAR(255) NOT NULL DEFAULT '',
+  positions     INT,
+  KEY tht_signature (signature, value_key),
+  {_FK}
+)""" + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS led (
+  part_id       INT PRIMARY KEY,
+  color         VARCHAR(32) NOT NULL DEFAULT '',
+  dominant_nm   DOUBLE,
+  peak_nm       DOUBLE,
+  intensity_mcd DOUBLE,
+  vf_v          DOUBLE,
+  lens          VARCHAR(16),
+  {_FK}
+)""" + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS supplier_pn (
+  part_id       INT NOT NULL,
+  supplier      VARCHAR(16) NOT NULL,
+  pn            VARCHAR(100) NOT NULL,
+  packaging     VARCHAR(32),
+  jlc_library   VARCHAR(16),
+  verified_at   VARCHAR(32) NOT NULL,
+  PRIMARY KEY (supplier, pn),
+  {_FK}
+)""" + _TABLE_OPTS,
+    f"""CREATE TABLE IF NOT EXISTS "usage" (
+  part_id       INT NOT NULL,
+  board         VARCHAR(255) NOT NULL,
+  reference     VARCHAR(32) NOT NULL,
+  used_at       VARCHAR(32) NOT NULL,
+  PRIMARY KEY (part_id, board, reference),
+  {_FK}
+)""" + _TABLE_OPTS,
+]
+
+
+class _MariaDialect(_Dialect):
+    """The MariaDB forms (``DB_PLAN.md`` step 2), through PyMySQL."""
+
+    name = "mariadb"
+
+    def sql(self, text: str) -> str:
+        """``?`` placeholders as PyMySQL's ``%s``; a literal ``%`` doubled."""
+        return text.replace("%", "%%").replace("?", "%s")
+
+    def upsert(self, table: str, cols: Sequence[str], keys: Sequence[str]) -> str:
+        """As :meth:`_Dialect.upsert`, with ``ON DUPLICATE KEY UPDATE``. Not
+        ``REPLACE``: it deletes the old row first, and ``ON DELETE CASCADE``
+        would delete the part's rows in the other tables with it. Every table
+        upserted here has one unique key, the one named by *keys*."""
+        updates = [c for c in cols if c not in keys]
+        if not updates:
+            return self.insert_ignore(table, cols)
+        sets = ", ".join(f"{_q(c)} = VALUES({_q(c)})" for c in updates)
+        return f"{_insert(table, cols)} ON DUPLICATE KEY UPDATE {sets}"
+
+    def insert_ignore(self, table: str, cols: Sequence[str]) -> str:
+        return "INSERT IGNORE" + _insert(table, cols)[len("INSERT"):]
+
+    def has_table(self) -> str:
+        return ("SELECT 1 FROM information_schema.tables"
+                " WHERE table_schema = DATABASE() AND table_name = ?")
+
+    def schema(self) -> List[str]:
+        return list(_MARIA_SCHEMA)
+
+    def setup(self, conn: Any) -> None:
+        """Double quotes name identifiers (``ANSI_QUOTES``), as in SQLite."""
+        with conn.cursor() as cur:
+            cur.execute("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')")
+
+
+MARIADB = _MariaDialect()
 
 
 def _table(kind: str) -> _Table:
@@ -505,20 +656,27 @@ class PartsDb:
         path: Path | str = ":memory:",
         *,
         now: Optional[Callable[[], str]] = None,
+        _conn: Any = None,
+        _dialect: Optional[_Dialect] = None,
     ) -> None:
-        if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._now = now or _utc_now
         self._lock = threading.RLock()
-        # check_same_thread=False: the GUI opens the database on the main
-        # thread and searches it on a worker thread; self._lock serializes use.
-        self._dialect = SQLITE
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._dialect = _dialect or SQLITE
+        self.label = str(path)
+        if _conn is not None:
+            self.conn = _conn
+        else:
+            if str(path) != ":memory:":
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+            # check_same_thread=False: the GUI opens the database on the main
+            # thread and searches it on a worker thread; self._lock serializes use.
+            self.conn = sqlite3.connect(str(path), check_same_thread=False)
         try:
             self._dialect.setup(self.conn)
             # The version is checked before the schema is applied, so a file of
             # another version is refused without tables added to it.
-            if self._stored_version() == str(_MIGRATABLE_VERSION):
+            if (self._dialect is SQLITE
+                    and self._stored_version() == str(_MIGRATABLE_VERSION)):
                 self._migrate_v1()
             self._check_version(path)
             with self._tx():
@@ -555,13 +713,35 @@ class PartsDb:
                 raise
             self.conn.commit()
 
+    @classmethod
+    def connect_mariadb(cls, *, host: str, port: int, user: str, password: str,
+                        database: str, now: Optional[Callable[[], str]] = None,
+                        connect_timeout: int = 10) -> "PartsDb":
+        """The parts database in MariaDB *database* (``DB_PLAN.md``): the same
+        tables and methods as a SQLite file. Needs PyMySQL (``pip install
+        kicadtools[server]``). The tables are created when missing and the
+        schema version checked, as for a file. Raises
+        :class:`pymysql.err.OperationalError` when the login fails."""
+        import pymysql
+
+        conn = pymysql.connect(host=host, port=int(port), user=user, password=password,
+                               database=database, charset="utf8mb4", autocommit=False,
+                               connect_timeout=connect_timeout)
+        return cls(f"{user}@{host}:{port}/{database}", now=now, _conn=conn,
+                   _dialect=MARIADB)
+
+    @property
+    def backend(self) -> str:
+        """``"sqlite"`` or ``"mariadb"``."""
+        return self._dialect.name
+
     def _stored_version(self) -> Optional[str]:
         """``meta.schema_version`` of the open database; ``None`` for a new
         one (no ``meta`` table, or no version row in it)."""
         if not self._execute(self._dialect.has_table(), ("meta",)).fetchone():
             return None
         row = self._execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            'SELECT value FROM meta WHERE "key" = \'schema_version\'').fetchone()
         return None if row is None else row[0]
 
     def _check_version(self, path: Path | str) -> None:
@@ -769,7 +949,7 @@ class PartsDb:
             "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS lcsc,"
             " (SELECT jlc_library FROM supplier_pn WHERE part_id = p.id"
             "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS jlc_library,"
-            " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
+            ' (SELECT COUNT(*) FROM "usage" WHERE part_id = p.id) AS usage_count'
             f" FROM part p JOIN {table.name} c ON c.part_id = p.id"
             " WHERE p.status = ?"
             + ("" if by_body else " AND p.package = ?")
@@ -829,7 +1009,7 @@ class PartsDb:
             "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS lcsc,"
             " (SELECT jlc_library FROM supplier_pn WHERE part_id = p.id"
             "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS jlc_library,"
-            " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
+            ' (SELECT COUNT(*) FROM "usage" WHERE part_id = p.id) AS usage_count'
             " FROM part p JOIN ic i ON i.part_id = p.id"
             " WHERE p.status = ? AND p.type = ?"
             " ORDER BY usage_count DESC,"
@@ -866,7 +1046,7 @@ class PartsDb:
             " t.positions,"
             " (SELECT pn FROM supplier_pn WHERE part_id = p.id"
             "   AND supplier = 'digikey' ORDER BY pn LIMIT 1),"
-            " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
+            ' (SELECT COUNT(*) FROM "usage" WHERE part_id = p.id) AS usage_count'
             " FROM part p JOIN tht t ON t.part_id = p.id"
             " WHERE p.status = ? AND p.type = ? AND t.signature = ? AND t.value_key = ?"
             " ORDER BY usage_count DESC, p.decided_at DESC, p.mpn"
@@ -901,7 +1081,7 @@ class PartsDb:
             "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1),"
             " (SELECT jlc_library FROM supplier_pn WHERE part_id = p.id"
             "   AND supplier = 'lcsc' ORDER BY pn LIMIT 1) AS lib,"
-            " (SELECT COUNT(*) FROM usage WHERE part_id = p.id) AS usage_count"
+            ' (SELECT COUNT(*) FROM "usage" WHERE part_id = p.id) AS usage_count'
             " FROM part p JOIN led l ON l.part_id = p.id"
             " WHERE p.status = ? AND p.type = ? AND p.package = ?"
             " ORDER BY usage_count DESC, (lib = 'basic') DESC, p.decided_at DESC"
@@ -939,7 +1119,7 @@ class PartsDb:
         """The stored value of setting *key*, or ``None``."""
         with self._lock:
             row = self._execute(
-                "SELECT value FROM settings WHERE key = ?", (key,)
+                'SELECT value FROM settings WHERE "key" = ?', (key,)
             ).fetchone()
         return row[0] if row else None
 
@@ -953,7 +1133,7 @@ class PartsDb:
         """Every stored setting as ``{key: value}``."""
         with self._lock:
             return {k: v for k, v in self._execute(
-                "SELECT key, value FROM settings").fetchall()}
+                'SELECT "key", value FROM settings').fetchall()}
 
     def close(self) -> None:
         """Close the connection; the object is unusable afterwards."""

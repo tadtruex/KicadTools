@@ -4,18 +4,28 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from kicadtools.headersearch import HeaderRun
 from kicadtools.namedsearch import find_named_candidates
 from kicadtools.partsdb import IcChoice, PartsDb, ThtChoice
 from kicadtools.suppliers import DigiKeyProduct
 from kicadtools.thtdb import db_key, signature_key, stored_candidates, tht_choice, value_key
 from kicadtools.thtfootprint import parse_signature
+from tests.dbbackends import BACKENDS, new_db, sqlite_only, use_backend
 
 H1x04 = parse_signature("Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical")
 H1x04_OTHER_LIB = parse_signature("MyLib:PinHeader_1x04_P2.54mm_Vertical")
 H1x04_RA = parse_signature("Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Horizontal")
 JST = parse_signature("Connector_JST:JST_PH_S3B-PH-K_1x03_P2.00mm_Horizontal")
 POT = parse_signature("Potentiometer_THT:Potentiometer_Bourns_3386P_Vertical")
+
+
+@pytest.fixture(autouse=True, params=BACKENDS)
+def backend(request):
+    """Every test runs on SQLite, and on MariaDB when one is configured
+    (tests/dbbackends.py)."""
+    yield from use_backend(request.param)
 
 
 def _p(mpn, stock=10000, status="Active", maker="Sullins Connector Solutions", **params):
@@ -82,7 +92,7 @@ def test_tht_choice_from_product():
 
 
 def test_accept_find_round_trip_and_usage_order():
-    db = PartsDb()
+    db = new_db()
     a = _accept(db, _p("PREC004SAAN-RC"), H1x04)
     b = _accept(db, _p("TSW-104-07-T-S", maker="Samtec Inc."), H1x04)
     db.record_usage(b, "BarrelJackAdapter.kicad_sch", ["J2", "J4"])
@@ -94,34 +104,35 @@ def test_accept_find_round_trip_and_usage_order():
 
 
 def test_value_key_separates_named_parts():
-    db = PartsDb()
+    db = new_db()
     _accept(db, _p("3386P-1-204LF", maker="Bourns Inc."), POT, "200K")
     assert [r.mpn for r in db.find_tht(*db_key(POT, "200K"))] == ["3386P-1-204LF"]
     assert db.find_tht(*db_key(POT, "10K")) == []
 
 
 def test_rejected_is_not_found():
-    db = PartsDb()
+    db = new_db()
     db.reject_part(tht_choice(_p("PREC004SAAN-RC"), H1x04, ""))
     assert db.find_tht(*db_key(H1x04, "")) == []
     assert db.is_rejected("Sullins Connector Solutions", "PREC004SAAN-RC")
 
 
 def test_type_change_keeps_one_parameter_row():
-    db = PartsDb()
+    db = new_db()
     pid = _accept(db, _p("X-1"), H1x04)
     db.accept_part(IcChoice(mpn="X-1", manufacturer="Sullins Connector Solutions"))
-    assert db.conn.execute("SELECT COUNT(*) FROM tht WHERE part_id = ?", (pid,)).fetchone()[0] == 0
+    assert db._execute("SELECT COUNT(*) FROM tht WHERE part_id = ?", (pid,)).fetchone()[0] == 0
     assert db.find_tht(*db_key(H1x04, "")) == []
 
 
 def test_choice_needs_a_signature():
     import pytest
     with pytest.raises(ValueError):
-        PartsDb().accept_part(ThtChoice(mpn="A", manufacturer="B", family="header", signature=""))
+        new_db().accept_part(ThtChoice(mpn="A", manufacturer="B", family="header", signature=""))
 
 
 def test_existing_file_gains_the_table(tmp_path: Path):
+    sqlite_only()
     path = tmp_path / "parts.sqlite"
     PartsDb(path).close()
     conn = sqlite3.connect(path)
@@ -137,7 +148,7 @@ def test_existing_file_gains_the_table(tmp_path: Path):
 
 
 def test_stored_candidates_are_refreshed_and_checked():
-    db = PartsDb()
+    db = new_db()
     _accept(db, _p("PREC004SAAN-RC"), H1x04)
     _accept(db, _p("OLD-4"), H1x04)
     _accept(db, _p("GONE-4"), H1x04)
@@ -149,7 +160,7 @@ def test_stored_candidates_are_refreshed_and_checked():
 
 
 def test_named_search_offers_the_stored_part_without_searching():
-    db = PartsDb()
+    db = new_db()
     _accept(db, _p("S3B-PH-K-S", maker="JST Sales America Inc."), JST, "I2C_Conn")
     dk = FakeDigiKey([_p("S3B-PH-K-S", maker="JST Sales America Inc.")])
     r = find_named_candidates(JST, {"Value": "I2C_Conn"}, digikey=dk, needed=5, db=db)
@@ -158,7 +169,7 @@ def test_named_search_offers_the_stored_part_without_searching():
 
 
 def test_named_search_runs_when_the_stored_part_fails_and_skips_rejected():
-    db = PartsDb()
+    db = new_db()
     _accept(db, _p("S3B-PH-K-S"), JST, "I2C_Conn")
     db.reject_part(tht_choice(_p("S3B-PH-K-K"), JST, "I2C_Conn"))
     hits = [_p("S3B-PH-K-S"), _p("S3B-PH-K-K"), _p("S3B-PH-K-E")]
@@ -172,7 +183,7 @@ def test_named_search_runs_when_the_stored_part_fails_and_skips_rejected():
 
 
 def test_header_run_offers_the_stored_part_without_searching():
-    db = PartsDb()
+    db = new_db()
     _accept(db, _p("PREC004SAAN-RC"), H1x04)
     dk = FakeDigiKey([_p("PREC004SAAN-RC")])
     r = HeaderRun(dk, db=db).search(H1x04, needed=5)
@@ -181,7 +192,7 @@ def test_header_run_offers_the_stored_part_without_searching():
 
 
 def test_header_run_leaves_rejected_parts_out():
-    db = PartsDb()
+    db = new_db()
     db.reject_part(tht_choice(_p("CHEAP-4"), H1x04, ""))
     dk = FakeDigiKey(search={"category": [_p("CHEAP-4"), _p("PREC004SAAN-RC")]})
     r = HeaderRun(dk, db=db).search(H1x04, needed=5)
