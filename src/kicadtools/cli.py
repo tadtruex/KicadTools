@@ -517,6 +517,52 @@ def _write_report(path, records, resolutions) -> None:
             })
 
 
+def _db_import(args) -> int:
+    """``kicadtools db import``: the one-time copy of the local parts file and
+    the CPL rotation overrides into the empty server (DB_PLAN.md step 5)."""
+    from kicadtools import partsdb
+    from kicadtools.dbconfig import MARIADB, ConfigError, PasswordCancelled, load_config, terminal_ask
+    from kicadtools.dbconnect import open_parts_db
+    from kicadtools.dbimport import DbImportError, import_parts, imported_name
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if config.backend != MARIADB:
+        print(f"error: the configuration ({config.source}) names no server; set "
+              "[parts_db] backend = \"mariadb\" in ~/.kicadtools/config.toml",
+              file=sys.stderr)
+        return 2
+    source = Path(args.source).expanduser() if args.source else partsdb.default_path()
+    cache = Path(args.cache).expanduser()
+    rotations = PartRotationStore(cache).all() if cache.exists() else {}
+    try:
+        session = open_parts_db(config, terminal_ask)
+    except PasswordCancelled:
+        print("cancelled", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - TunnelError, PyMySQL errors: reported
+        print(f"error: could not open {config.label}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        report = import_parts(source, session.db, rotations, dry_run=args.dry_run)
+    except DbImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+    print(f"{source} -> {config.label}" + (" (dry run: rolled back)" if args.dry_run else ""))
+    for line in report.lines():
+        print("  " + line)
+    if not args.dry_run:
+        target = imported_name(source)
+        source.rename(target)
+        print(f"renamed {source.name} to {target.name}; the server is now the parts database")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="kicadtools",
@@ -678,6 +724,21 @@ def main(argv=None) -> int:
         help=f"SQLite store of per-LCSC rotation overrides (default: {_DEFAULT_CACHE})",
     )
     cpl.set_defaults(func=_export_cpl)
+
+    db = sub.add_parser("db", help="The parts database on the server (DB_PLAN.md)")
+    db_sub = db.add_subparsers(dest="db_command", required=True)
+    imp = db_sub.add_parser(
+        "import",
+        help="Copy the local parts database and rotation overrides into the empty server, once",
+    )
+    imp.add_argument("--from", dest="source", default=None,
+                     help="the SQLite parts file (default: ~/Code/Boards/parts.sqlite)")
+    imp.add_argument("--cache", default=str(_DEFAULT_CACHE),
+                     help="the cache holding the CPL rotation overrides "
+                          "(default: ~/.kicadtools/lcsc_cache.sqlite)")
+    imp.add_argument("--dry-run", action="store_true",
+                     help="copy and compare, then roll back; the local file is not renamed")
+    imp.set_defaults(func=_db_import)
 
     args = parser.parse_args(argv)
     return args.func(args)

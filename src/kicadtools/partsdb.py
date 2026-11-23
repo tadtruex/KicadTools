@@ -178,6 +178,13 @@ CREATE TABLE IF NOT EXISTS usage (
   used_at       TEXT NOT NULL,
   PRIMARY KEY (part_id, board, reference)
 );
+-- CPL rotation overrides by LCSC number, degrees CCW added to the family
+-- offset (kicadtools.partrotation, DB_PLAN.md step 5). Only non-zero
+-- offsets are stored.
+CREATE TABLE IF NOT EXISTS part_rotation (
+  lcsc          TEXT PRIMARY KEY,
+  degrees       REAL NOT NULL
+);
 """
 
 
@@ -357,6 +364,10 @@ _MARIA_SCHEMA = [
   used_at       VARCHAR(32) NOT NULL,
   PRIMARY KEY (part_id, board, reference),
   {_FK}
+)""" + _TABLE_OPTS,
+    """CREATE TABLE IF NOT EXISTS part_rotation (
+  lcsc          VARCHAR(32) PRIMARY KEY,
+  degrees       DOUBLE NOT NULL
 )""" + _TABLE_OPTS,
 ]
 
@@ -700,6 +711,12 @@ class PartsDb:
     def _executemany(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
         cur = self.conn.cursor()
         cur.executemany(self._dialect.sql(sql), [tuple(r) for r in rows])
+
+    def _insert_rows(self, table: str, cols: Sequence[str],
+                     rows: Sequence[Sequence[Any]]) -> None:
+        """Insert *rows* of *cols* into *table* as given (ids included),
+        inside the caller's transaction: the import of ``kicadtools.dbimport``."""
+        self._executemany(_insert(table, cols), rows)
 
     @contextmanager
     def _tx(self) -> Iterator[None]:
@@ -1124,6 +1141,37 @@ class PartsDb:
                                      ("part_id", "board", "reference")),
                 [(part_id, board, ref, stamp) for ref in references],
             )
+
+    # ----- CPL rotation overrides -------------------------------------------
+    # The interface of kicadtools.partrotation.PartRotationStore, so the
+    # LCSC tab and the CPL export read the overrides from this database.
+
+    def rotation(self, lcsc: str) -> Optional[float]:
+        """The extra rotation stored for *lcsc*, or ``None``."""
+        if not lcsc:
+            return None
+        with self._lock:
+            row = self._execute("SELECT degrees FROM part_rotation WHERE lcsc = ?",
+                                (lcsc,)).fetchone()
+        return float(row[0]) if row else None
+
+    def set_rotation(self, lcsc: str, degrees: float) -> None:
+        """Store *degrees* (mod 360) for *lcsc*; zero removes the entry."""
+        if not lcsc:
+            return
+        normalized = float(degrees) % 360.0
+        with self._tx():
+            if normalized == 0.0:
+                self._execute("DELETE FROM part_rotation WHERE lcsc = ?", (lcsc,))
+            else:
+                self._execute(self._dialect.upsert("part_rotation", ("lcsc", "degrees"),
+                                                   ("lcsc",)), (lcsc, normalized))
+
+    def rotations(self) -> Dict[str, float]:
+        """Every stored override as ``{lcsc: degrees}``."""
+        with self._lock:
+            return {lcsc: float(deg) for lcsc, deg in self._execute(
+                "SELECT lcsc, degrees FROM part_rotation").fetchall()}
 
     # ----- settings --------------------------------------------------------
 

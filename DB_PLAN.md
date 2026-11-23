@@ -11,7 +11,7 @@ Local copies exist only as backups and as the read-only offline copy
 (decision 1); nothing is ever written to them by the Cockpit except a fresh
 download.
 
-Status (2026-11-23): steps 1–4 built. Steps 5–9 not started.
+Status (2026-11-23): steps 1–5 built; the real import (step 5) not yet run. Steps 6–9 not started.
 
 ## What was checked (2026-11-23)
 
@@ -233,6 +233,20 @@ step that runs in one transaction, as the version-1 → 2 step does now.
    After it runs, `parts.sqlite` is renamed `parts.sqlite.imported` so no
    tool opens it again by mistake. There is no ongoing push: every later
    change is written to the server when it is made.
+
+   Built: `kicadtools/dbimport.py` (`import_parts`), `kicadtools/dbconnect.py`
+   (`open_parts_db`: tunnel, password, connection; the Cockpit uses it in
+   step 6) and `kicadtools db import [--from PATH] [--cache PATH]
+   [--dry-run]`. The rotation overrides have a `part_rotation` table in the
+   parts database on both engines, with `PartsDb.rotation`, `set_rotation`
+   and `rotations`. After the copy every table is read back and compared
+   row by row; a difference, or a value the server's columns refuse, rolls
+   everything back. Tests on SQLite and MariaDB. Dry run against
+   `tadtruex_inventory` (2026-11-23): every table's server count matched the
+   local one (47 parts, 83 supplier numbers, 121 usage rows, 11 settings,
+   1 rotation), rolled back; the server's tables were created and are empty.
+   The real import is run when step 6 is in, so the Cockpit never opens a
+   new empty local file after `parts.sqlite` is renamed.
 6. **Cockpit.** Open the server; the status bar names it (`parts DB:
    tadtruex_inventory (server)`); the offline behaviour of decision 1; the
    rotation store on the same backend.
