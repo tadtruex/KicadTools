@@ -112,6 +112,7 @@ from kicadtools.naturalsort import natural_key
 from kicadtools.partrotation import DbRotationStore, PartRotationStore
 from kicadtools.dbconfig import (MARIADB, ConfigError, PasswordCancelled, is_auth_error,
                                  load_config, newest_backup)
+from kicadtools.dbbackup import backup_now
 from kicadtools.dbconnect import open_parts_db
 from kicadtools.dbtunnel import askpass_script
 from kicadtools.gui.db_password import dialog_ask
@@ -225,6 +226,7 @@ class MainWindow(QMainWindow):
         self._offline_copy: Optional[Path] = None
         self._askpass_path: Optional[Path] = None
         self._title_base = "BOM Cockpit"
+        self._backup_note = ""
 
         tabs = QTabWidget()
         tabs.addTab(self._build_intent_tab(), "Intents")
@@ -246,7 +248,8 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._db_label)
         self._refresh_digikey()
         self._open_database()
-        self.statusBar().showMessage("Open a schematic to begin.")
+        self.statusBar().showMessage(" ".join(
+            m for m in (self._backup_note, "Open a schematic to begin.") if m))
 
         if schematic:
             self._open_path(Path(schematic))
@@ -1627,6 +1630,12 @@ class MainWindow(QMainWindow):
         self._db_session, self._parts_db = session, session.db
         self._offline, self._offline_copy = "", None
         self._apply_db_state()
+        # The backup that is the offline copy next time (DB_PLAN.md step 7).
+        try:
+            path = backup_now(session.db)
+            self._backup_note = f"Backed up the parts database to {path.name}."
+        except Exception as exc:  # noqa: BLE001 - a failed backup blocks nothing
+            self._backup_note = f"Parts database backup failed: {exc}"
 
     def _go_offline(self, reason: str) -> None:
         """Open the newest backup read-only, or none, and say so."""

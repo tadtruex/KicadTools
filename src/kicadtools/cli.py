@@ -551,6 +551,45 @@ def _server_rotations(ref_to_lcsc):
         session.close()
 
 
+def _db_pull(args) -> int:
+    """``kicadtools db pull [PATH]``: write the server's parts database to a
+    SQLite file, by default a dated backup in ~/.kicadtools/backups
+    (DB_PLAN.md step 7)."""
+    from kicadtools.dbbackup import backup_now, pull
+    from kicadtools.dbconfig import MARIADB, ConfigError, PasswordCancelled, load_config, terminal_ask
+    from kicadtools.dbconnect import open_parts_db
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if config.backend != MARIADB:
+        print(f"error: the configuration ({config.source}) names no server", file=sys.stderr)
+        return 2
+    try:
+        session = open_parts_db(config, terminal_ask)
+    except PasswordCancelled:
+        print("cancelled", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - TunnelError, PyMySQL errors: reported
+        print(f"error: could not open {config.label}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        if args.path:
+            target = Path(args.path).expanduser()
+            counts = pull(session.db, target)
+        else:
+            target = backup_now(session.db)
+            counts = None
+    finally:
+        session.close()
+    print(f"{config.label} -> {target}")
+    if counts is not None:
+        print("  " + ", ".join(f"{t} {n}" for t, n in counts.items()))
+    return 0
+
+
 def _db_import(args) -> int:
     """``kicadtools db import``: the one-time copy of the local parts file and
     the CPL rotation overrides into the empty server (DB_PLAN.md step 5)."""
@@ -773,6 +812,12 @@ def main(argv=None) -> int:
     imp.add_argument("--dry-run", action="store_true",
                      help="copy and compare, then roll back; the local file is not renamed")
     imp.set_defaults(func=_db_import)
+    pull_cmd = db_sub.add_parser(
+        "pull", help="Write the server's parts database to a SQLite file (a backup)")
+    pull_cmd.add_argument("path", nargs="?", default=None,
+                          help="the file to write (default: a dated backup in "
+                               "~/.kicadtools/backups, keeping the newest 10)")
+    pull_cmd.set_defaults(func=_db_pull)
 
     args = parser.parse_args(argv)
     return args.func(args)

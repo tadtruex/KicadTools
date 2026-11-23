@@ -770,6 +770,10 @@ user = "tadtruex"
   `[OFFLINE]`; Accept, Reject, Autopopulate and rotation changes are off.
   A connection lost during a session switches to the same state. With no
   backup, stored parts cannot be searched.
+- **Backups.** Each start on the server writes
+  `~/.kicadtools/backups/parts-<date>-<time>.sqlite` (the newest 10 are
+  kept); the newest is the offline copy. `kicadtools db pull [PATH]` writes
+  one on demand.
 - **Status bar.** The right-hand label names the database (`parts DB:
   tadtruex_inventory (server)`).
 - **Rotations.** The CPL rotation overrides are in the server's

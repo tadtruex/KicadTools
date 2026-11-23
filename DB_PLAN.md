@@ -11,7 +11,7 @@ Local copies exist only as backups and as the read-only offline copy
 (decision 1); nothing is ever written to them by the Cockpit except a fresh
 download.
 
-Status (2026-11-23): steps 1–6 built; the real import (step 5) not yet run. Steps 7–9 not started.
+Status (2026-11-23): steps 1–7 built; the real import (step 5) not yet run. Steps 8–9 not started.
 
 ## What was checked (2026-11-23)
 
@@ -275,6 +275,17 @@ step that runs in one transaction, as the version-1 → 2 step does now.
    start into `~/.kicadtools/backups/parts-<date>.sqlite`, keeping the last
    10; the newest is the offline copy. Reclaim also keeps its own backups of
    the account.
+
+   Built: `kicadtools/dbbackup.py`. `pull(db, path)` reads every table in
+   one transaction (one consistent snapshot on InnoDB), writes a new SQLite
+   file under a `.partial` name and renames it when complete.
+   `backup_now(db)` writes `parts-YYYY-MM-DD-HHMMSS.sqlite` (the time added,
+   so several starts a day each keep theirs) and keeps the newest 10. The
+   Cockpit runs it after each successful start on the server (and after a
+   Retry that connects) and says so in the status bar; a failed backup is
+   reported there and blocks nothing. `kicadtools db pull [PATH]`. Tests on
+   SQLite and MariaDB; a live pull from `tadtruex_inventory_test` gave a
+   readable version-2 file.
 8. **Second machine.** Install on the Linux box, run the Cockpit against
    the server (SSH password prompt first, then a key if wanted), and check
    that a part accepted on one machine is found on the other at once.

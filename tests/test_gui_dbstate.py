@@ -147,6 +147,11 @@ def test_server_online_at_start(cockpit):
         assert win._offline == "" and win._offline_bar.isHidden()
         assert win._parts_db is cockpit.server["db"]
         assert "open_db" in win._worker_db_kwargs()
+        # The start wrote the backup that is the next offline copy.
+        backups = list((cockpit.tmp / ".kicadtools" / "backups").glob("parts-*.sqlite"))
+        assert len(backups) == 1
+        assert win.statusBar().currentMessage().startswith(
+            f"Backed up the parts database to {backups[0].name}.")
     finally:
         win.close()
 
