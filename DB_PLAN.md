@@ -11,7 +11,7 @@ Local copies exist only as backups and as the read-only offline copy
 (decision 1); nothing is ever written to them by the Cockpit except a fresh
 download.
 
-Status (2026-11-23): steps 1–5 built; the real import (step 5) not yet run. Steps 6–9 not started.
+Status (2026-11-23): steps 1–6 built; the real import (step 5) not yet run. Steps 7–9 not started.
 
 ## What was checked (2026-11-23)
 
@@ -250,6 +250,26 @@ step that runs in one transaction, as the version-1 → 2 step does now.
 6. **Cockpit.** Open the server; the status bar names it (`parts DB:
    tadtruex_inventory (server)`); the offline behaviour of decision 1; the
    rotation store on the same backend.
+
+   Built: `MainWindow._open_database` opens the configured database through
+   `dbconnect.open_parts_db` (tunnel with the `gui.askpass` dialog, password
+   with the `gui.db_password` dialog); search workers get their own
+   connection through the same tunnel (`DbSession.connect_again`, passed as
+   `open_db`). Offline (`_go_offline`): the newest
+   `~/.kicadtools/backups/parts-*.sqlite` opened with
+   `PartsDb.open_read_only`, the red bar with the copy's date, the reason
+   and **Retry connection**, `[OFFLINE]` in the title, Autopopulate off,
+   Accept and Reject refused with a message, rotation edits refused; a
+   connection lost while accepting or rejecting switches to it. A server
+   connection idle over 60 s is pinged (and its session settings reapplied
+   after a reconnect) before use. Rotations: `partrotation.DbRotationStore`
+   over the parts database when the configuration names the server, the
+   local cache otherwise; `kicadtools cpl` reads the server's and fails when
+   it cannot be reached. Tests: `tests/test_gui_dbstate.py` (offline with
+   and without a copy, Retry, online, SQLite). Checked live against
+   `tadtruex_inventory_test`: the window opened its own tunnel, a rotation
+   written through the LCSC store was read back by a worker's connection,
+   and quitting closed the tunnel.
 7. **Backups and the offline copy.** `kicadtools db pull [PATH]` writes the
    server's data to a SQLite file. The Cockpit runs it on each successful
    start into `~/.kicadtools/backups/parts-<date>.sqlite`, keeping the last

@@ -72,7 +72,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Union
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Union
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor
@@ -991,6 +991,7 @@ class CandidateWorker(QObject):
         requirement: Optional[PartRequirement],
         needed: int,
         db_path: Path,
+        open_db: Optional[Callable[[], PartsDb]] = None,
         search_suppliers: bool = False,
         cache_path: Optional[Path] = None,
         existing: Optional[ExistingLookup] = None,
@@ -1002,6 +1003,7 @@ class CandidateWorker(QObject):
         self._existing = existing
         self._needed = needed
         self._db_path = db_path
+        self._open_db = open_db
         self._search_suppliers = search_suppliers
         self._cache_path = cache_path
 
@@ -1009,7 +1011,7 @@ class CandidateWorker(QObject):
         db: Optional[PartsDb] = None
         cache: Optional[Cache] = None
         try:
-            db = PartsDb(self._db_path)
+            db = self._open_db() if self._open_db is not None else PartsDb(self._db_path)
             if self._cache_path is not None:
                 self._cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache = Cache(self._cache_path)
@@ -1058,6 +1060,7 @@ class IcCandidateWorker(QObject):
         requirement: Optional[IcRequirement],
         needed: int,
         db_path: Path,
+        open_db: Optional[Callable[[], PartsDb]] = None,
         board: Optional[Path] = None,
         cache_path: Optional[Path] = None,
     ):
@@ -1066,6 +1069,7 @@ class IcCandidateWorker(QObject):
         self._req = requirement
         self._needed = needed
         self._db_path = db_path
+        self._open_db = open_db
         self._board = board
         self._cache_path = cache_path
 
@@ -1073,7 +1077,7 @@ class IcCandidateWorker(QObject):
         db: Optional[PartsDb] = None
         cache: Optional[Cache] = None
         try:
-            db = PartsDb(self._db_path)
+            db = self._open_db() if self._open_db is not None else PartsDb(self._db_path)
             if self._cache_path is not None:
                 self._cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache = Cache(self._cache_path)
@@ -1111,18 +1115,20 @@ class ThtCandidateWorker(QObject):
     failed = Signal(str)
 
     def __init__(self, *, group: ThtGroup, run, needed: int, db_path: Path,
+                 open_db: Optional[Callable[[], PartsDb]] = None,
                  use_stored: bool = True):
         super().__init__()
         self._group = group
         self._run = run
         self._needed = needed
         self._db_path = db_path
+        self._open_db = open_db
         self._use_stored = use_stored
 
     def run(self) -> None:
         db: Optional[PartsDb] = None
         try:
-            db = PartsDb(self._db_path)
+            db = self._open_db() if self._open_db is not None else PartsDb(self._db_path)
             result = assess_tht(self._group, run=self._run, digikey=self._run.client,
                                 db=db, needed=self._needed, use_stored=self._use_stored)
             self.found.emit(result)
@@ -1146,6 +1152,7 @@ class LedCandidateWorker(QObject):
 
     def __init__(self, *, group: LedGroup, defaults: Mapping[str, str],
                  requirement: Optional[LedRequirement], needed: int, db_path: Path,
+                 open_db: Optional[Callable[[], PartsDb]] = None,
                  listing, search_suppliers: bool = False,
                  cache_path: Optional[Path] = None,
                  existing: Optional[LedLookup] = None):
@@ -1155,6 +1162,7 @@ class LedCandidateWorker(QObject):
         self._req = requirement
         self._needed = needed
         self._db_path = db_path
+        self._open_db = open_db
         self._listing = listing
         self._search_suppliers = search_suppliers
         self._cache_path = cache_path
@@ -1164,7 +1172,7 @@ class LedCandidateWorker(QObject):
         db: Optional[PartsDb] = None
         cache: Optional[Cache] = None
         try:
-            db = PartsDb(self._db_path)
+            db = self._open_db() if self._open_db is not None else PartsDb(self._db_path)
             if self._cache_path is not None:
                 self._cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache = Cache(self._cache_path)

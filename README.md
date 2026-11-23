@@ -716,7 +716,9 @@ Double-clicking such a row shows the reason in the status bar.
 
 The parts database is a SQLite file at `~/Code/Boards/parts.sqlite` (the same
 path relative to the home directory on every machine); set
-`KICADTOOLS_PARTS_DB` to use another file. It holds each accepted or rejected
+`KICADTOOLS_PARTS_DB` to use another file. It can instead be the MariaDB
+database on a server, which every machine reads and writes (see **Parts
+database on a server** below). It holds each accepted or rejected
 part with its type, its parameters (capacitors: capacitance, voltage rating,
 dielectric, tolerance; resistors: resistance, power rating, tolerance;
 inductors: inductance, saturation current, shielding, tolerance; ICs:
@@ -735,6 +737,49 @@ The `settings` table holds the remembered defaults under the `cap.*` and
 `res.*` keys in the tables above. A key absent from the table takes the built-in value shown in
 parentheses. Accepting a part overwrites the keys of the fields that came from
 a default or an edit, so the next group starts from the values last used.
+
+#### Parts database on a server
+
+The design is in `DB_PLAN.md`. With `~/.kicadtools/config.toml` naming a
+server, the Cockpit and `kicadtools cpl` use the parts database there, and
+every change is written to it when it is made:
+
+```toml
+[parts_db]
+backend = "mariadb"
+database = "tadtruex_inventory"
+user = "tadtruex_inventory"
+
+[parts_db.ssh]
+host = "tadtruex.host.dartmouth.edu"
+user = "tadtruex"
+# local_port = 3307   # a tunnel you run yourself; omit to let the Cockpit open one
+```
+
+- **Tunnel.** The host accepts MariaDB logins from the server itself only,
+  so the Cockpit opens an SSH tunnel (`ssh -N -L`) on a free local port when
+  it starts and closes it on quit. With an SSH key on the server there is no
+  prompt; without one, ssh asks for the SSH password in a dialog.
+- **Password.** `~/.kicadtools/db_password` (one line, mode `0600`, in no
+  repository); `KICADTOOLS_DB_PASS` overrides it. When the file is missing,
+  or the server refuses it, the Cockpit asks and writes the file.
+- **Offline.** When the server cannot be reached (or the password prompt is
+  cancelled), the newest backup in `~/.kicadtools/backups/` is opened
+  read-only. A red bar across the window says `OFFLINE`, with the copy's date
+  and the reason, and holds **Retry connection**; the title ends
+  `[OFFLINE]`; Accept, Reject, Autopopulate and rotation changes are off.
+  A connection lost during a session switches to the same state. With no
+  backup, stored parts cannot be searched.
+- **Status bar.** The right-hand label names the database (`parts DB:
+  tadtruex_inventory (server)`).
+- **Rotations.** The CPL rotation overrides are in the server's
+  `part_rotation` table; the LCSC tab and `kicadtools cpl` read and write
+  them there. `kicadtools cpl` fails, rather than use an old copy, when the
+  server cannot be reached.
+- **First use.** `kicadtools db import --dry-run`, then `kicadtools db
+  import`, copies the local `parts.sqlite` and the cached rotation overrides
+  into the empty server once, keeping part ids, compares every table, and
+  renames the local file `parts.sqlite.imported`.
 
 ### LCSC tab
 

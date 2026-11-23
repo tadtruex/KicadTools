@@ -83,6 +83,43 @@ class PartRotationStore:
         self.conn.close()
 
 
+class DbRotationStore:
+    """The :class:`PartRotationStore` interface over the parts database
+    (:meth:`kicadtools.partsdb.PartsDb.rotation` and the rest), so the
+    overrides are on the server with the parts (``DB_PLAN.md`` step 6).
+
+    *db* returns the open database, so the store follows the Cockpit when it
+    reconnects or goes offline. With no database, or a read-only one, reads
+    give nothing or the copy's values and :meth:`set` calls *refused* and
+    stores nothing."""
+
+    def __init__(self, db, refused=None) -> None:
+        self._db = db
+        self._refused = refused
+
+    def get(self, lcsc: str) -> Optional[float]:
+        db = self._db()
+        return db.rotation(lcsc) if db is not None else None
+
+    def set(self, lcsc: str, degrees: float) -> None:
+        db = self._db()
+        if db is None or db.read_only:
+            if self._refused is not None:
+                self._refused()
+            return
+        db.set_rotation(lcsc, degrees)
+
+    def clear(self, lcsc: str) -> None:
+        self.set(lcsc, 0.0)
+
+    def all(self) -> Dict[str, float]:
+        db = self._db()
+        return db.rotations() if db is not None else {}
+
+    def close(self) -> None:
+        """The database belongs to the Cockpit; nothing to close here."""
+
+
 def manual_rotation_for_refs(
     ref_to_lcsc: Mapping[str, str], store: PartRotationStore
 ) -> Dict[str, float]:

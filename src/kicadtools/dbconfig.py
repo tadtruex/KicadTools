@@ -164,6 +164,23 @@ def load_config(env: Mapping[str, str] = os.environ) -> DbConfig:
     )
 
 
+def backups_dir() -> Path:
+    """Where the backups of the server's data are written (``DB_PLAN.md``
+    step 7); the newest is the offline copy."""
+    return kicadtools_dir() / "backups"
+
+
+def newest_backup(folder: Optional[Path] = None) -> Optional[Path]:
+    """The newest ``parts-*.sqlite`` backup (by modification time), else
+    ``None``."""
+    folder = folder or backups_dir()
+    try:
+        files = [f for f in folder.glob("parts-*.sqlite") if f.is_file()]
+    except OSError:
+        return None
+    return max(files, key=lambda f: f.stat().st_mtime) if files else None
+
+
 # --- password -------------------------------------------------------------------
 
 

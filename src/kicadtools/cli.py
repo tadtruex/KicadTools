@@ -456,12 +456,21 @@ def _export_cpl(args: argparse.Namespace) -> int:
     # Apply any per-LCSC rotation overrides the user has cached (e.g. SOT-23
     # transistors the family table leaves at 0°). Map each reference to its LCSC
     # part, look the override up, and hand build_cpl a {ref: degrees} dict.
-    store = PartRotationStore(args.cache)
+    # With the parts database on the server (DB_PLAN.md), the overrides are
+    # there; a server that cannot be reached is an error, not a silent use of
+    # an old local copy, since a wrong rotation puts parts on the board turned.
     ref_to_lcsc = {
         r.reference: extract_part_numbers(r.props).lcsc or "" for r in records
     }
-    manual_rotation = manual_rotation_for_refs(ref_to_lcsc, store)
-    store.close()
+    try:
+        manual_rotation = _server_rotations(ref_to_lcsc)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if manual_rotation is None:
+        store = PartRotationStore(args.cache)
+        manual_rotation = manual_rotation_for_refs(ref_to_lcsc, store)
+        store.close()
 
     lines = cpl_from_schematic(pcb, include=include, manual_rotation=manual_rotation)
 
@@ -515,6 +524,31 @@ def _write_report(path, records, resolutions) -> None:
                 "Reason": res.reason,
                 "SourceFile": Path(res.source_file).name,
             })
+
+
+def _server_rotations(ref_to_lcsc):
+    """``{ref: degrees}`` from the server's rotation overrides when the
+    configuration names the server; ``None`` when it names a SQLite file.
+    Raises ``RuntimeError`` when the server cannot be opened."""
+    from kicadtools.dbconfig import MARIADB, ConfigError, load_config, terminal_ask
+    from kicadtools.dbconnect import open_parts_db
+    from kicadtools.partrotation import DbRotationStore
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        raise RuntimeError(str(exc)) from None
+    if config.backend != MARIADB:
+        return None
+    try:
+        session = open_parts_db(config, terminal_ask)
+    except Exception as exc:  # noqa: BLE001 - reported
+        raise RuntimeError(f"could not open {config.label} for the rotation overrides: "
+                           f"{exc or 'cancelled'}") from None
+    try:
+        return manual_rotation_for_refs(ref_to_lcsc, DbRotationStore(lambda: session.db))
+    finally:
+        session.close()
 
 
 def _db_import(args) -> int:

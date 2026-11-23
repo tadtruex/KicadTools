@@ -12,6 +12,9 @@ File > Save writes it merged with the other tabs' edits.
 """
 from __future__ import annotations
 
+import weakref
+from datetime import datetime
+
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -105,7 +109,12 @@ from kicadtools.othergroup import claimed, group_others
 from kicadtools.smdconnector import group_smd_connectors
 from kicadtools.icsearch import MATCH, board_pads, ic_assignment_plan
 from kicadtools.naturalsort import natural_key
-from kicadtools.partrotation import PartRotationStore
+from kicadtools.partrotation import DbRotationStore, PartRotationStore
+from kicadtools.dbconfig import (MARIADB, ConfigError, PasswordCancelled, is_auth_error,
+                                 load_config, newest_backup)
+from kicadtools.dbconnect import open_parts_db
+from kicadtools.dbtunnel import askpass_script
+from kicadtools.gui.db_password import dialog_ask
 from kicadtools.partsdb import PartsDb
 from kicadtools.requirement import group_parts, part_defaults
 from kicadtools.resolve import iter_bom_part_records
@@ -125,6 +134,52 @@ _LCSC_CACHE = Path.home() / ".kicadtools" / "lcsc_cache.sqlite"
 
 # Setting: the header and socket maker list, comma-separated (THT_PLAN.md step 5).
 HEADER_MAKERS_SETTING = "hdr.manufacturers"
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """A lost server connection (not a refused login or a bad statement)."""
+    try:
+        import pymysql
+    except ImportError:
+        return False
+    return (isinstance(exc, (pymysql.err.OperationalError, pymysql.err.InterfaceError))
+            and not is_auth_error(exc))
+
+
+class _RotationRouter:
+    """The LCSC tab's rotation store: the parts database's overrides when the
+    database is the server (or its offline copy), else the local cache, as
+    before DB_PLAN.md."""
+
+    def __init__(self, window: "MainWindow") -> None:
+        # A weak reference: the window holds this store, and a cycle would
+        # leave a closed window for the garbage collector to delete at any
+        # later moment, which Qt does not survive.
+        ref = weakref.ref(window)
+        self._window = ref
+        self._local = PartRotationStore(_LCSC_CACHE)
+        self._db = DbRotationStore(
+            lambda: ref()._parts_db if ref() is not None else None,
+            refused=lambda: ref()._rotation_refused() if ref() is not None else None)
+
+    def _store(self):
+        window = self._window()
+        return self._db if window is not None and window._rotations_on_db() else self._local
+
+    def get(self, lcsc):
+        return self._store().get(lcsc)
+
+    def set(self, lcsc, degrees):
+        self._store().set(lcsc, degrees)
+
+    def clear(self, lcsc):
+        self._store().clear(lcsc)
+
+    def all(self):
+        return self._store().all()
+
+    def close(self):
+        self._local.close()
 
 
 class MainWindow(QMainWindow):
@@ -156,31 +211,41 @@ class MainWindow(QMainWindow):
         self._search_for: Optional[tuple] = None
         self._search_next: Optional[tuple] = None
 
-        # The parts database, opened once on the GUI thread for settings and
-        # accept/reject writes. Search workers open their own connection.
+        # The parts database (DB_PLAN.md): the configured SQLite file, or the
+        # server through its SSH tunnel, opened once on the GUI thread for
+        # settings and accept/reject writes; search workers open their own
+        # connection (_worker_db). When the server cannot be reached the
+        # newest backup is opened read-only and the window says OFFLINE
+        # (_go_offline). Opened by _open_database once the widgets exist.
         self._parts_db_path = partsdb.default_path()
         self._parts_db: Optional[PartsDb] = None
-        try:
-            self._parts_db = PartsDb(self._parts_db_path)
-        except Exception as exc:  # noqa: BLE001 — report and run without it
-            QMessageBox.warning(
-                self,
-                "Parts database unavailable",
-                f"Could not open {self._parts_db_path}:\n{exc}\n\n"
-                "The Parts tab lists requirements but cannot assign parts.",
-            )
+        self._db_session = None
+        self._db_config = None
+        self._offline = ""              # why the window is offline; "" online
+        self._offline_copy: Optional[Path] = None
+        self._askpass_path: Optional[Path] = None
+        self._title_base = "BOM Cockpit"
 
         tabs = QTabWidget()
         tabs.addTab(self._build_intent_tab(), "Intents")
         tabs.addTab(self._build_parts_tab(), "Parts")
         tabs.addTab(self._build_lcsc_tab(), "LCSC")
-        self.setCentralWidget(tabs)
+        central = QWidget()
+        column = QVBoxLayout(central)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self._build_offline_bar())
+        column.addWidget(tabs)
+        self.setCentralWidget(central)
 
         self._build_menu()
         # DigiKey's daily limit is 1000 calls; the count stays in view.
         self._digikey_label = QLabel("")
         self.statusBar().addPermanentWidget(self._digikey_label)
+        self._db_label = QLabel("")
+        self.statusBar().addPermanentWidget(self._db_label)
         self._refresh_digikey()
+        self._open_database()
         self.statusBar().showMessage("Open a schematic to begin.")
 
         if schematic:
@@ -262,7 +327,9 @@ class MainWindow(QMainWindow):
     def _build_lcsc_tab(self) -> QWidget:
         # A disk-backed rotation store shared with the CPL export, so a dropdown
         # choice here persists (keyed by LCSC part) and reappears next session.
-        self._rotation_store = PartRotationStore(_LCSC_CACHE)
+        # With the parts database on the server the overrides are there
+        # (DB_PLAN.md step 6); with a SQLite parts file they stay in the cache.
+        self._rotation_store = _RotationRouter(self)
         self.lcsc_model = LcscTableModel(store=self._rotation_store)
         self.lcsc_table = self._make_table(self.lcsc_model)
         self.lcsc_table.setItemDelegateForColumn(_COL_ROTATION, RotationDelegate(self))
@@ -369,7 +436,7 @@ class MainWindow(QMainWindow):
         self.parts_model.load(groups + group_others(self._records, claimed(groups), board))
         self._header_run = HeaderRun(DigiKeyClient(), makers=self._header_makers())
         self.parts_table.resizeColumnsToContents()
-        self.setWindowTitle(f"BOM Cockpit — {path.name}[*]")
+        self._set_title(f"BOM Cockpit — {path.name}")
         self.setWindowModified(False)  # a fresh load matches disk → clean
         self._refresh_status()
 
@@ -949,7 +1016,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Can't assign", str(exc))
             return
         db = self._parts_db
-        if db is None:
+        if db is None or self._refuse_offline("accept"):
             return
         # An IC or through-hole part has no rating or dielectric to remember.
         settings = {} if ic or tht or led else requirement_settings(req)
@@ -960,6 +1027,10 @@ class MainWindow(QMainWindow):
             for key, value in settings.items():
                 db.set_setting(key, value)
         except Exception as exc:  # noqa: BLE001
+            if _is_connection_error(exc):
+                self._go_offline(str(exc))
+                self._refuse_offline("accept")
+                return
             QMessageBox.critical(self, "Parts database", f"Could not record the part:\n{exc}")
             return
         self.parts_model.queue(row, req, cand, plan)
@@ -1012,6 +1083,7 @@ class MainWindow(QMainWindow):
                 run=self._header_run,
                 needed=needed,
                 db_path=self._parts_db_path,
+                **self._worker_db_kwargs(),
                 use_stored=not search_suppliers,
             )
             tht_worker.found.connect(self._on_candidates)
@@ -1025,6 +1097,7 @@ class MainWindow(QMainWindow):
                 requirement=req,
                 needed=needed,
                 db_path=self._parts_db_path,
+                **self._worker_db_kwargs(),
                 listing=self._led_listing,
                 search_suppliers=search_suppliers,
                 cache_path=_LCSC_CACHE,
@@ -1046,6 +1119,7 @@ class MainWindow(QMainWindow):
                 requirement=req,
                 needed=needed,
                 db_path=self._parts_db_path,
+                **self._worker_db_kwargs(),
                 board=self._board,
                 cache_path=_LCSC_CACHE,
             )
@@ -1062,6 +1136,7 @@ class MainWindow(QMainWindow):
             requirement=req,
             needed=needed,
             db_path=self._parts_db_path,
+            **self._worker_db_kwargs(),
             search_suppliers=search_suppliers,
             cache_path=_LCSC_CACHE,
             existing=dialog.existing_lookup if dialog is not None else None,
@@ -1102,11 +1177,15 @@ class MainWindow(QMainWindow):
 
     def _reject_candidate(self, cand) -> None:
         """Record *cand* as rejected and search again without it."""
-        if self._parts_db is None:
+        if self._parts_db is None or self._refuse_offline("reject"):
             return
         try:
             self._parts_db.reject_part(cand.choice())
         except Exception as exc:  # noqa: BLE001
+            if _is_connection_error(exc):
+                self._go_offline(str(exc))
+                self._refuse_offline("reject")
+                return
             QMessageBox.critical(self, "Parts database", f"Could not reject the part:\n{exc}")
             return
         self.statusBar().showMessage(f"Rejected {cand.manufacturer} {cand.mpn}.")
@@ -1478,9 +1557,168 @@ class MainWindow(QMainWindow):
             self._assign_dialog.reject()
 
     def _close_parts_db(self) -> None:
-        if self._parts_db is not None:
-            self._parts_db.close()
-            self._parts_db = None
+        """Close the database, and the tunnel when the server was open."""
+        session, self._db_session = self._db_session, None
+        db, self._parts_db = self._parts_db, None
+        try:
+            if session is not None:
+                session.close()
+            elif db is not None:
+                db.close()
+        except Exception:  # noqa: BLE001 - closing a dead connection
+            pass
+
+    # ---- parts database: open, offline, retry --------------------------
+    def _build_offline_bar(self) -> QWidget:
+        """The red bar of DB_PLAN.md decision 1, hidden while online."""
+        bar = QFrame()
+        bar.setObjectName("offlineBar")
+        bar.setStyleSheet("#offlineBar { background: #b00020; }"
+                          " #offlineBar QLabel { color: white; font-weight: bold; }")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(10, 6, 10, 6)
+        self._offline_text = QLabel("")
+        self._offline_text.setWordWrap(True)
+        row.addWidget(self._offline_text, 1)
+        retry = QPushButton("Retry connection")
+        retry.clicked.connect(self._retry_database)
+        row.addWidget(retry)
+        bar.hide()
+        self._offline_bar = bar
+        return bar
+
+    def _askpass(self) -> Path:
+        if self._askpass_path is None:
+            self._askpass_path = askpass_script()
+        return self._askpass_path
+
+    def _open_database(self) -> None:
+        """Open the configured parts database; offline when the server cannot
+        be reached, the configuration is wrong, or the password prompt is
+        cancelled."""
+        self._close_parts_db()
+        try:
+            config = load_config()
+        except ConfigError as exc:
+            self._db_config = None
+            self._go_offline(str(exc))
+            return
+        self._db_config = config
+        if config.backend != MARIADB:
+            self._parts_db_path = config.sqlite_path
+            try:
+                self._parts_db = PartsDb(config.sqlite_path)
+            except Exception as exc:  # noqa: BLE001 — report and run without it
+                QMessageBox.warning(
+                    self, "Parts database unavailable",
+                    f"Could not open {config.sqlite_path}:\n{exc}\n\n"
+                    "The Parts tab lists requirements but cannot assign parts.")
+            self._offline, self._offline_copy = "", None
+            self._apply_db_state()
+            return
+        try:
+            session = open_parts_db(config, dialog_ask(self), askpass=self._askpass())
+        except PasswordCancelled:
+            self._go_offline("the database password was not entered")
+            return
+        except Exception as exc:  # noqa: BLE001 — TunnelError, PyMySQL errors
+            self._go_offline(str(exc) or type(exc).__name__)
+            return
+        self._db_session, self._parts_db = session, session.db
+        self._offline, self._offline_copy = "", None
+        self._apply_db_state()
+
+    def _go_offline(self, reason: str) -> None:
+        """Open the newest backup read-only, or none, and say so."""
+        self._close_parts_db()
+        self._offline = reason or "the server cannot be reached"
+        self._offline_copy = newest_backup()
+        if self._offline_copy is not None:
+            try:
+                self._parts_db = PartsDb.open_read_only(self._offline_copy)
+            except Exception:  # noqa: BLE001 - an unreadable copy: no copy
+                self._offline_copy = None
+        self._apply_db_state()
+
+    def _retry_database(self) -> None:
+        self._open_database()
+        if self._offline:
+            self.statusBar().showMessage(f"Still offline: {self._offline}")
+        else:
+            self.statusBar().showMessage(f"Connected to {self._db_config.label}.")
+
+    def _apply_db_state(self) -> None:
+        """The offline bar, title, status-bar label and the controls that
+        write, for the current database."""
+        offline = bool(self._offline)
+        if offline:
+            if self._offline_copy is not None:
+                when = datetime.fromtimestamp(self._offline_copy.stat().st_mtime)
+                head = (f"OFFLINE — read-only copy of the parts database from "
+                        f"{when:%Y-%m-%d %H:%M}.")
+            else:
+                head = ("OFFLINE — no local copy of the parts database: stored parts "
+                        "cannot be searched.")
+            self._offline_text.setText(
+                f"{head} Accept, Reject and Autopopulate are off.\n{self._offline}")
+            self._offline_bar.show()
+            label = (f"parts DB: OFFLINE copy {self._offline_copy.name}"
+                     if self._offline_copy is not None else "parts DB: OFFLINE, none")
+        else:
+            self._offline_bar.hide()
+            cfg = self._db_config
+            label = f"parts DB: {cfg.label}" if cfg is not None else "parts DB: none"
+        self._db_label.setText(label)
+        self.autopopulate_btn.setEnabled(not offline)
+        self._update_title()
+        self.lcsc_table.viewport().update()
+
+    def _set_title(self, base: str) -> None:
+        self._title_base = base
+        self._update_title()
+
+    def _update_title(self) -> None:
+        suffix = " [OFFLINE]" if self._offline else ""
+        self.setWindowTitle(f"{self._title_base}{suffix}[*]")
+
+    def _refuse_offline(self, action: str) -> bool:
+        """True (after telling the user) when offline: nothing is recorded
+        that the server would not hold."""
+        if not self._offline:
+            return False
+        QMessageBox.warning(
+            self, "Offline",
+            f"The parts database is offline ({self._offline}), so the {action} was not "
+            "recorded. Use Retry connection in the red bar once the server is back.")
+        return True
+
+    def _worker_db(self):
+        """How a search worker opens its own database connection: through the
+        tunnel, or the offline copy, or an empty in-memory database when
+        offline with no copy; ``None`` for a SQLite parts file (the worker
+        opens the path)."""
+        if self._db_session is not None and self._db_session.tunnel is not None:
+            return self._db_session.connect_again
+        if self._offline:
+            copy = self._offline_copy
+            if copy is not None:
+                return lambda: PartsDb.open_read_only(copy)
+            return lambda: PartsDb(":memory:")
+        return None
+
+    def _worker_db_kwargs(self) -> dict:
+        """``{"open_db": …}`` for a worker when :meth:`_worker_db` gives one,
+        else nothing (the worker opens ``db_path``)."""
+        opener = self._worker_db()
+        return {"open_db": opener} if opener is not None else {}
+
+    def _rotations_on_db(self) -> bool:
+        cfg = self._db_config
+        return (cfg is not None and cfg.backend == MARIADB) or bool(self._offline)
+
+    def _rotation_refused(self) -> None:
+        self.statusBar().showMessage(
+            f"Offline: the rotation was not saved ({self._offline}).")
 
     # ---- status bar --------------------------------------------------
     def _refresh_status(self) -> None:

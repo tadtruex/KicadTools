@@ -59,6 +59,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -669,11 +670,14 @@ class PartsDb:
         now: Optional[Callable[[], str]] = None,
         _conn: Any = None,
         _dialect: Optional[_Dialect] = None,
+        _read_only: bool = False,
     ) -> None:
         self._now = now or _utc_now
         self._lock = threading.RLock()
         self._dialect = _dialect or SQLITE
         self.label = str(path)
+        self.read_only = _read_only
+        self._last_used = time.monotonic()
         if _conn is not None:
             self.conn = _conn
         else:
@@ -684,6 +688,9 @@ class PartsDb:
             self.conn = sqlite3.connect(str(path), check_same_thread=False)
         try:
             self._dialect.setup(self.conn)
+            if _read_only:
+                self._check_version(path)
+                return
             # The version is checked before the schema is applied, so a file of
             # another version is refused without tables added to it.
             if (self._dialect is SQLITE
@@ -702,13 +709,31 @@ class PartsDb:
 
     # ----- statements ------------------------------------------------------
 
+    # A server connection idle longer than this is pinged before use: the
+    # server closes idle connections (wait_timeout), and a reconnect needs
+    # the session settings again.
+    _IDLE_S = 60.0
+
+    def _keepalive(self) -> None:
+        if self._dialect is SQLITE:
+            return
+        now = time.monotonic()
+        if now - self._last_used > self._IDLE_S:
+            before = self.conn.thread_id()
+            self.conn.ping(reconnect=True)
+            if self.conn.thread_id() != before:
+                self._dialect.setup(self.conn)
+        self._last_used = now
+
     def _execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
         """Run *sql* (``?`` placeholders) with *params*; the cursor."""
+        self._keepalive()
         cur = self.conn.cursor()
         cur.execute(self._dialect.sql(sql), tuple(params))
         return cur
 
     def _executemany(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
+        self._keepalive()
         cur = self.conn.cursor()
         cur.executemany(self._dialect.sql(sql), [tuple(r) for r in rows])
 
@@ -746,6 +771,17 @@ class PartsDb:
                                connect_timeout=connect_timeout)
         return cls(f"{user}@{host}:{port}/{database}", now=now, _conn=conn,
                    _dialect=MARIADB)
+
+    @classmethod
+    def open_read_only(cls, path: Path | str,
+                       now: Optional[Callable[[], str]] = None) -> "PartsDb":
+        """The SQLite file at *path*, read-only (the offline copy of
+        ``DB_PLAN.md`` decision 1): searches work, and any write raises
+        ``sqlite3.OperationalError``. The schema is not applied; the version
+        is checked."""
+        conn = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True,
+                               check_same_thread=False)
+        return cls(path, now=now, _conn=conn, _read_only=True)
 
     @staticmethod
     def check_mariadb_login(*, host: str, port: int, user: str, password: str,
