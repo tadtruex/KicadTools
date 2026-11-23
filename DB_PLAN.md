@@ -95,7 +95,7 @@ Stays local:
 
 ```toml
 [parts_db]
-backend = "mysql"            # "sqlite" (today's behaviour) or "mysql"
+backend = "mariadb"          # "sqlite" (today's behaviour) or "mariadb"
 database = "tadtruex_inventory"
 user = "tadtruex_inventory"
 
@@ -120,7 +120,7 @@ small dialect object:
 |---|---|
 | `?` placeholders | `%s` |
 | `INTEGER PRIMARY KEY` (row id) | `INT AUTO_INCREMENT PRIMARY KEY` |
-| `TEXT` in keys and indexes | `VARCHAR(n)`: MariaDB indexes need a length (`mpn`, `manufacturer` 128; `pn` 64; `signature` 255) |
+| `TEXT` in keys and indexes | `VARCHAR(n)`: MariaDB indexes need a length (`mpn`, `manufacturer` 128; `pn` 100; `signature` 255) |
 | `REAL` | `DOUBLE` |
 | `COLLATE NOCASE` on `mpn`, `manufacturer` | `utf8mb4_unicode_ci` on those two columns (case-insensitive); every other column `utf8mb4_bin`, compared as bytes, as SQLite compares them |
 | `INSERT … ON CONFLICT(…) DO UPDATE` | `INSERT … ON DUPLICATE KEY UPDATE` |
@@ -130,8 +130,8 @@ small dialect object:
 | `executescript(_SCHEMA)` | one `execute` per statement |
 | `cursor.lastrowid` | the same attribute in PyMySQL |
 
-There are 13 SQLite-only statements in `partsdb.py`; the rest is
-standard SQL and runs on both.
+`_Dialect` (SQLite) and `_MariaDialect` build these; the rest of
+`partsdb.py` is standard SQL and runs on both.
 
 `utf8mb4_unicode_ci` also ignores accents (`Würth` equals `Wurth`). For a
 manufacturer name that matches suppliers that spell it either way; the
@@ -154,7 +154,7 @@ COLLATE=utf8mb4_bin`, and the database default is changed once to
   A worker's connection through the tunnel costs one round trip to open.
 - Before each use after an idle period, `conn.ping(reconnect=True)`, so the
   8-hour `wait_timeout` closes nothing the Cockpit needs.
-- Writes stay in one transaction per accept, as today (`with self.conn:`).
+- Writes stay in one transaction per accept, as today (`PartsDb._tx`).
 
 ### Tunnel (decision 2a)
 
@@ -201,8 +201,8 @@ step that runs in one transaction, as the version-1 → 2 step does now.
    KICADTOOLS_DB_PASS=… pytest tests/test_partsdb.py tests/test_thtdb.py
    ```
 3. **Configuration and credentials.** `config.toml` reading, the password
-   file and its prompt (decision 3), `PyMySQL` as an optional dependency
-   (`pip install kicadtools[server]`).
+   file and its prompt (decision 3). (PyMySQL is already the optional
+   `server` extra, step 2.)
 4. **Tunnel.** `dbtunnel.py` (decision 2).
 5. **One-time import.** `kicadtools db import [--dry-run]`, run once when
    the server is set up: load today's `parts.sqlite` and the rotation
