@@ -1,0 +1,210 @@
+# Parts database on a shared server — plan
+
+Move the accepted-parts database from the machine-local `~/Code/Boards/parts.sqlite`
+to the MariaDB database on the Reclaim Hosting account. The server is the
+source of truth: the Cockpit reads and writes it directly, on every machine,
+with nothing to push or sync. A machine can be lost and work continues from
+any workstation with KicadTools installed, the database password and an SSH
+login to the host.
+
+Local copies exist only as backups and as the read-only offline copy
+(decision 1); nothing is ever written to them by the Cockpit except a fresh
+download.
+
+Status: plan only (2026-11-23). Nothing is built.
+
+## What was checked (2026-11-23)
+
+| Item | Finding |
+|---|---|
+| Server | MariaDB 10.6.27 on `dartmouth01.reclaimhosting.com` (`tadtruex.host.dartmouth.edu`) |
+| Direct connection, port 3306 | Port open, login refused (`1045 Access denied … @'129.170.41.125'`) from the Mac and the Linux box; the same login works in a shell on the server. Remote access is not working; whether the host allows it at all was not established. |
+| SSH tunnel | Works: `ssh -N -L 3307:127.0.0.1:3306 tadtruex@tadtruex.host.dartmouth.edu`, key login, no password prompt. The server sees `tadtruex_inventory@localhost`. |
+| Privileges | `ALL PRIVILEGES ON tadtruex_inventory.*` |
+| Engine | InnoDB (transactions, foreign keys, `ON DELETE CASCADE`) |
+| Character set | Server default `latin1`. A table created with `utf8mb4` stored and returned `µF ± Würth` unchanged. |
+| `sql_mode` | `STRICT_TRANS_TABLES, …`: an over-long or missing value is an error, not a silent truncation |
+| `wait_timeout` | 28800 s: an idle connection is closed after 8 hours |
+| Driver | PyMySQL 2.2 (pure Python, no client library) |
+
+Data to move today: 47 parts (15 capacitors, 14 resistors, 2 inductors,
+5 ICs, 9 through-hole, 2 LEDs), 83 supplier part numbers, 121 usage rows,
+11 settings, 1 rotation override.
+
+## Scope
+
+Moves to the server:
+
+- every table of `partsdb.py`: `meta`, `settings`, `part`, `capacitor`,
+  `resistor`, `inductor`, `ic`, `tht`, `led`, `supplier_pn`, `usage`;
+- `part_rotation` (`partrotation.py`, now in `~/.kicadtools/lcsc_cache.sqlite`):
+  the overrides are user decisions, and the memory note on rotation
+  transportability asks for exactly this.
+
+Stays local:
+
+- the supplier caches in `~/.kicadtools/lcsc_cache.sqlite` (`dk_to_mpn`,
+  `mpn_to_lcsc`, `jlc_part`): they are caches of supplier answers, rebuilt
+  on demand, and each machine's copy can differ without harm;
+- the DigiKey call counter.
+
+## Decisions (2026-11-23)
+
+1. **Offline: a read-only local copy, impossible to miss.** When the server
+   cannot be reached (no network, the tunnel fails) and a local copy exists,
+   the Cockpit opens it read-only:
+   - a red bar across the top of the window: `OFFLINE — read-only copy of
+     the parts database from 2026-11-23 14:02. Accept, Reject and
+     Autopopulate are off. Retry connection`;
+   - the window title ends `[OFFLINE]`, and the status bar names the copy;
+   - stored parts are found and supplier searches run, but Accept, Reject,
+     Accept Checked and settings changes are disabled, so no decision is
+     made that the server would not hold;
+   - **Retry connection** reconnects without restarting; on success the bar
+     goes away and the buttons are enabled.
+
+   The local copy is the newest backup (step 7), downloaded on each
+   successful start. With no copy, the Parts tab lists requirements and
+   cannot search stored parts or accept, and the bar says so.
+2. **The Cockpit opens the tunnel** (`ssh -N -L`) on a free local port when
+   it opens the database and stops it on exit. With a key on the server
+   (this Mac today) it needs no prompt. On a machine with no key, ssh asks
+   for the SSH password through a dialog (`SSH_ASKPASS` pointing at a small
+   Qt prompt in the Cockpit), so a fresh workstation needs no key setup.
+3. **Password: a file outside git.** `~/.kicadtools/db_password`, one line,
+   mode `0600`. `~/.kicadtools` is in no repository. When the file does not
+   exist, the Cockpit asks for the password, checks it with a login, and
+   writes the file. A rejected password gives the prompt again, and the
+   file is rewritten. `KICADTOOLS_DB_PASS` overrides the file (tests,
+   one-off runs). No keychain: the machines run GNOME and KDE, and one file
+   works the same on all of them. The password is never in the repo, the
+   config file or a log line.
+4. **Settings are shared.** The `settings` table holds the remembered
+   defaults (`cap.voltage_min`, `cap.package`, the tolerance defaults) and
+   the maker lists: `cap.manufacturers`, `res.manufacturers`,
+   `ind.manufacturers`, `led.manufacturers` and `hdr.manufacturers`, the
+   manufacturers each search keeps (a supplier hit from a maker not listed
+   is left out). A default or a maker added on one machine applies on every
+   machine.
+
+## Design
+
+### Configuration
+
+`~/.kicadtools/config.toml` (not in the repo):
+
+```toml
+[parts_db]
+backend = "mysql"            # "sqlite" (today's behaviour) or "mysql"
+database = "tadtruex_inventory"
+user = "tadtruex_inventory"
+
+[parts_db.ssh]
+host = "tadtruex.host.dartmouth.edu"
+user = "tadtruex"
+remote_port = 3306
+```
+
+`KICADTOOLS_PARTS_DB` keeps its meaning (a SQLite path) and wins over the
+file, so tests and one-off runs need no config. With no config file the
+Cockpit behaves as today.
+
+### One database class, two backends
+
+`PartsDb` keeps its public methods (`accept_part`, `find_parts`,
+`find_ics`, `find_tht`, `find_leds`, `record_usage`, settings), so no caller
+changes. The SQL that differs between SQLite and MariaDB moves behind a
+small dialect object:
+
+| SQLite today | MariaDB |
+|---|---|
+| `?` placeholders | `%s` |
+| `INTEGER PRIMARY KEY` (row id) | `INT AUTO_INCREMENT PRIMARY KEY` |
+| `TEXT` in keys and indexes | `VARCHAR(n)`: MariaDB indexes need a length (`mpn`, `manufacturer` 128; `pn` 64; `signature` 255) |
+| `REAL` | `DOUBLE` |
+| `COLLATE NOCASE` | the table collation `utf8mb4_unicode_ci`, which is case-insensitive |
+| `INSERT … ON CONFLICT(…) DO UPDATE` | `INSERT … ON DUPLICATE KEY UPDATE` |
+| `INSERT OR REPLACE` | `INSERT … ON DUPLICATE KEY UPDATE`. MariaDB's `REPLACE` deletes the row first, and `ON DELETE CASCADE` would then delete the part's child rows. |
+| `INSERT OR IGNORE` | `INSERT IGNORE` |
+| `PRAGMA foreign_keys = ON` | on by default in InnoDB |
+| `executescript(_SCHEMA)` | one `execute` per statement |
+| `cursor.lastrowid` | the same attribute in PyMySQL |
+
+There are 13 SQLite-only statements in `partsdb.py`; the rest is
+standard SQL and runs on both.
+
+`utf8mb4_unicode_ci` also ignores accents (`Würth` equals `Wurth`). For a
+manufacturer name that matches suppliers that spell it either way; the
+unique key on (manufacturer, MPN) then treats the two spellings as one
+part. That is the intended behaviour; it is listed here because SQLite's
+`NOCASE` does not do it.
+
+Every table is created with `ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_unicode_ci`, and the database default is changed once to
+the same (`ALTER DATABASE`), so a table created later by hand is UTF-8 too.
+
+### Connections
+
+- The GUI thread holds one connection; each search worker opens its own, as
+  it does today (`PartsDb(self._db_path)` in `gui/parts.py`, four places).
+  A worker's connection through the tunnel costs one round trip to open.
+- Before each use after an idle period, `conn.ping(reconnect=True)`, so the
+  8-hour `wait_timeout` closes nothing the Cockpit needs.
+- Writes stay in one transaction per accept, as today (`with self.conn:`).
+
+### Tunnel (decision 2a)
+
+`kicadtools/dbtunnel.py`: start `ssh -N -o BatchMode=yes -o
+ExitOnForwardFailure=yes -L 127.0.0.1:<free port>:127.0.0.1:3306 user@host`,
+wait until the local port accepts, return the port; stop the process on
+exit. A failure (no key, host unreachable) becomes the offline case of
+decision 1. An existing tunnel the user runs is used when the config names
+a fixed `local_port` and that port answers.
+
+### Schema version
+
+`meta.schema_version` stays the check it is today. The server starts at
+version 2 (today's schema). A later change adds a version and a migration
+step that runs in one transaction, as the version-1 → 2 step does now.
+
+## Steps
+
+1. **Dialect layer, SQLite only.** Move the 13 SQLite-only statements behind
+   the dialect object; no behaviour change. The whole suite passes
+   unchanged.
+2. **MariaDB dialect and DDL.** The table definitions above. Tests: the
+   `PartsDb` tests run against both backends, the MariaDB run gated on an
+   environment variable and pointed at a second, empty database
+   (`tadtruex_inventory_test`, created in cPanel), so the real data is never
+   touched by a test.
+3. **Configuration and credentials.** `config.toml` reading, the password
+   file and its prompt (decision 3), `PyMySQL` as an optional dependency
+   (`pip install kicadtools[server]`).
+4. **Tunnel.** `dbtunnel.py` (decision 2).
+5. **One-time import.** `kicadtools db import [--dry-run]`, run once when
+   the server is set up: load today's `parts.sqlite` and the rotation
+   overrides into the empty server in one transaction, keeping part ids so
+   `usage` and `supplier_pn` rows still point at their parts. It refuses
+   when the server already holds parts, and prints both sides' row counts.
+   After it runs, `parts.sqlite` is renamed `parts.sqlite.imported` so no
+   tool opens it again by mistake. There is no ongoing push: every later
+   change is written to the server when it is made.
+6. **Cockpit.** Open the server; the status bar names it (`parts DB:
+   tadtruex_inventory (server)`); the offline behaviour of decision 1; the
+   rotation store on the same backend.
+7. **Backups and the offline copy.** `kicadtools db pull [PATH]` writes the
+   server's data to a SQLite file. The Cockpit runs it on each successful
+   start into `~/.kicadtools/backups/parts-<date>.sqlite`, keeping the last
+   10; the newest is the offline copy. Reclaim also keeps its own backups of
+   the account.
+8. **Second machine.** Install on the Linux box, run the Cockpit against
+   the server (SSH password prompt first, then a key if wanted), and check
+   that a part accepted on one machine is found on the other at once.
+9. **Offline check.** Stop the network on one machine: the red bar, the
+   disabled buttons and Retry behave as decision 1 says.
+
+## Not in this plan
+
+- Moving the supplier caches.
+- A web front end or API on the host.
+- Multi-user access (other people's accounts and permissions).
