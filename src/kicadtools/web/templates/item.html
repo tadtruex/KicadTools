@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ item.name }} · Inventory{% endblock %}
+{% block main %}
+<p class="crumbs">
+  {% if chain %}{% for b in chain %}<a href="{{ b.path|bin_url }}">{{ b.name }}</a>{% if not loop.last %} / {% endif %}{% endfor %}
+  {% if site %}<span class="site">{{ site }}</span>{% endif %}{% if where %} <span class="muted">· {{ where }}</span>{% endif %}
+  {% else %}<span class="muted">In no bin</span>{% endif %}
+</p>
+<h1>{{ item.name }}</h1>
+{% if saved %}<p class="ok">Saved.</p>{% endif %}
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<div class="qtyrow">
+  <form method="post" action="/item/{{ item.id }}/qty" hx-post="/item/{{ item.id }}/qty" hx-target="#qty" hx-swap="outerHTML">
+    <input type="hidden" name="delta" value="-1"><button class="round" aria-label="One fewer">−</button>
+  </form>
+  {% include "_qty.html" %}
+  <form method="post" action="/item/{{ item.id }}/qty" hx-post="/item/{{ item.id }}/qty" hx-target="#qty" hx-swap="outerHTML">
+    <input type="hidden" name="delta" value="1"><button class="round" aria-label="One more">+</button>
+  </form>
+</div>
+
+<form method="post" action="/item/{{ item.id }}" class="fields">
+  <label>Name <input name="name" required value="{% if form %}{{ form.get('name', '') }}{% else %}{{ item.name }}{% endif %}"></label>
+  <div class="two">
+    <label>Quantity <input name="quantity" inputmode="numeric" value="{% if form %}{{ form.get('quantity', '') }}{% elif item.quantity is not none %}{{ item.quantity }}{% endif %}"></label>
+    <label>Bin <input name="bin" list="dl-bin" value="{% if form %}{{ form.get('bin', '') }}{% else %}{{ item.bin_path or '' }}{% endif %}" autocomplete="off"
+      title="A new path makes the bin"></label>
+  </div>
+  {% include "_item_fields.html" %}
+  {% if item.url %}<p><a href="{{ item.url }}" target="_blank" rel="noopener">Open the link ↗</a></p>{% endif %}
+  <div class="actions"><button type="submit" class="primary">Save</button></div>
+</form>
+
+<form method="post" action="/item/{{ item.id }}/delete" class="danger"
+      onsubmit="return confirm('Delete {{ item.name|e }}?')">
+  <button type="submit">Delete item</button>
+</form>
+<p class="muted small">Added {{ item.created_at[:10] }} · changed {{ item.updated_at[:10] }}</p>
+{% endblock %}

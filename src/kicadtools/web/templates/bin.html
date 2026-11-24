@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Bin {{ bin.path }} · Inventory{% endblock %}
+{% block main %}
+<p class="crumbs"><a href="/bins">Bins</a>{% for b in chain %} / {% if loop.last %}{{ b.name }}{% else %}<a href="{{ b.path|bin_url }}">{{ b.name }}</a>{% endif %}{% endfor %}</p>
+<h1>Bin {{ bin.path }} {% if site %}<span class="site">{{ site }}</span>{% endif %}</h1>
+{% if bin.location %}<p class="where">{{ bin.location }}</p>{% endif %}
+{% if bin.description %}<p>{{ bin.description }}</p>{% endif %}
+{% if saved %}<p class="ok">Saved.</p>{% endif %}
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<p class="actions"><a class="button primary" href="/add?{{ urlencode({'bin': bin.path}) }}">Add item here</a></p>
+
+{% if children %}
+<h2>Bins inside</h2>
+<ul class="bins">
+{% for c in children %}<li><a href="{{ c.path|bin_url }}">{{ c.name }}</a> <span class="muted">{{ total.get(c.path, 0) }} item{{ '' if total.get(c.path, 0) == 1 else 's' }}</span>{% if c.location %} <span class="muted">· {{ c.location }}</span>{% endif %}</li>{% endfor %}
+</ul>
+{% endif %}
+
+<h2>Contents</h2>
+{% if not groups %}<p class="hint">Nothing in this bin yet.</p>{% endif %}
+{% for path, items in groups.items() %}
+  {% if path != bin.path %}<h3><a href="{{ path|bin_url }}">{{ path }}</a></h3>{% endif %}
+  <ul class="results">
+  {% for item in items %}
+    <li><a class="name" href="/item/{{ item.id }}">{{ item.name }}</a> <span class="qty">{{ item.quantity|qty }}</span>
+      {% if item.description %}<div class="desc">{{ item.description|truncate(90) }}</div>{% endif %}</li>
+  {% endfor %}
+  </ul>
+{% endfor %}
+
+<details>
+  <summary>Edit this bin</summary>
+  <form method="post" action="{{ bin.path|bin_url }}" class="fields">
+    <input type="hidden" name="action" value="save">
+    <label>Site <input name="site" list="dl-site" value="{{ bin.site or '' }}" autocomplete="off"
+      placeholder="{% if inherited_site %}{{ site }} (from the bin it is in){% endif %}"></label>
+    <label>Location <input name="location" value="{{ bin.location or '' }}" placeholder="rack by the bench, top shelf"></label>
+    <label>Description <textarea name="description" rows="2">{{ bin.description or '' }}</textarea></label>
+    <label>Notes <textarea name="notes" rows="2">{{ bin.notes or '' }}</textarea></label>
+    <div class="actions"><button type="submit" class="primary">Save</button></div>
+  </form>
+  <form method="post" action="{{ bin.path|bin_url }}" class="inline">
+    <input type="hidden" name="action" value="add_bin">
+    <input name="name" placeholder="New bin inside" required><button type="submit">Add bin inside</button>
+  </form>
+  <form method="post" action="{{ bin.path|bin_url }}" class="inline">
+    <input type="hidden" name="action" value="rename">
+    <input name="name" value="{{ bin.name }}" required><button type="submit">Rename</button>
+  </form>
+  <form method="post" action="{{ bin.path|bin_url }}" class="inline">
+    <input type="hidden" name="action" value="move">
+    <input name="parent" list="dl-bin" placeholder="Move inside… (empty: top level)" autocomplete="off"><button type="submit">Move</button>
+  </form>
+  {% if not children and not groups %}
+  <form method="post" action="{{ bin.path|bin_url }}" class="danger" onsubmit="return confirm('Delete bin {{ bin.path|e }}?')">
+    <input type="hidden" name="action" value="delete"><button type="submit">Delete bin</button>
+  </form>
+  {% endif %}
+</details>
+{% endblock %}

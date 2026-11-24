@@ -19,13 +19,21 @@ server = ["PyMySQL>=1.1"]
 # import (INVENTORY_PLAN.md step 2; a CSV export needs nothing extra) and
 # typo-tolerant search (step 3).
 inventory = ["numbers-parser>=4.10", "rapidfuzz>=3.0"]
+# The lab inventory web app (INVENTORY_PLAN.md step 4). httpx is only for
+# its tests (FastAPI's TestClient).
+web = ["fastapi>=0.110", "uvicorn>=0.29", "jinja2>=3.1", "python-multipart>=0.0.9",
+       "rapidfuzz>=3.0", "httpx>=0.27"]
 
 [project.scripts]
 kicadtools = "kicadtools.cli:main"
 kicadtools-cockpit = "kicadtools.gui.app:main"
+kicadtools-web = "kicadtools.web.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"kicadtools.web" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

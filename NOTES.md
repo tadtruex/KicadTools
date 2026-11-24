@@ -3,20 +3,110 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
-## broadpeak set up; search built (2026-11-24)
+## Handoff: inventory search and web app built (2026-11-24)
 
-- Checkout at `~/Documents/Code/Boards` (not `~/Code/Boards`). The code no
-  longer assumes a location: `kicadtools/repo.py` finds the repo root from
-  the package (`.gitmodules` + `Libraries/`), `KICADTOOLS_REPO_ROOT`
-  overrides it (90aa330).
-- `.venv` with `dev,server,inventory,gui` on Python 3.14 (needed
-  `python3.14-venv` from apt). PySide6 6.12 installs; the whole suite runs.
-- `~/.kicadtools/config.toml` and `db_password` as in the handoff below. `db
-  pull` matched the handoff's counts; database tests 232 passed, 12 skipped.
-- Step 3 (search) built: `INVENTORY_PLAN.md`, "Step 3 — as built".
-- No inventory CLI (user decision). Next: step 4, the web app.
-- Loose end: `~/.kicadtools/lcsc_cache.sqlite` appeared during the first test
-  run; some test likely writes the real home folder.
+Pick-up point for the lab inventory. The older handoff below (2026-11-23)
+still holds for setup details; this section says what changed since.
+
+### Where things stand
+
+- Branch `develop`. Commits since the last handoff: `90aa330` (repo root
+  found, not assumed), `bf75074` (search, step 3), and the web app (step 4)
+  in the commit that adds this section.
+- `INVENTORY_PLAN.md`: steps 1–3 done, step 4 built; "Step 3 — as built"
+  and "Step 4 — as built" have the details. Steps 5–7 not started.
+- Decided 2026-11-24: **no inventory CLI** (beyond `inventory import`). The
+  web app is the interface.
+- Data: `tadtruex_inventory` on broadpeak is unchanged since the import
+  (113 bins, 122 items, 0 tags, 52 parts). Nothing in this session wrote
+  to it.
+
+### What was built
+
+- **Repo root** (`src/kicadtools/repo.py`): nothing assumes
+  `~/Code/Boards` any more. `repo_root()` walks up from the package to the
+  folder holding `.gitmodules` and `Libraries/`; `KICADTOOLS_REPO_ROOT`
+  overrides it. The `parts.sqlite` default, the standard footprint
+  fallback and usage-table board labels use it (labels stay relative, so
+  the Mac's rows still match). broadpeak's checkout is
+  `~/Documents/Code/Boards`.
+- **Search** (`src/kicadtools/inventory.py`): `search(inv, query, site=,
+  category=, bin=, in_stock=)` and the database-free `search_items(items,
+  bins, query, …)`. Substring per word, punctuation-blind, `µ`→`u`,
+  `Ω`→`ohm`, typos only on letter-only words of 5+ (never on values: `100nf`
+  must not find `10nF`), bin chain's description and location searched.
+- **Web app** (`src/kicadtools/web/`): FastAPI + Jinja + htmx (vendored,
+  `static/htmx.min.js`). Search, item, quick add, bin, bins list,
+  `/healthz`. `kicadtools-web [--config FILE] [--host] [--port 8080]
+  [--reload]`. No login yet: listens on 127.0.0.1 until Tailscale (step 5).
+
+### Setting up on another machine
+
+```bash
+git pull && git submodule update --init Libraries   # Libraries: footprints, import test
+cd Code/KicadTools
+python3 -m venv .venv && . .venv/bin/activate        # Ubuntu: apt install python3.X-venv first
+pip install -e ".[dev,server,inventory,web]"         # add ,gui for the Cockpit
+```
+
+The checkout can be anywhere. `~/.kicadtools/config.toml` and
+`db_password` (mode `0600`) are as in the older handoff below: on
+broadpeak `local_port = 3306` (no tunnel); elsewhere the `[parts_db.ssh]`
+section names `tad@10.0.10.13` and the tunnel starts by itself (home
+network only until Tailscale).
+
+### Trying the web app
+
+1. A test config: a copy of `~/.kicadtools/config.toml` with
+   `database = "tadtruex_inventory_test"`.
+2. Real data into it (the real database is only read; the target must end
+   `_test`): `python scripts/copy_inventory_to_test.py TEST_CONFIG`.
+3. `kicadtools-web --config TEST_CONFIG` → http://127.0.0.1:8080. From the
+   Mac with the app on broadpeak: `ssh -L 8080:127.0.0.1:8080
+   tad@10.0.10.13`, then http://localhost:8080.
+
+The MariaDB test run wipes `tadtruex_inventory_test`; run step 2 again
+after it. At this handoff the app was running on broadpeak (127.0.0.1:8080,
+test database, copy made 2026-11-24) from the Claude session; it stops when
+that session ends.
+
+### Tests
+
+- `QT_QPA_PLATFORM=offscreen pytest -q`: 1980 passed, 1 skipped on
+  broadpeak (Python 3.14, every extra). `tests/test_web.py` (22) and
+  `tests/test_inventory_search.py` (13) are new.
+- Database tests on MariaDB: the command in the older handoff below, plus
+  `tests/test_inventory_search.py`. 232 passed, 12 skipped before this
+  session's additions; the search tests pass on MariaDB too.
+- One warning: Starlette's TestClient says `httpx` is deprecated in favour
+  of `httpx2`. Not switched (an unvetted package name; the install was
+  blocked). Harmless for now.
+
+### Next
+
+1. **Look at the web app** in a browser and on the phone: nobody has yet
+   (checked by tests and curl only). Expect layout and wording fixes.
+2. **Step 5, deploy on broadpeak**: Tailscale on broadpeak, Mac and phone;
+   a service account and checkout; a MariaDB user with rights only on
+   `bin`, `item`, `item_tag` (read on the parts tables); a systemd unit
+   running `kicadtools-web` on 127.0.0.1:8080; `tailscale serve`. Root
+   steps written as a script for the user to run (sudo needs a password,
+   and Claude's shell cannot answer a sudo prompt).
+3. Step 6: labels with QR codes (Brother model still an open question),
+   DigiKey autofill on quick add.
+4. Fix the two spreadsheet errors through the app (bin 19, bin 3; see
+   below) once it is on the real database.
+
+### Loose ends
+
+- `~/.kicadtools/lcsc_cache.sqlite` appeared on broadpeak during the first
+  test run: some test likely writes the real home folder instead of a
+  temporary one.
+- `0.1uF` and `100nF` are still different values to search (`units.py`
+  parsers could fix it; not planned yet).
+- `in_stock` hides quantity 0 and keeps unknown quantities; items in no bin
+  have no site, so a site filter hides them. Both are choices, open to
+  change.
 
 ## Handoff: inventory work moves to broadpeak (2026-11-23)
 

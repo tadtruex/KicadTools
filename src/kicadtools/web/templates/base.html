@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Lab inventory{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header>
+  <nav>
+    <a href="/" class="brand">Inventory</a>
+    <a href="/add">Add</a>
+    <a href="/bins">Bins</a>
+  </nav>
+</header>
+<main>
+{% block main %}{% endblock %}
+</main>
+{% if choices %}
+<datalist id="dl-site">{% for v in choices.site %}<option value="{{ v }}">{% endfor %}</datalist>
+<datalist id="dl-category">{% for v in choices.category %}<option value="{{ v }}">{% endfor %}</datalist>
+<datalist id="dl-manufacturer">{% for v in choices.manufacturer %}<option value="{{ v }}">{% endfor %}</datalist>
+<datalist id="dl-tag">{% for v in choices.tag %}<option value="{{ v }}">{% endfor %}</datalist>
+<datalist id="dl-bin">{% for v in choices.bin %}<option value="{{ v }}">{% endfor %}</datalist>
+{% endif %}
+</body>
+</html>

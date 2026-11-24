@@ -1,0 +1,22 @@
+{% if not filtered %}
+<p class="hint">Type to search names, tags, part numbers, bins and descriptions.</p>
+{% elif not hits %}
+<p class="hint">Nothing found{% if site %} at {{ site }}{% endif %}.
+  <a href="/add?{{ urlencode({'name': q}) }}">Add “{{ q }}”</a>{% if site %} · <a href="/?{{ urlencode({'q': q, 'site': ''}) }}">search every site</a>{% endif %}</p>
+{% else %}
+<p class="count">{{ total }} found{% if total > hits|length %}, first {{ hits|length }} shown{% endif %}</p>
+<ul class="results">
+{% for h in hits %}
+  <li>
+    <a class="name" href="/item/{{ h.item.id }}">{{ h.item.name }}</a>
+    <span class="qty">{{ h.item.quantity|qty }}</span>
+    <div class="where">
+      {% if h.item.bin_path %}<a href="{{ h.item.bin_path|bin_url }}">{{ h.item.bin_path }}</a>{% else %}<span class="muted">no bin</span>{% endif %}
+      {% if h.site %}<span class="site">{{ h.site }}</span>{% endif %}
+      {% if wheres[h.item.id] %}<span class="muted">· {{ wheres[h.item.id] }}</span>{% endif %}
+    </div>
+    {% if h.item.description %}<div class="desc">{{ h.item.description|truncate(90) }}</div>{% endif %}
+  </li>
+{% endfor %}
+</ul>
+{% endif %}

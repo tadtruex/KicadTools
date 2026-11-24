@@ -1,0 +1,12 @@
+{# The optional item fields, shared by the item page and quick add. #}
+{% macro v(field) %}{% if form %}{{ form.get(field, '') }}{% elif item %}{{ item[field] or '' }}{% endif %}{% endmacro %}
+<label>Category <input name="category" list="dl-category" value="{{ v('category') }}" autocomplete="off"></label>
+<label>Tags <input name="tags" list="dl-tag" placeholder="comma separated"
+  value="{% if form %}{{ form.get('tags', '') }}{% elif item %}{{ item.tags|join(', ') }}{% endif %}" autocomplete="off"></label>
+<label>Manufacturer <input name="manufacturer" list="dl-manufacturer" value="{{ v('manufacturer') }}" autocomplete="off"></label>
+<label>MPN <input name="mpn" value="{{ v('mpn') }}" autocomplete="off" autocapitalize="characters"></label>
+<label>DigiKey PN <input name="digikey_pn" value="{{ v('digikey_pn') }}" autocomplete="off" autocapitalize="characters"></label>
+<label>LCSC <input name="lcsc" value="{{ v('lcsc') }}" autocomplete="off" autocapitalize="characters"></label>
+<label>URL <input name="url" type="url" value="{{ v('url') }}" autocomplete="off"></label>
+<label>Description <textarea name="description" rows="3">{{ v('description') }}</textarea></label>
+<label>Notes <textarea name="notes" rows="2">{{ v('notes') }}</textarea></label>

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block main %}
+<form class="search" action="/" method="get"
+      hx-get="/" hx-target="#results" hx-push-url="true"
+      hx-trigger="input changed delay:200ms from:#q, change from:select, change from:input[type=checkbox], submit">
+  <input id="q" type="search" name="q" value="{{ q }}" placeholder="arduino, stlink v3, m6 screw…"
+         autofocus autocomplete="off" autocapitalize="off" spellcheck="false">
+  <div class="filters">
+    <select name="site" aria-label="Site">
+      <option value="">All sites</option>
+      {% for s in choices.site %}<option value="{{ s }}" {% if s|lower == site|lower %}selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+    <select name="category" aria-label="Category">
+      <option value="">Any category</option>
+      {% for c in choices.category %}<option value="{{ c }}" {% if c|lower == category|lower %}selected{% endif %}>{{ c }}</option>{% endfor %}
+    </select>
+    <label class="check"><input type="checkbox" name="in_stock" value="1" {% if in_stock %}checked{% endif %}> In stock</label>
+    <noscript><button type="submit">Search</button></noscript>
+  </div>
+</form>
+<div id="results">{% include "_results.html" %}</div>
+{% endblock %}

@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-24): steps 1–3 done; the master component list is imported into `tadtruex_inventory` and search works on it. Steps 4–7 not started. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
+Status (2026-11-24): steps 1–3 done and step 4 built (the web app runs on broadpeak against `tadtruex_inventory_test`, not yet tried in a browser); the master component list is imported into `tadtruex_inventory`. Steps 5–7 not started. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -315,6 +315,39 @@ adding things fast; 7 is the BOM use.
   Suite 1958 passed on SQLite. On `tadtruex_inventory` (read only): about
   5 ms a query; `0.1uf 0603` → bins 57, 58; `stm32` → 4; `usb hub` → 2;
   `100nf` → nothing (`0.1uF` and `100nF` are not yet the same value).
+
+## Step 4 — as built (2026-11-24)
+
+- `src/kicadtools/web/`: `app.py` (`create_app(inventory_or_opener)`), Jinja
+  templates, `static/style.css` (light and dark), and htmx 2.0.4 vendored
+  as `static/htmx.min.js`, so the pages need nothing from the internet.
+  The `web` extra: FastAPI, uvicorn, Jinja2, python-multipart, rapidfuzz,
+  httpx (tests only).
+- Run: `kicadtools-web [--config FILE] [--host H] [--port 8080] [--reload]`,
+  on the database the config names; `uvicorn --factory
+  kicadtools.web.app:configured_app` does the same.
+- Pages as planned: search (htmx as you type, plain GET without JS; "Nothing
+  found" links to quick add with the name filled in), item (every field, −
+  / +, bin box to move it; a new bin path makes the bin), quick add (name,
+  bin, quantity, the rest under "More fields"; after Save the form comes
+  back empty with the same bin, for the next item), bin page (contents of
+  it and every bin inside, grouped; edit, add bin inside, rename, move,
+  delete when empty; a missing bin's page offers to make it), bins list (by
+  site, with counts, and the items in no bin). `/healthz` for the service.
+- Open-ended fields are `<input list>` with a `<datalist>` of the values
+  already used: the browser's own "pick one or type a new one", no JS.
+  Tags are one comma-separated box.
+- The site filter is remembered in a cookie (a year); the search page with
+  a remembered site offers "search every site" when nothing is found.
+- One database connection for the app, used under `PartsDb`'s lock from
+  FastAPI's thread pool; `PartsDb` pings it after 60 s idle.
+- No login and no CSRF tokens: the plan's access control is the tailnet
+  (step 5). Until then it listens on 127.0.0.1 only.
+- Tests: `tests/test_web.py` (22 tests, SQLite). Suite 1980 passed.
+- Live on broadpeak against `tadtruex_inventory_test` holding a copy of
+  the real bins and items: every page 5–18 ms.
+- Not built from the step 4 list: nothing. From later steps: DigiKey
+  autofill on quick add and labels (step 6).
 
 ## Open questions
 

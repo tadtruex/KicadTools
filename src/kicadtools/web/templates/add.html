@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Add · Inventory{% endblock %}
+{% block main %}
+<h1>Add an item</h1>
+{% if added %}<p class="ok">Added <a href="/item/{{ added.id }}">{{ added.name }}</a>{% if added.bin_path %} to {{ added.bin_path }}{% endif %}.</p>{% endif %}
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/add" class="fields">
+  <label>Name <input name="name" required autofocus value="{{ form.get('name', '') or request.query_params.get('name', '') }}"></label>
+  <div class="two">
+    <label>Bin <input name="bin" list="dl-bin" value="{{ bin }}" autocomplete="off" placeholder="C12/5" title="A new path makes the bin"></label>
+    <label>Quantity <input name="quantity" inputmode="numeric" value="{{ form.get('quantity', '') }}"></label>
+  </div>
+  <details {% if form and (form.get('category') or form.get('tags') or form.get('mpn')) %}open{% endif %}>
+    <summary>More fields</summary>
+    {% set item = none %}
+    {% include "_item_fields.html" %}
+  </details>
+  <div class="actions"><button type="submit" class="primary">Save</button></div>
+</form>
+{% endblock %}

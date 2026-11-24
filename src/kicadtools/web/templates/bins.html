@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Bins · Inventory{% endblock %}
+{% block main %}
+<h1>Bins</h1>
+{% for site, bins in by_site %}
+<h2>{{ site or "No site" }}</h2>
+<ul class="bins tree">
+{% for b in bins %}<li style="--depth: {{ b.depth }}"><a href="{{ b.path|bin_url }}">{{ b.path if b.depth == 0 else b.name }}</a>
+  <span class="muted">{{ total.get(b.path, 0) }}</span>{% if b.location %} <span class="muted">· {{ b.location }}</span>{% endif %}</li>{% endfor %}
+</ul>
+{% endfor %}
+{% if unbinned %}
+<h2>In no bin</h2>
+<ul class="results">{% for item in unbinned %}<li><a class="name" href="/item/{{ item.id }}">{{ item.name }}</a> <span class="qty">{{ item.quantity|qty }}</span></li>{% endfor %}</ul>
+{% endif %}
+<details>
+  <summary>Add a bin</summary>
+  <form method="post" action="/bins" class="fields">
+    <div class="two">
+      <label>Name <input name="name" required placeholder="C12"></label>
+      <label>Inside <input name="parent" list="dl-bin" autocomplete="off" placeholder="(top level)"></label>
+    </div>
+    <label>Site <input name="site" list="dl-site" autocomplete="off"></label>
+    <div class="actions"><button type="submit" class="primary">Add bin</button></div>
+  </form>
+</details>
+{% endblock %}
