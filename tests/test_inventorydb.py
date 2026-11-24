@@ -121,6 +121,48 @@ def test_update_bin_sets_and_clears_fields(inv):
     assert inv.bin("C12").site is None and inv.site_of("C12") is None
 
 
+def test_a_bin_has_a_description(inv):
+    inv.add_bin("C12", description="Cabinet of small drawers")
+    assert inv.bin("C12").description == "Cabinet of small drawers"
+    inv.update_bin("C12", description="  Drawers 1-20: passives\nDrawers 21-40: switches  ")
+    assert inv.bin("C12").description == "Drawers 1-20: passives\nDrawers 21-40: switches"
+    inv.update_bin("C12", location="north wall")              # description kept
+    assert inv.bin("C12").description.startswith("Drawers 1-20")
+    inv.update_bin("C12", description="")
+    assert inv.bin("C12").description is None
+
+
+def test_free_text_keeps_line_breaks_and_names_do_not(inv):
+    item = inv.add_item("  Nano   Every ", description=" Line one\n  line two ",
+                        notes="a\n\nb", category="  Dev   board ")
+    assert (item.name, item.category) == ("Nano Every", "Dev board")
+    assert (item.description, item.notes) == ("Line one\n  line two", "a\n\nb")
+
+
+def test_a_bin_table_made_before_the_description_gains_it():
+    # The server's bin table was created (empty) before the column existed.
+    import kicadtools.inventorydb as inventorydb
+    db = new_db(now=lambda: STAMP)
+    schema = (inventorydb._MARIA_SCHEMA if db.backend == "mariadb"
+              else inventorydb._SQLITE_SCHEMA)
+    old = [stmt.replace("  description TEXT,\n", "") if "TABLE IF NOT EXISTS bin" in stmt
+           else stmt for stmt in schema]
+    with db._tx():
+        for stmt in old:
+            db._execute(stmt)
+        db._execute("INSERT INTO bin (name, path, updated_at) VALUES ('17', '17', ?)", (STAMP,))
+    probe = InventoryDb.__new__(InventoryDb)
+    probe.db = db
+    assert "description" not in probe._columns("bin")      # the old shape, really
+    inv = InventoryDb(db)
+    assert "description" in inv._columns("bin")
+    assert inv.bin("17").description is None
+    inv.update_bin("17", description="0603 resistors")
+    assert inv.bin("17").description == "0603 resistors"
+    InventoryDb(db)                                          # a second open adds nothing
+    assert inv.bin("17").description == "0603 resistors"
+
+
 def test_bins_sort_naturally(inv):
     for name in ("10", "2", "10001", "1", "C10", "C2"):
         inv.add_bin(name)

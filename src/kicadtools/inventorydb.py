@@ -10,8 +10,9 @@ The tables are in the parts database, beside the parts tables, and
   ``C12`` holds drawers ``C12/3`` and ``C12/5``. ``name`` is the bin's own
   name (no ``/``); ``path`` is the names from the top joined with ``/``,
   unique and compared ignoring case, so a URL or a QR code finds a bin with
-  one lookup. ``site`` (``"school"``, ``"home"`` …) is optional; a bin with
-  none takes its parent's (:meth:`InventoryDb.site_of`).
+  one lookup. ``description``, ``location`` and ``notes`` are free text.
+  ``site`` (``"school"``, ``"home"`` …) is optional; a bin with none takes
+  its parent's (:meth:`InventoryDb.site_of`).
 - ``item`` — one kind of thing in one bin: a name (the only required field),
   an optional approximate quantity, and optional category, manufacturer,
   MPN, DigiKey PN, LCSC number, URL, description and notes.
@@ -48,6 +49,7 @@ _SQLITE_SCHEMA = [
   name        TEXT NOT NULL,
   path        TEXT NOT NULL UNIQUE COLLATE NOCASE,
   site        TEXT COLLATE NOCASE,
+  description TEXT,
   location    TEXT,
   notes       TEXT,
   updated_at  TEXT NOT NULL
@@ -90,6 +92,7 @@ _MARIA_SCHEMA = [
   name        VARCHAR(100) NOT NULL,
   path        VARCHAR(255) {_CI} NOT NULL,
   site        VARCHAR(64) {_CI},
+  description TEXT,
   location    TEXT,
   notes       TEXT,
   updated_at  VARCHAR(32) NOT NULL,
@@ -132,7 +135,19 @@ _TEXT_FIELDS = ("description", "category", "manufacturer", "mpn", "digikey_pn", 
 _ITEM_COLS = ("id", "name", "description", "category", "manufacturer", "mpn",
               "digikey_pn", "lcsc", "quantity", "bin_id", "url", "notes",
               "created_at", "updated_at")
-_BIN_COLS = ("id", "parent_id", "name", "path", "site", "location", "notes", "updated_at")
+_BIN_COLS = ("id", "parent_id", "name", "path", "site", "description", "location", "notes",
+             "updated_at")
+
+# Columns added after a table was first created: (table, column, SQLite type,
+# MariaDB type). CREATE TABLE IF NOT EXISTS does not add a column to a table
+# that exists, so InventoryDb adds each one that is missing when it opens.
+_ADDED_COLUMNS = (
+    ("bin", "description", "TEXT", "TEXT"),
+)
+
+# Free-text fields: only surrounding whitespace is removed, so line breaks
+# in a description are kept. Other text is cleaned of repeated spaces too.
+_FREE_TEXT = ("description", "location", "notes", "url")
 
 # Fields whose used values values() lists: item columns and bin columns.
 _ITEM_VALUE_FIELDS = ("category", "manufacturer")
@@ -158,6 +173,7 @@ class Bin:
     name: str
     path: str
     site: Optional[str]          # this bin's own; see InventoryDb.site_of
+    description: Optional[str]
     location: Optional[str]
     notes: Optional[str]
     updated_at: str
@@ -201,6 +217,19 @@ def _clean(text: Optional[str]) -> Optional[str]:
         return None
     text = " ".join(str(text).split())
     return text or None
+
+
+def _clean_free(text: Optional[str]) -> Optional[str]:
+    """Free text with surrounding whitespace removed and line breaks kept;
+    ``None`` for ``None`` or blank."""
+    if text is None:
+        return None
+    text = str(text).strip()
+    return text or None
+
+
+def _clean_field(field: str, text: Optional[str]) -> Optional[str]:
+    return _clean_free(text) if field in _FREE_TEXT else _clean(text)
 
 
 def _check_len(field: str, value: Optional[str]) -> None:
@@ -268,6 +297,23 @@ class InventoryDb:
             with self._tx():
                 for statement in schema:
                     db._execute(statement)
+                self._add_missing_columns()
+
+    def _columns(self, table: str) -> List[str]:
+        if self.db.backend == "mariadb":
+            rows = self._x("SELECT column_name FROM information_schema.columns"
+                           " WHERE table_schema = DATABASE() AND table_name = ?", (table,))
+            return [r[0] for r in rows.fetchall()]
+        return [r[1] for r in self._x(f'PRAGMA table_info("{table}")').fetchall()]
+
+    def _add_missing_columns(self) -> None:
+        """Add each column of :data:`_ADDED_COLUMNS` its table lacks (a table
+        created before the column was defined). Existing rows get NULL."""
+        mariadb = self.db.backend == "mariadb"
+        for table, column, sqlite_type, maria_type in _ADDED_COLUMNS:
+            if column not in self._columns(table):
+                self._x(f'ALTER TABLE {table} ADD COLUMN {column} '
+                        f'{maria_type if mariadb else sqlite_type}')
 
     @contextmanager
     def _tx(self) -> Iterator[None]:
@@ -361,7 +407,8 @@ class InventoryDb:
         return None
 
     def add_bin(self, name: str, parent: Optional[str] = None, *, site: Optional[str] = None,
-                location: Optional[str] = None, notes: Optional[str] = None) -> Bin:
+                description: Optional[str] = None, location: Optional[str] = None,
+                notes: Optional[str] = None) -> Bin:
         """A new bin *name* inside *parent* (top level for ``None``)."""
         name = bin_name(name)
         site = _clean(site)
@@ -373,10 +420,11 @@ class InventoryDb:
             if self.bin(path) is not None:
                 raise InventoryError(f"bin {path!r} already exists")
             cur = self._x(
-                "INSERT INTO bin (parent_id, name, path, site, location, notes, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO bin (parent_id, name, path, site, description, location, notes,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (parent_bin.id if parent_bin else None, name, path, site,
-                 _clean(location), _clean(notes), self.db._now()))
+                 _clean_free(description), _clean_free(location), _clean_free(notes),
+                 self.db._now()))
             new_id = self._new_id(cur)
         return self.bin_by_id(new_id)
 
@@ -393,14 +441,15 @@ class InventoryDb:
                 parent = here
         return self._need_bin(path)
 
-    def update_bin(self, path: str, *, site: Any = _UNSET, location: Any = _UNSET,
-                   notes: Any = _UNSET) -> Bin:
-        """Set the bin's site, location or notes; a field not given is kept,
-        and ``None`` or ``""`` clears one."""
+    def update_bin(self, path: str, *, site: Any = _UNSET, description: Any = _UNSET,
+                   location: Any = _UNSET, notes: Any = _UNSET) -> Bin:
+        """Set the bin's site, description, location or notes; a field not
+        given is kept, and ``None`` or ``""`` clears one."""
         changes: Dict[str, Optional[str]] = {}
-        for field, value in (("site", site), ("location", location), ("notes", notes)):
+        for field, value in (("site", site), ("description", description),
+                             ("location", location), ("notes", notes)):
             if value is not _UNSET:
-                changes[field] = _clean(value)
+                changes[field] = _clean_field(field, value)
         _check_len("site", changes.get("site"))
         with self._tx():
             target = self._need_bin(path)
@@ -537,7 +586,7 @@ class InventoryDb:
         unknown = set(fields) - set(_TEXT_FIELDS)
         if unknown:
             raise TypeError(f"unknown item fields: {', '.join(sorted(unknown))}")
-        values = {f: _clean(fields.get(f)) for f in _TEXT_FIELDS}
+        values = {f: _clean_field(f, fields.get(f)) for f in _TEXT_FIELDS}
         for f, v in values.items():
             _check_len(f, v)
         quantity = self._quantity(quantity)
@@ -566,7 +615,7 @@ class InventoryDb:
         unknown = set(fields) - set(_TEXT_FIELDS)
         if unknown:
             raise TypeError(f"unknown item fields: {', '.join(sorted(unknown))}")
-        changes: Dict[str, Any] = {f: _clean(v) for f, v in fields.items()}
+        changes: Dict[str, Any] = {f: _clean_field(f, v) for f, v in fields.items()}
         for f, v in changes.items():
             _check_len(f, v)
         if name is not _UNSET:
