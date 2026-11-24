@@ -1,7 +1,9 @@
 # Parts database on a shared server — plan
 
 Move the accepted-parts database from the machine-local `~/Code/Boards/parts.sqlite`
-to the MariaDB database on the Reclaim Hosting account. The server is the
+to a MariaDB database on a shared server. That was first the Reclaim Hosting
+account; since 2026-11-23 it is a self-hosted Ubuntu machine (`broadpeak`,
+`10.0.10.13`), see "Move to the self-hosted server". The server is the
 source of truth: the Cockpit reads and writes it directly, on every machine,
 with nothing to push or sync. A machine can be lost and work continues from
 any workstation with KicadTools installed, the database password and an SSH
@@ -11,9 +13,15 @@ Local copies exist only as backups and as the read-only offline copy
 (decision 1); nothing is ever written to them by the Cockpit except a fresh
 download.
 
-Status (2026-11-23): steps 1–7 built; the real import (step 5) not yet run. Steps 8–9 not started.
+Status (2026-11-23): steps 1–7 built. The real import (step 5) was run into
+the Reclaim server from another machine; the database then moved to
+`broadpeak` from a phpMyAdmin dump. This Mac reads and writes `broadpeak`
+through the tunnel. Steps 8–9 not started.
 
-## What was checked (2026-11-23)
+## What was checked on the Reclaim server (2026-11-23)
+
+Kept as the record of the first server; the server in use is in the next
+section.
 
 | Item | Finding |
 |---|---|
@@ -27,9 +35,57 @@ Status (2026-11-23): steps 1–7 built; the real import (step 5) not yet run. St
 | `wait_timeout` | 28800 s: an idle connection is closed after 8 hours |
 | Driver | PyMySQL 2.2 (pure Python, no client library) |
 
-Data to move today: 47 parts (15 capacitors, 14 resistors, 2 inductors,
+Data to move at the time: 47 parts (15 capacitors, 14 resistors, 2 inductors,
 5 ICs, 9 through-hole, 2 LEDs), 83 supplier part numbers, 121 usage rows,
 11 settings, 1 rotation override.
+
+## Move to the self-hosted server (2026-11-23)
+
+The Reclaim server refused SSH (port 22, `Connection refused`) from this
+Mac's address, though outgoing SSH elsewhere and the server's port 443
+worked: the host filters SSH by client address, and adding each
+workstation's address there was not something to depend on. The database
+moved to a machine under the user's control.
+
+| Item | Finding |
+|---|---|
+| Server | MariaDB 11.8.6 (Ubuntu package) on `broadpeak`, Ubuntu 26.04.1 LTS, `10.0.10.13` |
+| Direct connection, port 3306 | Closed from the network; MariaDB binds `127.0.0.1` only |
+| SSH tunnel | Works: the Cockpit's own tunnel (step 4) as `tad@10.0.10.13`, key login, no prompt. The server sees `tadtruex_inventory@localhost`. |
+| Database and user | Same names as on Reclaim (`tadtruex_inventory`), so `config.toml` changed only in `[parts_db.ssh]` (`host`, `user`) |
+| Privileges | `ALL PRIVILEGES ON tadtruex_inventory.*` |
+| Engine | InnoDB |
+| Character set | Server default `utf8mb4` (`utf8mb4_uca1400_ai_ci`); the tables keep the collations the dump states |
+| `sql_mode` | `STRICT_TRANS_TABLES, ERROR_FOR_DIVISION_BY_ZERO, NO_AUTO_CREATE_USER, NO_ENGINE_SUBSTITUTION` |
+| `wait_timeout` | 28800 s, as on Reclaim |
+
+How the data moved: the Reclaim server could not be reached from here, so
+`kicadtools db pull` was not an option. A phpMyAdmin export of
+`tadtruex_inventory` (no `DROP TABLE` statements, no `DEFINER`s; keys,
+foreign keys and `AUTO_INCREMENT` added by `ALTER TABLE` at the end) was
+loaded with the `mariadb` client on `broadpeak`, after the empty tables a
+first connection had created were dropped. Checked through the tunnel
+afterwards: every table's row count equals the dump's (48 parts:
+15 capacitors, 14 resistors, 2 inductors, 6 ICs, 9 through-hole, 2 LEDs;
+85 supplier numbers, 122 usage rows, 11 settings, 1 rotation override),
+schema version 2, all 8 foreign keys, `part` `AUTO_INCREMENT` 49 (above the
+largest id, 48). KicadTools read the rotations and settings and wrote a
+backup (step 7) with 48 parts.
+
+For a later move, either way works:
+
+- **A dump** (phpMyAdmin or `mariadb-dump`), loaded with the `mariadb`
+  client into an empty database. A phpMyAdmin dump has no `DROP TABLE`, so
+  tables already there (KicadTools creates them on first connection) are
+  dropped first.
+- **`kicadtools db pull FILE`** on a machine that reaches the old server,
+  then `kicadtools db import --from FILE` against the new one. The import
+  takes the rotation overrides from the file's own `part_rotation` table as
+  well as from `--cache`, the file's value winning, and renames only the
+  default `parts.sqlite`, never a file named with `--from`.
+
+The MariaDB test suite (step 2) has not been run against 11.8; it needs a
+`tadtruex_inventory_test` database on `broadpeak` that the same user can use.
 
 ## Scope
 
@@ -100,8 +156,8 @@ database = "tadtruex_inventory"
 user = "tadtruex_inventory"
 
 [parts_db.ssh]
-host = "tadtruex.host.dartmouth.edu"
-user = "tadtruex"
+host = "10.0.10.13"         # broadpeak; was tadtruex.host.dartmouth.edu
+user = "tad"                 # was tadtruex
 remote_port = 3306
 ```
 
@@ -246,7 +302,14 @@ step that runs in one transaction, as the version-1 → 2 step does now.
    local one (47 parts, 83 supplier numbers, 121 usage rows, 11 settings,
    1 rotation), rolled back; the server's tables were created and are empty.
    The real import is run when step 6 is in, so the Cockpit never opens a
-   new empty local file after `parts.sqlite` is renamed.
+   new empty local file after `parts.sqlite` is renamed. It was run (on
+   another machine) into the Reclaim server.
+
+   Changed with the move to `broadpeak`: the import also reads the source
+   file's `part_rotation` table, so a file from `kicadtools db pull` keeps
+   its overrides (before, only `--cache` was read and they were dropped);
+   and only the default `parts.sqlite` is renamed after an import, so
+   importing from a pulled file or a backup leaves that file in place.
 6. **Cockpit.** Open the server; the status bar names it (`parts DB:
    tadtruex_inventory (server)`); the offline behaviour of decision 1; the
    rotation store on the same backend.
