@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-24): steps 1–3 done and step 4 built (the web app runs on broadpeak against `tadtruex_inventory_test`, not yet tried in a browser); the master component list is imported into `tadtruex_inventory`. Steps 5–7 not started. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
+Status (2026-11-24): steps 1–3 done and step 4 built (the web app runs on broadpeak against `tadtruex_inventory_test`, not yet tried in a browser); the master component list is imported into `tadtruex_inventory`. Step 5's deploy script is written (`scripts/deploy_inventory_web.sh`, release `kt_v0.1a`), not yet run; steps 6–7 not started. Decided 2026-11-24, not built: sites and bins become one hierarchy of locations (see "Decided 2026-11-24" below), and QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -22,6 +22,70 @@ Number** column: 113 rows have one, all different (one item per bin today);
 (or boxes). Everything in the file is at school. 9 rows have no bin
 (`100uF`, `150uF`, `Gecko BT Module`, `47pF`, `1uF`, `10nF`, `USBDF01W5`,
 `USBDF02W6`, `30V 100mA Schottky`) and were imported with none.
+
+## Decided 2026-11-24: sites become locations, bins become locations
+
+Not built yet. This changes the "Bins" and "Imported bins" decisions
+below and the data model, search and web app sections after them; those
+sections still describe what is built today.
+
+- **No site.** The site is the first element of the hierarchy, not a
+  field: what is `17` with site `school` today becomes `school/17`. The
+  `site` column, `site_of`, `values("site")` and the inherit-from-parent
+  rule go.
+- **"Bin" becomes "Location".** A location is anything in the hierarchy:
+  a lab (`school`), a cabinet (`school/C12`), a drawer (`school/C12/5`), a
+  box. The word covers all of them; "bin" fits only the last two. Applies
+  to the table, the code (`InventoryDb`, `inventory.py`, the web app), the
+  URLs (`/location/school/C12/5`, the address a QR code encodes) and every
+  word on the pages.
+
+What follows from it:
+
+- **Data:** the 113 imported bins move under one top-level location
+  `school`; the 9 items with no bin stay with no location.
+- **Schema:** `bin` → `location`, `item.bin_id` → `item.location_id`,
+  `site` dropped. This is a migration on a populated database
+  (rename, move, drop), unlike the `CREATE TABLE IF NOT EXISTS` additions
+  so far. It runs from the user's account: the web app's database user
+  (`deploy_inventory_web.sh`) cannot ALTER, and its grants name `bin`, so
+  the script changes with it. Backups and `kicadtools db pull` change to
+  the new table name.
+- **Search:** the site filter becomes a filter on the top-level location
+  (still remembered in a cookie); "site" leaves the searched fields, since
+  the location path already holds it.
+- **Name clash:** a bin has a free-text field `location` today ("rack by
+  the bench, top shelf"). With the table called `location` it needs
+  another name. Open question.
+- **When:** before labels are printed (step 6), since a printed QR code
+  holds the URL. Best before real data is entered through the deployed app,
+  so the migration moves only the imported rows.
+
+## Decided 2026-11-24: QR codes use a name the user owns
+
+The QR codes do not encode `broadpeak.tail7c4deb.ts.net`. That name is
+Tailscale's, and it changes if the tailnet or the machine is renamed or
+moved off Tailscale, which would make every printed label wrong. The labels
+encode a name under a domain the user controls (e.g.
+`inventory.<domain>`), which can point somewhere else later.
+
+- **Prerequisite (the user's):** a nameserver up and running for that
+  domain. Before step 6.
+- **Labels:** the base URL a QR code encodes is a setting
+  (`config.toml` on the service account), not taken from the request and
+  not written in the code.
+- **What the name resolves to:** broadpeak's tailnet address
+  (`100.120.78.89`), so it still answers only to devices in the tailnet.
+  Not decided: a public record holding a private address, or the
+  nameserver added to the tailnet as split DNS for the domain.
+- **Certificate:** `tailscale serve` has a certificate for the `ts.net`
+  name only. HTTPS on the new name needs its own certificate, e.g. from
+  Let's Encrypt with a DNS-01 challenge against the new nameserver
+  (broadpeak's ports 80 and 443 are closed to the internet, so HTTP-01 is
+  out), and something on broadpeak that presents it (Caddy, or uvicorn
+  with the certificate files). Plain HTTP over the tailnet is the
+  alternative: WireGuard already encrypts it, but phones warn about
+  `http://` pages.
 
 ## Decisions (2026-11-23)
 
@@ -166,7 +230,10 @@ address, so the app needs a way in from outside the home network:
   on the home router and nothing is on the public internet, so no login
   page is needed while the user is the only user: being in the tailnet is
   the login.
-- The QR codes encode that URL, so a scan works in any of the three labs.
+- The QR codes encode a name under the user's own domain that resolves to
+  broadpeak in the tailnet, not the `ts.net` URL (decided 2026-11-24, see
+  "QR codes use a name the user owns"), so a scan works in any of the
+  three labs.
 - The same tailnet fixes the Cockpit's database access away from home:
   `config.toml` names `broadpeak` instead of `10.0.10.13`, and the SSH
   tunnel works from the barn and the school (DB plan step 8).
@@ -358,3 +425,9 @@ adding things fast; 7 is the BOM use.
 2. **Boxes 1–142.** Do they sit in something worth making a bin (a rack or
    a cabinet at school)? They were imported top-level; `move_bin` can put
    them inside one at any time.
+3. **The free-text `location` field.** A bin's `location` ("rack by the
+   bench, top shelf") needs a new name once the table is `location`
+   (see "Decided 2026-11-24").
+4. **The QR code name.** Which domain and name, whether it resolves through
+   public DNS or the tailnet's split DNS, and how HTTPS works on it (see
+   "Decided 2026-11-24: QR codes use a name the user owns").
