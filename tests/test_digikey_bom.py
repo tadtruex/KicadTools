@@ -228,8 +228,7 @@ def no_standard_libs(tmp_path, monkeypatch):
     """Point the standard footprint library fallback at an empty folder, so a
     part not on the synthetic board stays of undetermined mounting instead of
     being read from this repo's Libraries/kicad-footprints."""
-    import kicadtools.footprints as footprints
-    monkeypatch.setattr(footprints, "DEFAULT_REPO_ROOT", tmp_path / "no_repo")
+    monkeypatch.setenv("KICADTOOLS_REPO_ROOT", str(tmp_path / "no_repo"))
 
 
 def _write_pcb(path, entries):

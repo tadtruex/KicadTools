@@ -7,8 +7,9 @@ parameters and supplier part numbers, so a later search for the same
 requirement finds it before any supplier query. A rejected part is recorded
 too, with status ``rejected``, and is excluded from every candidate list.
 
-The default file is ``~/Code/Boards/parts.sqlite`` (the same relative layout on
-every machine), overridable with ``KICADTOOLS_PARTS_DB``. The file is listed in
+The default file is ``parts.sqlite`` at the root of the Boards checkout
+KicadTools runs from (:func:`kicadtools.repo.repo_root`, wherever it is),
+overridable with ``KICADTOOLS_PARTS_DB``. The file is listed in
 ``Boards/.gitignore`` and is machine-local.
 
 Tables (see ``CAPACITOR_PLAN.md`` and ``IC_PLAN.md`` step 7):
@@ -66,6 +67,7 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Any, Callable, ClassVar, Dict, Iterator, List, Optional, Sequence, Union
 
+from kicadtools import repo
 from kicadtools.parttypes import CAPACITOR, INDUCTOR, RESISTOR, part_type
 
 SCHEMA_VERSION = 2
@@ -420,11 +422,16 @@ def _table(kind: str) -> _Table:
 
 
 def default_path() -> Path:
-    """``$KICADTOOLS_PARTS_DB`` when set, else ``~/Code/Boards/parts.sqlite``."""
+    """``$KICADTOOLS_PARTS_DB`` when set, else ``parts.sqlite`` at the repo root
+    (:func:`kicadtools.repo.repo_root`), else ``~/.kicadtools/parts.sqlite``
+    when KicadTools is not run from a checkout."""
     env = os.environ.get(ENV_VAR)
     if env:
         return Path(env).expanduser()
-    return Path.home() / "Code" / "Boards" / "parts.sqlite"
+    root = repo.repo_root()
+    if root is not None:
+        return root / "parts.sqlite"
+    return Path.home() / ".kicadtools" / "parts.sqlite"
 
 
 def _utc_now() -> str:

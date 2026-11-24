@@ -264,8 +264,8 @@ def test_default_path_honours_env(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("KICADTOOLS_PARTS_DB", str(tmp_path / "x.sqlite"))
     assert default_path() == tmp_path / "x.sqlite"
     monkeypatch.delenv("KICADTOOLS_PARTS_DB")
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    assert default_path() == tmp_path / "Code" / "Boards" / "parts.sqlite"
+    monkeypatch.setenv("KICADTOOLS_REPO_ROOT", str(tmp_path / "Anywhere"))
+    assert default_path() == tmp_path / "Anywhere" / "parts.sqlite"
 
 
 def test_manufacturer_and_mpn_case_and_whitespace_insensitive():

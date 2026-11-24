@@ -92,6 +92,7 @@ from kicadtools.ledsearch import LedLookup, assess_led
 from kicadtools.package import PackageInfo, parse_footprint
 from kicadtools.partnum import extract_part_numbers
 from kicadtools.partsdb import PartsDb
+from kicadtools.repo import repo_root
 from kicadtools.partsearch import Candidate, ExistingLookup, assess, requirement_from_lookup
 from kicadtools.parttypes import PartType
 from kicadtools.requirement import (
@@ -288,9 +289,13 @@ def requirement_settings(req: PartRequirement) -> Dict[str, str]:
 
 def board_label(board: Path, root: Optional[Path] = None) -> str:
     """The board path as recorded in the usage table: relative to *root*
-    (default ``~/Code/Boards``) when the board is inside it, else absolute."""
-    root = root if root is not None else Path.home() / "Code" / "Boards"
+    (default: the repo root, :func:`kicadtools.repo.repo_root`) when the board
+    is inside it, else absolute. Relative labels stay the same on every
+    machine, wherever the checkout is."""
+    root = root if root is not None else repo_root()
     board = Path(board).resolve()
+    if root is None:
+        return str(board)
     try:
         return board.relative_to(Path(root).resolve()).as_posix()
     except ValueError:

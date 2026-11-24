@@ -282,7 +282,7 @@ def test_main_window_parts_tab_round_trip(window, tmp_path):
     assert not win.isWindowModified()
     assert model.status(1) == STATUS_UNASSIGNED
     assert (tmp_path / "parts.sqlite").exists()
-    # The usage rows name the board by its absolute path (outside ~/Code/Boards).
+    # The usage rows name the board by its absolute path (outside the repo root).
     hits = win._parts_db.find_parts(kind="capacitor",
         nominal=100e-9, package="0603", rating_min=16.0,
         dielectrics=("X7R",), tolerance_max_pct=10.0,

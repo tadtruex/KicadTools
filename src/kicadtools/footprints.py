@@ -31,6 +31,7 @@ from typing import Callable, Dict, Iterable, Optional, Tuple, TypeVar
 
 from sexpdata import Symbol, loads
 
+from kicadtools import repo
 from kicadtools.pcb import (
     Pad,
     Placement,
@@ -41,10 +42,9 @@ from kicadtools.pcb import (
 )
 
 # This repo's checkout of KiCad's standard footprint libraries, relative to the
-# repo root, and the repo root assumed when the board is not inside the repo
-# (a scratch copy). Same layout assumption as ``partsdb.default_path``.
+# repo root. A board outside the repo (a scratch copy) falls back to the repo
+# KicadTools runs from (:func:`kicadtools.repo.repo_root`).
 STANDARD_LIBS_RELATIVE = Path("Libraries") / "kicad-footprints"
-DEFAULT_REPO_ROOT = Path.home() / "Code" / "Boards"
 
 # ``${KICAD9_FOOTPRINT_DIR}`` and friends name KiCad's standard library folder.
 _STANDARD_DIR_VAR = re.compile(r"^KICAD\d*_FOOTPRINT_DIR$")
@@ -158,16 +158,20 @@ def parse_fp_lib_table(
     return libs
 
 
-def default_standard_dir(start: Optional[Path] = None) -> Path:
+def default_standard_dir(start: Optional[Path] = None) -> Optional[Path]:
     """KiCad's standard footprint libraries: ``Libraries/kicad-footprints`` in
-    the first folder above *start* that has one, else under
-    :data:`DEFAULT_REPO_ROOT`."""
+    the first folder above *start* that has one, else in the repo KicadTools
+    runs from (:func:`kicadtools.repo.repo_root`); ``None`` when neither has
+    one."""
     if start is not None:
         for folder in [Path(start), *Path(start).parents]:
             candidate = folder / STANDARD_LIBS_RELATIVE
             if candidate.is_dir():
                 return candidate
-    return DEFAULT_REPO_ROOT / STANDARD_LIBS_RELATIVE
+    root = repo.repo_root()
+    if root is not None and (root / STANDARD_LIBS_RELATIVE).is_dir():
+        return root / STANDARD_LIBS_RELATIVE
+    return None
 
 
 def split_lib_id(lib_id: str) -> Optional[Tuple[str, str]]:
@@ -201,7 +205,7 @@ class FootprintPads:
         if project_dir is None and self.pcb_path is not None:
             project_dir = self.pcb_path.parent
         self.project_dir = Path(project_dir) if project_dir is not None else None
-        self.standard_dir = (
+        self.standard_dir: Optional[Path] = (
             Path(standard_dir) if standard_dir is not None else default_standard_dir(self.project_dir)
         )
         self._placements = None
@@ -238,6 +242,8 @@ class FootprintPads:
         lib, name = parts
         folder = self._lib_table().get(lib)
         if folder is None:
+            if self.standard_dir is None:
+                return None
             folder = self.standard_dir / f"{lib}.pretty"
         path = folder / f"{name}.kicad_mod"
         return path if path.is_file() else None

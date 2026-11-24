@@ -1,7 +1,7 @@
 """List through-hole parts without a DigiKey PN across the boards, by tier.
 
 Run from Code/KicadTools: ``.venv/bin/python scripts/tht_survey.py [boards.txt]``.
-*boards.txt* lists schematic paths relative to ~/Code/Boards, one per line;
+*boards.txt* lists schematic paths relative to the repo root, one per line;
 without it every ``.kicad_sch`` with a ``.kicad_pcb`` beside it is surveyed
 (Libraries and backups skipped). See THT_PLAN.md, "Evidence from the boards".
 """
@@ -13,6 +13,7 @@ from kicadtools.partnum import extract_part_numbers
 from kicadtools.classify import guess_intent_type
 from kicadtools.pcb import read_mounting_for_schematic, THT, SMD, sibling_pcb
 from kicadtools.footprints import FootprintPads
+from kicadtools.repo import repo_root
 
 def lib_mounting(fpads, lib_id):
     path = fpads.footprint_file(lib_id) if lib_id else None
@@ -27,7 +28,9 @@ def lib_mounting(fpads, lib_id):
     if "through_hole" in attr: return THT, pads
     return ("tht?" if th else ("smd?" if smd else None)), pads
 
-B = Path.home() / "Code/Boards"
+B = repo_root()
+if B is None:
+    sys.exit("not in a Boards checkout; set KICADTOOLS_REPO_ROOT")
 if len(sys.argv) > 1:
     BOARDS = [l.strip() for l in open(sys.argv[1]) if l.strip()]
 else:

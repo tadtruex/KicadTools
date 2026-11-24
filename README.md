@@ -714,9 +714,14 @@ Double-clicking such a row shows the reason in the status bar.
 
 #### Parts database
 
-The parts database is a SQLite file at `~/Code/Boards/parts.sqlite` (the same
-path relative to the home directory on every machine); set
-`KICADTOOLS_PARTS_DB` to use another file. It can instead be the MariaDB
+The parts database is a SQLite file, `parts.sqlite` at the root of the
+Boards checkout, wherever that checkout is. KicadTools finds the root by
+walking up from its own location to the folder holding `.gitmodules` and
+`Libraries/`; set `KICADTOOLS_REPO_ROOT` to name another root, or
+`KICADTOOLS_PARTS_DB` to use another file. The same root supplies the
+standard footprint libraries (`Libraries/kicad-footprints`) for a board
+copied outside the repo, and board paths in the usage table are recorded
+relative to it. It can instead be the MariaDB
 database on a server, which every machine reads and writes (see **Parts
 database on a server** below). It holds each accepted or rejected
 part with its type, its parameters (capacitors: capacitance, voltage rating,

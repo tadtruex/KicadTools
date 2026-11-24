@@ -851,7 +851,7 @@ def main(argv=None) -> int:
     )
     imp.add_argument("--from", dest="source", default=None,
                      help="the SQLite parts file, such as one written by `kicadtools db "
-                          "pull` (default: ~/Code/Boards/parts.sqlite, renamed after the "
+                          "pull` (default: parts.sqlite at the repo root, renamed after the "
                           "import)")
     imp.add_argument("--cache", default=str(_DEFAULT_CACHE),
                      help="the cache holding older CPL rotation overrides; the source "
