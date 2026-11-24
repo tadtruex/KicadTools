@@ -3,6 +3,155 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Handoff: inventory work moves to broadpeak (2026-11-23)
+
+Development continues on `broadpeak` (10.0.10.13, Ubuntu 26.04, Python 3.14,
+MariaDB 11.8) instead of the Mac. Next focus: **search and insert** for the
+lab inventory (`INVENTORY_PLAN.md` step 3, and adding items).
+
+### Where things stand
+
+- Branch `develop`, everything pushed (last: `4634757`). Recent commits: the
+  parts database moved to broadpeak (`DB_PLAN.md`), the inventory tables
+  (`4df391e`), bin descriptions (`b948763`), the spreadsheet import
+  (`cd56e2f`).
+- Database `tadtruex_inventory` on broadpeak's MariaDB:
+  - parts: 52 parts, 138 usage rows (the Cockpit's data);
+  - inventory: 113 bins (`1`–`142` with gaps, `10001`, `10004`, all
+    top-level, site `school`, no description/location/notes yet), 122 items
+    (9 in no bin), 0 tags. Imported from `Libraries/Master Component
+    List.numbers`; the database is now the source, not the spreadsheet.
+- Test database `tadtruex_inventory_test`, same user, all privileges. The
+  test harness drops every table in it before each test.
+- Plans: `INVENTORY_PLAN.md` (steps 1–2 done, with "as built" sections; the
+  design for search and the web app is in its "Search" and "Web app"
+  sections), `DB_PLAN.md` (the server; steps 8–9 still open).
+- Left on the Mac: the `Libraries` submodule shows `Master Component
+  List.numbers` modified (21:17, about 300 bytes larger; not written by any
+  KicadTools code). Not needed on broadpeak. Commit it in `Libraries` or
+  discard it there.
+
+### Setting up on broadpeak
+
+There is no checkout or `~/.kicadtools` on broadpeak yet. GitHub SSH works
+from it.
+
+```bash
+mkdir -p ~/Code && cd ~/Code
+git clone git@github.com:tadtruex/Boards && cd Boards && git checkout develop
+git submodule update --init Libraries     # optional: only the import test's
+                                          # real-file check reads it
+cd Code/KicadTools
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev,server,inventory]"  # add ,gui for the Cockpit and its tests
+```
+
+Python 3.14 is untested with this project. If a wheel will not install
+(PySide6 is the likely one), leave out `gui`: search and insert do not need
+it, and the GUI tests are then the only ones that cannot run.
+
+`~/.kicadtools/config.toml` on broadpeak. MariaDB is local, so no tunnel:
+with `local_port = 3306` the tunnel code finds the port already answering
+and connects to it without starting ssh. `host` and `user` are required by
+the config reader but unused here.
+
+```toml
+[parts_db]
+backend = "mariadb"
+database = "tadtruex_inventory"
+user = "tadtruex_inventory"
+
+[parts_db.ssh]
+host = "localhost"   # required, unused
+user = "tad"         # required, unused
+local_port = 3306    # MariaDB answers here, so ssh is not started
+```
+
+The database password goes in `~/.kicadtools/db_password` (one line, mode
+`0600`); copy it from the Mac (`mkdir -m 700 ~/.kicadtools` on broadpeak,
+then `scp ~/.kicadtools/db_password tad@10.0.10.13:.kicadtools/` from the
+Mac), or let the first command ask for it and write the file.
+
+Check: `kicadtools db pull ~/parts-check.sqlite` prints the row counts per
+table; expect `bin 113, item 122, item_tag 0` and `part 52`.
+
+### Tests on broadpeak
+
+```bash
+QT_QPA_PLATFORM=offscreen pytest -q        # SQLite (GUI tests need the gui extra)
+
+# The database tests on SQLite and MariaDB; port 3306 directly, no tunnel.
+KICADTOOLS_TEST_DB_NAME=tadtruex_inventory_test \
+KICADTOOLS_TEST_DB_USER=tadtruex_inventory \
+KICADTOOLS_TEST_DB_PORT=3306 \
+KICADTOOLS_DB_PASS="$(cat ~/.kicadtools/db_password)" \
+  pytest -q tests/test_inventorydb.py tests/test_inventoryimport.py \
+    tests/test_partsdb.py tests/test_thtdb.py tests/test_dbimport.py tests/test_dbbackup.py
+```
+
+On the Mac at handoff: suite 1941 passed, 1 skipped (SQLite); the database
+tests 232 passed, 12 skipped on both engines. Never set
+`KICADTOOLS_TEST_DB_NAME` to `tadtruex_inventory`: the harness refuses a
+name not ending `_test` because it drops every table.
+
+### Search and insert: what exists, what is next
+
+What exists (`src/kicadtools/inventorydb.py`, `InventoryDb(parts_db)`):
+
+- reading: `items(bin=None, recursive=True)`, `item(id)`, `unbinned()`,
+  `bins()`, `bin(path)`, `children(path)`, `subtree(path)`, `site_of(path)`;
+- writing: `add_item(name, bin=…, quantity=…, tags=[…], category=…,
+  manufacturer=…, mpn=…, digikey_pn=…, lcsc=…, url=…, description=…,
+  notes=…)` (a bin path that does not exist is made, with its parents),
+  `update_item(id, …)`, `adjust_quantity(id, delta)`, `delete_item(id)`,
+  `add_bin`, `ensure_bin`, `update_bin(path, description=…, location=…,
+  notes=…, site=…)`, `rename_bin`, `move_bin`, `delete_bin`;
+- for "pick a used value or type a new one" boxes: `values("category" |
+  "manufacturer" | "site")`, `tags()`.
+
+Opening it: `dbconnect.open_parts_db(load_config(), terminal_ask)` gives a
+session; `InventoryDb(session.db)`; `session.close()` at the end (see
+`_inventory_import` in `cli.py`).
+
+Next, per `INVENTORY_PLAN.md`:
+
+1. **Search** (step 3): a new `src/kicadtools/inventory.py` with
+   `search(inv, query, *, site=None, category=None, bin=None,
+   in_stock=False)`. It loads all items and bins once (a few hundred rows)
+   and matches every query word against the name, description, category,
+   tags, manufacturer, MPN, DigiKey PN, bin path, site, and the bin's
+   description and location, as a substring, ignoring case; typos through
+   `rapidfuzz` (add it to the `inventory` extra); name matches rank above
+   description matches.
+2. **Insert**: the database side is `add_item` / `ensure_bin`. The plan puts
+   quick add in the web app (step 4). A small CLI (`kicadtools inventory add
+   NAME --bin C12/5 --qty 6 --tag arduino`, `kicadtools inventory find
+   QUERY`) would make both usable on broadpeak before the web app exists.
+   Not decided yet.
+
+Things to know for that work:
+
+- The imported data has no tags, no manufacturers and nothing but SMD
+  parts, so search tests must add their own items (dev boards, screws,
+  tools). Real queries that work on today's data: `0.1uf 0603` (bins 57,
+  58), `4.7k`, `stm32`, `usb hub`, `3.3v`.
+- `0.1uF` and `100nF` are the same value; matching values across spellings
+  would use the parsers in `units.py`. Not in the plan yet.
+- Multi-step writes go through `InventoryDb._tx()`, which nests (only the
+  outermost block commits). `PartsDb._tx()` commits at the end of every
+  block, so calling it inside another one breaks atomicity.
+- A new column on an existing table: add it to the `CREATE TABLE`
+  statements (both engines) and to `_ADDED_COLUMNS`, which adds it to
+  tables that already exist when `InventoryDb` opens.
+- Free text (description, location, notes, URL) keeps line breaks; names,
+  categories, part numbers, sites and tags have repeated spaces collapsed.
+  Bin names cannot contain `/`.
+- Known data errors from the spreadsheet, to fix through the app: bin 19
+  (`1M 0603`) has tolerance `1%%` and a DigiKey PN for a 10k part; bin 3's
+  MPN reads `CR003-JW-331ELF` beside DigiKey `CR0603-JW-331ELFCT-ND`.
+- Tailscale (step 5) is not installed yet. Until it is, the web app is
+  reachable from the home network only.
+
 ## Parts tab: capacitor, resistor, inductor and IC assignment (through 2026-11-03)
 
 Through-hole parts are a separate path; see the next section.
