@@ -26,10 +26,6 @@ lab inventory (`INVENTORY_PLAN.md` step 3, and adding items).
 - Plans: `INVENTORY_PLAN.md` (steps 1–2 done, with "as built" sections; the
   design for search and the web app is in its "Search" and "Web app"
   sections), `DB_PLAN.md` (the server; steps 8–9 still open).
-- Left on the Mac: the `Libraries` submodule shows `Master Component
-  List.numbers` modified (21:17, about 300 bytes larger; not written by any
-  KicadTools code). Not needed on broadpeak. Commit it in `Libraries` or
-  discard it there.
 
 ### Setting up on broadpeak
 
