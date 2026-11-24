@@ -638,6 +638,49 @@ def _db_import(args) -> int:
     return 0
 
 
+def _inventory_import(args) -> int:
+    """``kicadtools inventory import FILE --site SITE``: the one-time copy of
+    the master component list into the empty inventory of the configured
+    parts database (INVENTORY_PLAN.md step 2)."""
+    from kicadtools.dbconfig import ConfigError, PasswordCancelled, load_config, terminal_ask
+    from kicadtools.dbconnect import open_parts_db
+    from kicadtools.inventorydb import InventoryDb
+    from kicadtools.inventoryimport import (InventoryImportError, convert, import_items,
+                                            read_table)
+
+    source = Path(args.file).expanduser()
+    try:
+        items, report = convert(read_table(source))
+    except InventoryImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        session = open_parts_db(config, terminal_ask)
+    except PasswordCancelled:
+        print("cancelled", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - TunnelError, PyMySQL errors: reported
+        print(f"error: could not open {config.label}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        report = import_items(InventoryDb(session.db), items, site=args.site,
+                              report=report, dry_run=args.dry_run)
+    except InventoryImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+    print(f"{source} -> {config.label}, site {args.site}")
+    for line in report.lines():
+        print("  " + line)
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="kicadtools",
@@ -823,6 +866,18 @@ def main(argv=None) -> int:
                           help="the file to write (default: a dated backup in "
                                "~/.kicadtools/backups, keeping the newest 10)")
     pull_cmd.set_defaults(func=_db_pull)
+
+    inv = sub.add_parser("inventory", help="The lab inventory (INVENTORY_PLAN.md)")
+    inv_sub = inv.add_subparsers(dest="inventory_command", required=True)
+    inv_imp = inv_sub.add_parser(
+        "import",
+        help="Copy the master component list (.numbers or .csv) into the empty inventory, once")
+    inv_imp.add_argument("file", help="the spreadsheet: .numbers, or a CSV export of it")
+    inv_imp.add_argument("--site", required=True,
+                         help="the site of every imported bin, such as school")
+    inv_imp.add_argument("--dry-run", action="store_true",
+                         help="convert and write everything, then roll back")
+    inv_imp.set_defaults(func=_inventory_import)
 
     args = parser.parse_args(argv)
     return args.func(args)

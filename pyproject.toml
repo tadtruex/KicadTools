@@ -15,6 +15,9 @@ dev = ["pytest>=7"]
 gui = ["PySide6>=6.6"]
 # The parts database on a MariaDB server (DB_PLAN.md).
 server = ["PyMySQL>=1.1"]
+# Reading the master component list (.numbers) for the inventory import
+# (INVENTORY_PLAN.md step 2); a CSV export needs nothing extra.
+inventory = ["numbers-parser>=4.10"]
 
 [project.scripts]
 kicadtools = "kicadtools.cli:main"

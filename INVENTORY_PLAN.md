@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-23): step 1 (schema) built, not yet committed. Steps 2–7 not started.
+Status (2026-11-23): step 1 built and committed. Step 2 built, not committed; dry run against `tadtruex_inventory` done, the real import not yet run. Steps 3–7 not started.
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -66,10 +66,10 @@ bin                                 item
              case-insensitive         digikey_pn   optional
   site       optional; NULL takes     lcsc         optional
              the parent's             quantity     optional integer, approximate
-  location   free text; optional      bin_id       FK → bin, optional
-  notes                               url          datasheet or product page
-  updated_at                          notes
-                                      created_at, updated_at
+  description free text; optional     bin_id       FK → bin, optional
+  location   free text; optional      url          datasheet or product page
+  notes                               notes
+  updated_at                          created_at, updated_at
 item_tag
   item_id    FK → item (cascade)
   tag        "arduino", "avr"; one row per tag, unique per item, case-insensitive
@@ -186,8 +186,9 @@ the app on the internet and needs a router port forward at home.
    field), the backup and pull changes; tests on SQLite and MariaDB.
 2. **Import.** `kicadtools inventory import FILE [--site school] [--dry-run]`
    reads the Numbers file (`numbers-parser`) or a CSV export: Comp Number →
-   bin (one top-level bin per number, named `"17"`, site `school`; 1–142
-   with notes "static-safe box", 10001 and 10004 with "partial reel"), Component Type →
+   bin (one top-level bin per number, named `"17"`, site `school`, nothing
+   else set: a bin's description, location and notes are set on the bin
+   later), Component Type →
    category (`R` → Resistor, `C` → Capacitor, `L` → Inductor, `D` → Diode,
    `Q` → Transistor, `U` → IC, `VR` → Regulator, `P` → Processor, `Y` →
    Crystal), Value + Package → name (`"4.7k 0603"`), Description and
@@ -224,9 +225,16 @@ adding things fast; 7 is the BOM use.
     `update_item`, `adjust_quantity` (never below zero), `delete_item`;
   - values used so far: `values("category" | "manufacturer" | "site")`,
     `tags()`.
-- Names and values are cleaned of surrounding and repeated whitespace;
-  paths, sites, categories, manufacturers, part numbers and tags compare
-  ignoring case. Lengths are checked against the MariaDB columns on both
+- A bin is a row of its own with a description, a location and notes, set
+  with `add_bin` or later with `update_bin(path, description=…)`.
+  `description` was added after the tables were first created on the
+  server; `InventoryDb` adds a column a table lacks when it opens
+  (`_ADDED_COLUMNS`), so an older table gains it with its rows kept.
+- Free text (description, location, notes, URL) keeps its line breaks and
+  loses only surrounding whitespace. Names, categories, manufacturers, part
+  numbers, sites and tags are cleaned of surrounding and repeated
+  whitespace. Paths, sites, categories, manufacturers, part numbers and
+  tags compare ignoring case. Lengths are checked against the MariaDB columns on both
   engines. Bins and items sort naturally (`2` before `10`).
 - `InventoryDb` has its own transaction that nests: the methods call one
   another (`add_item` → `ensure_bin` → `add_bin`), and only the outermost
@@ -239,6 +247,39 @@ adding things fast; 7 is the BOM use.
   Suite: 1920 passed on SQLite; the database tests 191 passed on both.
 - `tadtruex_inventory` itself has no inventory tables yet: they are created
   the first time anything opens an `InventoryDb` on it (the import, step 2).
+
+## Step 2 — as built (2026-11-23)
+
+- `src/kicadtools/inventoryimport.py`: `read_table` (`.numbers` through
+  `numbers-parser`, the optional `inventory` extra, or a `.csv` export),
+  `convert` (columns found by header, ignoring case and spacing),
+  `import_items` (one transaction; refuses an inventory that holds any bin
+  or item; `dry_run` does everything and rolls back).
+- `kicadtools inventory import FILE --site SITE [--dry-run]`, on the
+  configured parts database (the server, or a SQLite file).
+- Conversions beyond the plan, from what the sheet holds:
+  - a resistor value stored as a number gets `Ω` (`330.0` → `330Ω 0603`);
+    one written as text keeps its spelling (`4.7k 0603`);
+  - Tolerance holds a capacitor's dielectric (`X7R`) or a digipot's step
+    count (`256 Steps`) as text, kept; a fraction is a percentage;
+  - a number in Description is a capacitor's voltage or an inductor's
+    current (`50.0` → `50V`, `3.5` → `3.5A`);
+  - a part number stored as a number keeps every digit
+    (`860160674023`, not `8.60161e+11`);
+  - CSV text converts the same as the Numbers cells (`"603"` → `0603`).
+- Bins: one top-level bin per Comp Number, with the site given and nothing
+  else. A bin is a row of its own; its notes and location are set later with
+  `update_bin(path, …)`, one update by path.
+- Dry run against `tadtruex_inventory` (2026-11-23): 122 items, 113 bins,
+  9 items in no bin, rolled back; the three tables were created and are
+  empty.
+- Tests: `tests/test_inventoryimport.py` (18 tests, including the real file
+  when it is checked out). Suite 1938 passed on SQLite; the database tests
+  226 passed on SQLite and MariaDB 11.8.
+- Left as the sheet has them: bin 19 (`1M 0603`) has Tolerance `1%%` and a
+  DigiKey PN for a 10k part (`RMCF0603JG10K0CT-ND`, MPN `RMCF0603FT1M00`);
+  bin 3's MPN reads `CR003-JW-331ELF` beside DigiKey `CR0603-JW-331ELFCT-ND`.
+  These are fixed in the app after the import.
 
 ## Open questions
 
