@@ -3,6 +3,21 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## broadpeak set up; search built (2026-11-24)
+
+- Checkout at `~/Documents/Code/Boards` (not `~/Code/Boards`). The code no
+  longer assumes a location: `kicadtools/repo.py` finds the repo root from
+  the package (`.gitmodules` + `Libraries/`), `KICADTOOLS_REPO_ROOT`
+  overrides it (90aa330).
+- `.venv` with `dev,server,inventory,gui` on Python 3.14 (needed
+  `python3.14-venv` from apt). PySide6 6.12 installs; the whole suite runs.
+- `~/.kicadtools/config.toml` and `db_password` as in the handoff below. `db
+  pull` matched the handoff's counts; database tests 232 passed, 12 skipped.
+- Step 3 (search) built: `INVENTORY_PLAN.md`, "Step 3 — as built".
+- No inventory CLI (user decision). Next: step 4, the web app.
+- Loose end: `~/.kicadtools/lcsc_cache.sqlite` appeared during the first test
+  run; some test likely writes the real home folder.
+
 ## Handoff: inventory work moves to broadpeak (2026-11-23)
 
 Development continues on `broadpeak` (10.0.10.13, Ubuntu 26.04, Python 3.14,

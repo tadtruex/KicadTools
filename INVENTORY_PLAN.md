@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-23): steps 1 and 2 done; the master component list is imported into `tadtruex_inventory`. Steps 3–7 not started.
+Status (2026-11-24): steps 1–3 done; the master component list is imported into `tadtruex_inventory` and search works on it. Steps 4–7 not started. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -287,6 +287,34 @@ adding things fast; 7 is the BOM use.
   DigiKey PN for a 10k part (`RMCF0603JG10K0CT-ND`, MPN `RMCF0603FT1M00`);
   bin 3's MPN reads `CR003-JW-331ELF` beside DigiKey `CR0603-JW-331ELFCT-ND`.
   These are fixed in the app after the import.
+
+## Step 3 — as built (2026-11-24)
+
+- `src/kicadtools/inventory.py`: `search(inv, query, *, site=None,
+  category=None, bin=None, in_stock=False)` reads every item and bin once
+  and calls `search_items(items, bins, query, …)`, which needs no database
+  (the web app can call either). Returns `SearchHit`s: the item, its `Bin`,
+  its site (own or inherited), the score and the fields that matched.
+- Matching beyond the plan:
+  - besides the plain substring, the word and the field are compared with
+    everything but letters and digits removed (`stlink` finds `ST-LINK/V3`);
+  - `µ`/`μ` read as `u` and `Ω` as `ohm` (`0.1uf` finds `0.1µF`);
+  - typos only on words of 5 or more letters, never on a word with a digit:
+    one edit turns `100nf` into `10nF` (seen on the real data before the
+    rule);
+  - the description and location of the item's bin **and of every bin it is
+    inside** are searched, so a drawer is found by its cabinet's location.
+- Ranking: field weights name 10, tags and category 6, part numbers 5,
+  manufacturer 4, bin path 3, site and bin text 2, description 1; a typo
+  match counts half. Ties: items with a quantity first, then by name. An
+  empty query lists everything the filters allow, by bin then name.
+- Filters ignore case; `bin` includes the bins inside it; `in_stock` drops
+  quantity 0 and keeps an unknown quantity; an item in no bin has no site.
+- `rapidfuzz` added to the `inventory` extra.
+- Tests: `tests/test_inventory_search.py` (13 tests, SQLite and MariaDB).
+  Suite 1958 passed on SQLite. On `tadtruex_inventory` (read only): about
+  5 ms a query; `0.1uf 0603` → bins 57, 58; `stm32` → 4; `usb hub` → 2;
+  `100nf` → nothing (`0.1uF` and `100nF` are not yet the same value).
 
 ## Open questions
 
