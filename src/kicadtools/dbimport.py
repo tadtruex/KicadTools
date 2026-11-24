@@ -15,6 +15,11 @@ MariaDB server, or another SQLite file in tests), in one transaction:
 - with *dry_run* the same is done and then rolled back, so a value the
   server's columns refuse (strict mode) is found without writing.
 
+The rotation overrides come from the source file's own ``part_rotation``
+table (a file written by ``kicadtools db pull`` has one) and from the
+*rotations* passed in (the old machine-local cache); for an LCSC number in
+both, the source file's value is used.
+
 The source is opened read-only and is never changed; renaming it after the
 import is the caller's (``kicadtools db import``).
 """
@@ -64,7 +69,7 @@ def _read(path: Path) -> Tuple[Dict[str, Tuple[List[str], List[tuple]]], str]:
         version_row = (conn.execute("SELECT value FROM meta WHERE key = 'schema_version'")
                        .fetchone() if "meta" in names else None)
         out = {}
-        for table in TABLES:
+        for table in TABLES + (ROTATIONS,):
             if table not in names:
                 out[table] = ([], [])
                 continue
@@ -86,8 +91,9 @@ def _key(row: tuple) -> tuple:
 
 def import_parts(source: Path, dest: PartsDb, rotations: Mapping[str, float] = (),
                  *, dry_run: bool = False) -> ImportReport:
-    """Copy the SQLite parts file *source* and *rotations* (``{lcsc:
-    degrees}``) into the empty *dest*. Returns the row counts. Raises
+    """Copy the SQLite parts file *source*, with its own rotation overrides
+    and *rotations* (``{lcsc: degrees}``, used where the file has none for
+    that LCSC number), into the empty *dest*. Returns the row counts. Raises
     :class:`DbImportError` when *source* is missing or of another schema
     version, *dest* already holds data, or the read-back differs; nothing is
     written then."""
@@ -96,7 +102,10 @@ def import_parts(source: Path, dest: PartsDb, rotations: Mapping[str, float] = (
         raise DbImportError(
             f"{source}: schema version {version or 'none'}; open it once with this "
             f"KicadTools (version {SCHEMA_VERSION}) before importing")
-    rotation_rows = sorted((str(k), float(v) % 360.0) for k, v in dict(rotations).items()
+    merged = dict(rotations)
+    cols, rows = data.pop(ROTATIONS)
+    merged.update((row[cols.index("lcsc")], row[cols.index("degrees")]) for row in rows)
+    rotation_rows = sorted((str(k), float(v) % 360.0) for k, v in merged.items()
                            if str(k) and float(v) % 360.0)
     report = ImportReport(dry_run=dry_run)
     report.source = {t: len(rows) for t, (_, rows) in data.items()}

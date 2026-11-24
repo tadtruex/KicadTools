@@ -20,3 +20,11 @@ def no_digikey_credentials(monkeypatch):
     can call the real API (and spend the 1000-a-day limit)."""
     monkeypatch.delenv("DIGIKEY_CLIENT_ID", raising=False)
     monkeypatch.delenv("DIGIKEY_CLIENT_SECRET", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_machine_config(monkeypatch, tmp_path):
+    """No test reads the machine's ``~/.kicadtools/config.toml``: with the
+    config naming the server, a CLI test would open a tunnel and fail when the
+    server cannot be reached. A test that needs a configuration sets its own."""
+    monkeypatch.setenv("KICADTOOLS_CONFIG", str(tmp_path / "no-config.toml"))

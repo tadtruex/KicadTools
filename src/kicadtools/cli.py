@@ -629,7 +629,9 @@ def _db_import(args) -> int:
     print(f"{source} -> {config.label}" + (" (dry run: rolled back)" if args.dry_run else ""))
     for line in report.lines():
         print("  " + line)
-    if not args.dry_run:
+    # Only the default file is renamed, so no tool opens it again by mistake;
+    # a file named with --from (a pulled export, a backup) is left as it is.
+    if not args.dry_run and source.resolve() == partsdb.default_path().resolve():
         target = imported_name(source)
         source.rename(target)
         print(f"renamed {source.name} to {target.name}; the server is now the parts database")
@@ -805,9 +807,12 @@ def main(argv=None) -> int:
         help="Copy the local parts database and rotation overrides into the empty server, once",
     )
     imp.add_argument("--from", dest="source", default=None,
-                     help="the SQLite parts file (default: ~/Code/Boards/parts.sqlite)")
+                     help="the SQLite parts file, such as one written by `kicadtools db "
+                          "pull` (default: ~/Code/Boards/parts.sqlite, renamed after the "
+                          "import)")
     imp.add_argument("--cache", default=str(_DEFAULT_CACHE),
-                     help="the cache holding the CPL rotation overrides "
+                     help="the cache holding older CPL rotation overrides; the source "
+                          "file's own overrides are used where both have one "
                           "(default: ~/.kicadtools/lcsc_cache.sqlite)")
     imp.add_argument("--dry-run", action="store_true",
                      help="copy and compare, then roll back; the local file is not renamed")

@@ -103,3 +103,62 @@ def test_imported_name(tmp_path):
     assert imported_name(src).name == "parts.sqlite.imported"
     (tmp_path / "parts.sqlite.imported").touch()
     assert imported_name(src).name == "parts.sqlite.imported-2"
+
+
+def test_rotations_in_the_source_file_are_imported_and_win(tmp_path):
+    # A file written by `kicadtools db pull` carries its own part_rotation
+    # table; those overrides reach the destination, and win over the cache's.
+    path = tmp_path / "parts-export.sqlite"
+    _source(path)
+    src = PartsDb(path)
+    src.set_rotation("C14663", 90)
+    src.set_rotation("C111887", 270)
+    src.close()
+    dest = new_db(now=lambda: STAMP)
+    report = import_parts(path, dest, {"C14663": 180, "C2040": 45})
+    assert dest.rotations() == {"C14663": 90.0, "C111887": 270.0, "C2040": 45.0}
+    assert report.source["part_rotation"] == report.dest["part_rotation"] == 3
+
+
+def test_pull_then_import_round_trip(tmp_path):
+    from kicadtools.dbbackup import pull
+    first = tmp_path / "first.sqlite"
+    _source(first)
+    db = PartsDb(first)
+    db.set_rotation("C14663", 90)
+    export = tmp_path / "export.sqlite"
+    counts = pull(db, export)
+    db.close()
+    dest = new_db(now=lambda: STAMP)
+    report = import_parts(export, dest)
+    assert dest.rotations() == {"C14663": 90.0}
+    assert {t: report.dest[t] for t in counts} == counts
+
+
+def _run_cli_import(tmp_path, monkeypatch, argv):
+    from kicadtools import cli, dbconfig, dbconnect
+    from kicadtools.dbconnect import DbSession
+    dest = PartsDb(tmp_path / "server.sqlite")
+    config = dbconfig.DbConfig(backend=dbconfig.MARIADB, source=str(tmp_path / "config.toml"))
+    monkeypatch.setattr(dbconfig, "load_config", lambda: config)
+    monkeypatch.setattr(dbconnect, "open_parts_db", lambda c, ask: DbSession(dest, c))
+    monkeypatch.setenv("KICADTOOLS_PARTS_DB", str(tmp_path / "parts.sqlite"))
+    assert cli.main(["db", "import", "--cache", str(tmp_path / "none.sqlite")] + argv) == 0
+
+
+def test_cli_renames_only_the_default_file(tmp_path, monkeypatch):
+    if current() == MARIADB:
+        pytest.skip("CLI wiring only; the destination is a stand-in")
+    export = tmp_path / "export.sqlite"
+    _source(export)
+    _run_cli_import(tmp_path, monkeypatch, ["--from", str(export)])
+    assert export.exists()
+
+
+def test_cli_renames_the_default_file(tmp_path, monkeypatch):
+    if current() == MARIADB:
+        pytest.skip("CLI wiring only; the destination is a stand-in")
+    default = tmp_path / "parts.sqlite"
+    _source(default)
+    _run_cli_import(tmp_path, monkeypatch, [])
+    assert not default.exists() and (tmp_path / "parts.sqlite.imported").exists()
