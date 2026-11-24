@@ -84,8 +84,24 @@ For a later move, either way works:
   well as from `--cache`, the file's value winning, and renames only the
   default `parts.sqlite`, never a file named with `--from`.
 
-The MariaDB test suite (step 2) has not been run against 11.8; it needs a
-`tadtruex_inventory_test` database on `broadpeak` that the same user can use.
+The MariaDB tests were run against 11.8 on 2026-11-23, on
+`tadtruex_inventory_test` on `broadpeak` (same user, `ALL PRIVILEGES` on that
+database) through a tunnel on local port 3307: `test_partsdb.py`,
+`test_thtdb.py`, `test_dbimport.py` and `test_dbbackup.py` on both engines,
+143 passed, 11 skipped (8 SQLite-only, 1 MariaDB-only on SQLite, the 2 CLI
+tests SQLite-only), about 38 s. `tadtruex_inventory` was not touched. The
+command:
+
+```
+ssh -N -L 127.0.0.1:3307:127.0.0.1:3306 tad@10.0.10.13 &
+KICADTOOLS_TEST_DB_NAME=tadtruex_inventory_test \
+KICADTOOLS_TEST_DB_USER=tadtruex_inventory \
+KICADTOOLS_DB_PASS="$(cat ~/.kicadtools/db_password)" \
+  pytest tests/test_partsdb.py tests/test_thtdb.py tests/test_dbimport.py tests/test_dbbackup.py
+```
+
+The Cockpit on this Mac has since accepted parts into `tadtruex_inventory`
+on `broadpeak` (4 parts and 16 usage rows on ECG, 2026-11-23).
 
 ## Scope
 
