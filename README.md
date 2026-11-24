@@ -751,13 +751,13 @@ database = "tadtruex_inventory"
 user = "tadtruex_inventory"
 
 [parts_db.ssh]
-host = "tadtruex.host.dartmouth.edu"
-user = "tadtruex"
+host = "10.0.10.13"   # broadpeak
+user = "tad"
 # local_port = 3307   # a tunnel you run yourself; omit to let the Cockpit open one
 ```
 
-- **Tunnel.** The host accepts MariaDB logins from the server itself only,
-  so the Cockpit opens an SSH tunnel (`ssh -N -L`) on a free local port when
+- **Tunnel.** MariaDB on the server listens on `127.0.0.1` only, so the
+  Cockpit opens an SSH tunnel (`ssh -N -L`) on a free local port when
   it starts and closes it on quit. With an SSH key on the server there is no
   prompt; without one, ssh asks for the SSH password in a dialog.
 - **Password.** `~/.kicadtools/db_password` (one line, mode `0600`, in no
@@ -784,6 +784,12 @@ user = "tadtruex"
   import`, copies the local `parts.sqlite` and the cached rotation overrides
   into the empty server once, keeping part ids, compares every table, and
   renames the local file `parts.sqlite.imported`.
+- **Moving to another server.** `kicadtools db pull FILE` on a machine that
+  reaches the old server, then `kicadtools db import --from FILE` against the
+  new, empty one. The rotation overrides in the file are imported, and a
+  file named with `--from` is not renamed. A SQL dump of the old database,
+  loaded with the `mariadb` client, works as well; `DB_PLAN.md` ("Move to the
+  self-hosted server") has the steps.
 
 ### LCSC tab
 
