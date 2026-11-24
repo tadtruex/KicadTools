@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-23): step 1 built and committed. Step 2 built, not committed; dry run against `tadtruex_inventory` done, the real import not yet run. Steps 3–7 not started.
+Status (2026-11-23): steps 1 and 2 done; the master component list is imported into `tadtruex_inventory`. Steps 3–7 not started.
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -273,6 +273,11 @@ adding things fast; 7 is the BOM use.
 - Dry run against `tadtruex_inventory` (2026-11-23): 122 items, 113 bins,
   9 items in no bin, rolled back; the three tables were created and are
   empty.
+- Imported into `tadtruex_inventory` (2026-11-23), `--site school`: 122
+  items, 113 bins (`1`–`142` with gaps, `10001`, `10004`), 9 items in no
+  bin; no bin has a description, location or notes yet. Read back from a
+  new connection. The server's `bin` table, created by the dry run before
+  `description` existed, gained the column when the import opened it.
 - Tests: `tests/test_inventoryimport.py` (18 tests, including the real file
   when it is checked out). Suite 1938 passed on SQLite; the database tests
   226 passed on SQLite and MariaDB 11.8.
