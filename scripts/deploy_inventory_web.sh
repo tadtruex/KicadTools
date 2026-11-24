@@ -9,7 +9,8 @@
 #   1. a system account `inventory` (home /srv/inventory, no login shell);
 #   2. a read-only GitHub deploy key for that account (you add it on GitHub
 #      when the script prints it; the script waits);
-#   3. a shallow, sparse checkout of develop in /srv/inventory/Boards and a
+#   3. a shallow, sparse checkout of master (git-flow: the current
+#      release) in /srv/inventory/Boards and a
 #      venv in /srv/inventory/venv with the server, inventory and web extras;
 #   4. a backup of tadtruex_inventory (mariadb-dump) before the app can
 #      write to it;
@@ -25,7 +26,7 @@
 #   6. a systemd unit `kicadtools-web` on 127.0.0.1:8090 (8080 stays free
 #      for a development run);
 #   7. `tailscale serve`: https://<broadpeak's tailnet name>/ forwards to it;
-#   8. /usr/local/sbin/inventory-web-update: pull develop, reinstall,
+#   8. /usr/local/sbin/inventory-web-update: pull master, reinstall,
 #      restart, check.
 #
 # After a schema change that adds a column (inventorydb._ADDED_COLUMNS),
@@ -41,7 +42,7 @@ CHECKOUT=$SVC_HOME/Boards
 VENV=$SVC_HOME/venv
 KT_DIR=$SVC_HOME/.kicadtools
 REPO_URL=git@github.com:tadtruex/Boards
-BRANCH=develop
+BRANCH=master   # git-flow: master is the current release
 DATABASE=tadtruex_inventory
 DB_USER=inventory_web
 PORT=8090
@@ -116,10 +117,11 @@ if [[ ! -d $CHECKOUT/.git ]]; then
     # KICADTOOLS_REPO_ROOT, so repo_root() needs no Libraries folder.
     as_svc git -C "$CHECKOUT" sparse-checkout set Code/KicadTools
 else
-    as_svc git -C "$CHECKOUT" fetch --depth 1 origin "$BRANCH"
+    as_svc git -C "$CHECKOUT" fetch --depth 1 --tags origin "$BRANCH"
     as_svc git -C "$CHECKOUT" reset --hard FETCH_HEAD
 fi
-as_svc git -C "$CHECKOUT" log --oneline -1
+RELEASE=$(as_svc git -C "$CHECKOUT" describe --tags --always)
+echo "release $RELEASE"
 
 say "venv $VENV"
 [[ -x $VENV/bin/python ]] || as_svc python3 -m venv "$VENV"
@@ -241,6 +243,7 @@ say "done"
 cat <<EOF
 App:     https://$TS_NAME/   (devices in the tailnet only)
 Service: systemctl status $UNIT     journalctl -u $UNIT -f
+Release: $RELEASE
 Update:  sudo $(basename "$UPDATE_CMD")
 Backup:  $DUMP
 EOF
