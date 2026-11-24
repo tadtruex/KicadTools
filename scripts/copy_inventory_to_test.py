@@ -6,7 +6,11 @@ Run from Code/KicadTools with the venv:
     .venv/bin/python scripts/copy_inventory_to_test.py TEST_CONFIG
 
 The source is the database the normal KicadTools configuration names
-(``~/.kicadtools/config.toml`` or ``$KICADTOOLS_CONFIG``); it is only read.
+(``~/.kicadtools/config.toml`` or ``$KICADTOOLS_CONFIG``). It is opened
+read-only: no schema statements run on it and the server refuses any write,
+so a ``develop`` checkout with new tables or columns does not add them to
+the real database the release uses. Its tables must be ones this code
+reads.
 *TEST_CONFIG* is a copy of that file with ``database =`` set to a name
 ending ``_test`` (a SQLite file: named ``…_test.sqlite``); its inventory
 tables are emptied and refilled. Nothing else in either database is touched.
@@ -23,7 +27,7 @@ TEXT_FIELDS = ("description", "category", "manufacturer", "mpn", "digikey_pn",
 
 
 def main(test_config: str) -> None:
-    source = open_parts_db(load_config(), terminal_ask)
+    source = open_parts_db(load_config(), terminal_ask, read_only=True)
     os.environ["KICADTOOLS_CONFIG"] = test_config
     target = open_parts_db(load_config(), terminal_ask)
     try:
