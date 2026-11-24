@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-24): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a`, at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Steps 6–7 not started. Decided 2026-11-24, not built: sites and bins become one hierarchy of locations (see "Decided 2026-11-24" below), and QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
+Status (2026-11-24): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a`, at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Steps 6–7 not started. Decided 2026-11-24, not built: sites and bins become one hierarchy of locations, an item becomes a thing whose stock rows place it in any number of locations with a quantity each, and QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -44,8 +44,8 @@ What follows from it:
 
 - **Data:** the 113 imported bins move under one top-level location
   `school`; the 9 items with no bin stay with no location.
-- **Schema:** `bin` → `location`, `item.bin_id` → `item.location_id`,
-  `site` dropped. This is a migration on a populated database
+- **Schema:** `bin` → `location`, `site` dropped; `item.bin_id` moves
+  into stock rows (see "an item is a thing" below). This is a migration on a populated database
   (rename, move, drop), unlike the `CREATE TABLE IF NOT EXISTS` additions
   so far. It runs from the user's account: the web app's database user
   (`deploy_inventory_web.sh`) cannot ALTER, and its grants name `bin`, so
@@ -60,6 +60,58 @@ What follows from it:
 - **When:** before labels are printed (step 6), since a printed QR code
   holds the URL. Best before real data is entered through the deployed app,
   so the migration moves only the imported rows.
+
+## Decided 2026-11-24: an item is a thing; stock rows place it
+
+Not built yet. Changes the data model below (`item.bin_id`,
+`item.quantity`) together with the locations decision above.
+
+- **An item** is a kind of thing ("Nano Every", "0.1µF 0603
+  CL10B104MB8NNNC", "M6 x 5 mm pan head screw"): name, description,
+  category, tags, manufacturer, part numbers, URL, notes. It has no
+  location and no quantity.
+- **A stock row** says some of an item is in a location, with its own
+  approximate quantity: `(item, location, quantity, notes, updated_at)`,
+  one row per item and location. An item can be in any number of
+  locations, or in none (known, none on hand that anyone has placed).
+  The table is `stock` (decided 2026-11-24).
+
+What follows from it:
+
+- **Schema:** a new table `stock` (`item_id` FK → item, `location_id` FK
+  → location, `quantity` optional integer, `notes`, `updated_at`; unique
+  on `item_id, location_id`). `item.bin_id` and `item.quantity` go. A
+  location holding stock rows is not deleted, as with items today. The web
+  app's grants add `stock` to the tables it writes. Backups and `db pull`
+  add the table.
+- **Migration**, in the same run as the locations one: each item in a bin
+  gets one stock row there with its quantity; the 9 items in no bin get
+  none. Checked on `tadtruex_inventory` (2026-11-24, read only): 122 items,
+  113 in a bin, each bin holding one item; no MPN or DigiKey PN appears
+  twice. Four names repeat (`0.1uF 0603` in 57 and 58, `1uF 0603`, `56uF`,
+  `USB SOT23-5`), each pair with different MPNs: different things, kept as
+  separate items. So the migration is one to one and merges nothing.
+- **Item page:** the item's fields once, then its stock rows (location,
+  ~quantity, − / +, move to another location), and "add to another
+  location". Moving a row to a location the item already has adds the
+  quantities into one row.
+- **Location page:** the stock rows in it and in the locations inside it,
+  grouped by location, each showing the item.
+- **Quick add:** name, location, quantity, as today; it makes the item and
+  its first stock row. A name or part number that matches an existing item
+  offers that item instead, so a second box of something adds a stock row,
+  not a second item.
+- **Search:** one hit per item, listing its locations with their
+  quantities. The location filter keeps items with a stock row in that
+  location or below it; "in stock only" keeps items with a row whose
+  quantity is above 0 or unknown.
+- **BOM use (step 7):** on hand is the sum of an item's stock rows, with
+  each location listed ("~50: school/57, ~10: home/C3/2").
+- **Quantity 0:** a stock row at 0 is kept, a record of where the item
+  is stored when there is some (decided 2026-11-24). − stops at 0 and
+  leaves the row; removing a row is a separate action on the item page.
+  Later, optional maintenance: marking a row obsolete (no longer stocked
+  there) or similar. Not planned yet.
 
 ## Decided 2026-11-24: QR codes use a name the user owns
 
