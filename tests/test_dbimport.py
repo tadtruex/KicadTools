@@ -132,7 +132,8 @@ def test_pull_then_import_round_trip(tmp_path):
     dest = new_db(now=lambda: STAMP)
     report = import_parts(export, dest)
     assert dest.rotations() == {"C14663": 90.0}
-    assert {t: report.dest[t] for t in counts} == counts
+    # The pull also writes the inventory tables, which the import does not copy.
+    assert {t: counts[t] for t in report.dest} == report.dest
 
 
 def _run_cli_import(tmp_path, monkeypatch, argv):
