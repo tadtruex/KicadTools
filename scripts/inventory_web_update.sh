@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Update the lab inventory web app on broadpeak to the head of develop.
+# Update the lab inventory web app on broadpeak to the head of master
+# (git-flow: the current release).
 # Installed as /usr/local/sbin/inventory-web-update by
 # scripts/deploy_inventory_web.sh; run it with sudo.
 #
@@ -11,7 +12,7 @@ set -euo pipefail
 SVC_USER=inventory
 CHECKOUT=/srv/inventory/Boards
 VENV=/srv/inventory/venv
-BRANCH=develop
+BRANCH=master
 UNIT=kicadtools-web
 PORT=8090
 
@@ -19,10 +20,11 @@ PORT=8090
 as_svc() { sudo -u "$SVC_USER" -H -- "$@"; }
 cd /srv/inventory   # a working directory $SVC_USER can read
 
-before=$(as_svc git -C "$CHECKOUT" rev-parse --short HEAD)
-as_svc git -C "$CHECKOUT" fetch --depth 1 origin "$BRANCH"
+release() { as_svc git -C "$CHECKOUT" describe --tags --always; }
+before=$(release)
+as_svc git -C "$CHECKOUT" fetch --depth 1 --tags origin "$BRANCH"
 as_svc git -C "$CHECKOUT" reset --hard FETCH_HEAD
-after=$(as_svc git -C "$CHECKOUT" rev-parse --short HEAD)
+after=$(release)
 echo "checkout: $before -> $after"
 
 as_svc "$VENV/bin/pip" install --quiet -e "$CHECKOUT/Code/KicadTools[server,inventory,web]"
