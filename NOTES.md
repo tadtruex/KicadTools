@@ -3,6 +3,71 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Handoff: inventory web app deployed on broadpeak (2026-11-24)
+
+Pick-up point for the lab inventory. Supersedes the "Next" list of the
+handoff below; its setup and test details still hold.
+
+### Where things stand
+
+- `INVENTORY_PLAN.md` steps 1–5 done; "Step 5 — as built" has the
+  details. The app is live on the **real** `tadtruex_inventory` at
+  **https://broadpeak.tail7c4deb.ts.net** (devices in the tailnet only).
+- Releases use git-flow: the service runs `master` (release `kt_v0.1a`),
+  never `develop`. The user starts and finishes releases; a change a
+  release needs goes on the release branch while it is open.
+- Two decisions recorded in the plan, not built: sites and bins become one
+  hierarchy of **locations** (`school/17`; "bin" → "location"
+  everywhere), and QR codes encode a name under the user's **own domain**,
+  which needs a nameserver the user is setting up.
+
+### Running it
+
+| Task | Command (on broadpeak) |
+|---|---|
+| Update to the head of `master` | `sudo inventory-web-update` |
+| Status, log | `systemctl status kicadtools-web`, `journalctl -u kicadtools-web -f` |
+| Re-run the setup | `sudo bash Code/KicadTools/scripts/deploy_inventory_web.sh` (safe to repeat; keeps the database password) |
+| Development run | `kicadtools-web --config TEST_CONFIG` on 8080, as below; the service uses 8090 |
+
+- Service account `inventory`, `/srv/inventory` (closed to `tad`: use
+  sudo to look inside). Checkout `/srv/inventory/Boards` (sparse, only
+  `Code/KicadTools`), venv `/srv/inventory/venv`, config and password in
+  `/srv/inventory/.kicadtools/`, pre-deploy backup in
+  `/srv/inventory/backups/`.
+- Database user `inventory_web` writes only `bin`, `item`, `item_tag`
+  and has **no ALTER**. Before updating to a release that adds a column,
+  open the database once from your own account (any `kicadtools` command
+  on it). The location rename is a migration of the same kind and runs
+  from your account; its grants in the deploy script change with it.
+- SSH from the Mac over the tailnet: `ssh tad@broadpeak.tail7c4deb.ts.net`
+  (the host key is stored under that name, not the `100.x` address).
+
+### Next
+
+1. **The phone:** Tailscale on it, then a look at the pages. Expect layout
+   and wording fixes.
+2. **Fix the two spreadsheet errors** in the app (bin 19, bin 3; see the
+   2026-11-23 handoff below). These are the first writes through the app
+   on the real database.
+3. **Locations** (plan, "Decided 2026-11-24"): the rename and the
+   site-to-first-level migration. First settle open question 3 (the new
+   name for a bin's free-text `location` field). Best done before much
+   real data goes in through the app.
+4. **Step 6** (labels, DigiKey autofill) after the nameserver and open
+   questions 1 and 4. The QR base URL becomes a config setting.
+5. The Cockpit's `config.toml` can name `broadpeak.tail7c4deb.ts.net`
+   instead of `10.0.10.13`, which opens the database tunnel from the barn
+   and the school (DB plan step 8).
+
+### Loose ends
+
+- The ones in the handoff below still stand (`lcsc_cache.sqlite` written
+  to the real home folder by a test; `0.1uF` vs `100nF`; `in_stock` and
+  the site filter).
+- `parts.sqlite.imported` is untracked in the Boards root on the Mac.
+  Not looked at.
+
 ## Handoff: inventory search and web app built (2026-11-24)
 
 Pick-up point for the lab inventory. The older handoff below (2026-11-23)

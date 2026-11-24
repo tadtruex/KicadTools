@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-24): steps 1–3 done and step 4 built (the web app runs on broadpeak against `tadtruex_inventory_test`, not yet tried in a browser); the master component list is imported into `tadtruex_inventory`. Step 5's deploy script is written (`scripts/deploy_inventory_web.sh`, release `kt_v0.1a`), not yet run; steps 6–7 not started. Decided 2026-11-24, not built: sites and bins become one hierarchy of locations (see "Decided 2026-11-24" below), and QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
+Status (2026-11-24): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a`, at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Steps 6–7 not started. Decided 2026-11-24, not built: sites and bins become one hierarchy of locations (see "Decided 2026-11-24" below), and QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -106,7 +106,8 @@ encode a name under a domain the user controls (e.g.
 |---|---|
 | Machine | Ubuntu 26.04.1, 32 cores, 61 GB RAM, 148 GB free on `/` |
 | Installed | MariaDB 11.8 (127.0.0.1 only), Python 3.14, Node 22, git |
-| Not installed | Docker, nginx, Caddy, Tailscale (to be installed, step 5) |
+| Not installed | Docker, nginx, Caddy |
+| Tailscale (2026-11-24) | 1.104.7; tailnet name `broadpeak.tail7c4deb.ts.net`, address `100.120.78.89`. The Mac (`t2864`) is in the tailnet too; from the school network its traffic goes through Tailscale's NYC relay (about 30 ms), not a direct connection |
 | Ports | 80 and 443 closed from this Mac; SSH, Samba and a few others open |
 | Network | `10.0.10.13`, a private address: reachable from the home network only |
 | Sudo | needs a password (the user runs the root steps) |
@@ -415,6 +416,50 @@ adding things fast; 7 is the BOM use.
   the real bins and items: every page 5–18 ms.
 - Not built from the step 4 list: nothing. From later steps: DigiKey
   autofill on quick add and labels (step 6).
+
+## Step 5 — as built (2026-11-24)
+
+- `scripts/deploy_inventory_web.sh`, run once by the user with sudo from
+  their checkout on broadpeak; safe to run again. It installs
+  `scripts/inventory_web_update.sh` as `/usr/local/sbin/inventory-web-update`.
+- **Release, not develop:** the service runs `master`, the current
+  git-flow release (`kt_v0.1a` at deploy). `sudo inventory-web-update`
+  fetches `master` and its tags, reinstalls, restarts, checks `/healthz`
+  and prints the release before and after.
+- **Account:** system user `inventory`, home `/srv/inventory` (mode 750,
+  closed to `tad`), no login shell. GitHub access through a read-only
+  deploy key on the Boards repo (the repo is private); GitHub's host key is
+  pinned in the script.
+- **Checkout:** `/srv/inventory/Boards`, depth 1, blobs on demand, sparse:
+  only `Code/KicadTools` (about 5 MB). `KICADTOOLS_REPO_ROOT` in the unit
+  points `repo_root()` at it, so no `Libraries` folder is needed. Venv
+  `/srv/inventory/venv` with the `server,inventory,web` extras.
+- **Database user** `inventory_web@localhost`, password random, in
+  `/srv/inventory/.kicadtools/db_password` (0600); config beside it names
+  `tadtruex_inventory` on port 3306 (no tunnel). Grants: SELECT on the
+  database; INSERT, UPDATE, DELETE on `bin`, `item`, `item_tag`; plus
+  CREATE, INDEX and REFERENCES on the database and INSERT on `meta`.
+  The extra four are beyond the plan: opening the database runs `CREATE
+  TABLE` / `CREATE INDEX IF NOT EXISTS` and `INSERT IGNORE INTO meta`, and
+  MariaDB checks privileges before it checks whether the table exists.
+  None of them can drop, alter or change rows in an existing table. The
+  user has no ALTER: a release that adds a column (`_ADDED_COLUMNS`) needs
+  the database opened once from the user's own account before the update.
+- **Backup** before the first start: `mariadb-dump` of `tadtruex_inventory`
+  to `/srv/inventory/backups/` (root only).
+- **Service:** systemd unit `kicadtools-web`, enabled at boot, on
+  `127.0.0.1:8090`. The plan said 8080; that port stays free for a
+  development run of `kicadtools-web`. `ProtectSystem=strict`,
+  `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`; writable only
+  `/srv/inventory/.kicadtools`.
+- **Tailscale:** `tailscale serve --bg --https=443` forwards
+  `https://broadpeak.tail7c4deb.ts.net/` to it, tailnet only, with a Let's
+  Encrypt certificate Tailscale renews (valid to 2027-02-22 at deploy).
+- Checked from the Mac over the tailnet: `/healthz` ok, search (`stm32` →
+  4 items) and the bins list, 0.14–0.23 s a page through the relay.
+- Not done from the step 5 list: the phone (Tailscale on it, then a look
+  at the pages). The Cockpit's `config.toml` naming `broadpeak` instead of
+  `10.0.10.13` (DB plan step 8) is now possible but not done.
 
 ## Open questions
 
