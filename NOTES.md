@@ -5,8 +5,7 @@ Not user docs (see `README.md` for those).
 
 ## Handoff: locations, stock rows and the migration built (2026-11-25)
 
-Branch `feature/inventory-locations` (git-flow feature off `develop`).
-`INVENTORY_PLAN.md`, "Locations and stock — as built", has the details.
+On `develop` (commit e50c569, pushed). `INVENTORY_PLAN.md`, "Locations and stock — as built", has the details.
 
 - Built: the new layout (locations, items, stock rows, pictures), search
   and web app on it, `kicadtools inventory migrate`, the test copy that
@@ -14,7 +13,7 @@ Branch `feature/inventory-locations` (git-flow feature off `develop`).
   SQLite and MariaDB.
 - The real `tadtruex_inventory` is **unchanged** (only read). The released
   service still runs `kt_v0.1a` on bins.
-- Found and fixed on the branch: a long-lived MariaDB connection kept its
+- Found and fixed on `develop`: a long-lived MariaDB connection kept its
   first snapshot (see the plan). The release has the bug.
 
 ### Next
@@ -23,8 +22,11 @@ Branch `feature/inventory-locations` (git-flow feature off `develop`).
    on the phone too. Stop it before running the copy again.
 2. Pictures in the web app (upload, show, reorder).
 3. The cutover, as in the plan ("how the locations and stock migration
-   runs"): finish a release from `develop` with this branch merged; stop
-   the service; `kicadtools inventory migrate`; re-run the deploy script.
+   runs"): finish a release from `develop`; stop the service;
+   `kicadtools inventory migrate`; re-run the deploy script.
+4. Interface changes the user asked for (plan, "Interface to-do"):
+   item list on the landing page, whole row opens the item, copy item
+   (choose which pictures come along), drag-and-drop pictures.
 
 ## Handoff: inventory web app deployed on broadpeak (2026-11-24)
 

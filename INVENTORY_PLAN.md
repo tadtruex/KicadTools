@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-25): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a` (bins), at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Built on branch `feature/inventory-locations`, not released: locations instead of bins and sites, items with stock rows, item pictures (no web pages for pictures yet), and `kicadtools inventory migrate` to convert the real database at the cutover (see "Locations and stock — as built"). Steps 6–7 not started. QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import and the migration (user decision 2026-11-24: the web app is the interface).
+Status (2026-11-25): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a` (bins), at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Built on `develop`, not released: locations instead of bins and sites, items with stock rows, item pictures (no web pages for pictures yet), and `kicadtools inventory migrate` to convert the real database at the cutover (see "Locations and stock — as built"). Steps 6–7 not started. QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import and the migration (user decision 2026-11-24: the web app is the interface).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -144,7 +144,7 @@ What follows from it:
   migration there, so every copy tests it on the real data. Once the real
   database is migrated, the copy finds nothing to migrate.
 
-## Locations and stock — as built (2026-11-25, branch `feature/inventory-locations`)
+## Locations and stock — as built (2026-11-25)
 
 - **`inventorydb.py`** holds the new layout only: `location`, `item` (no
   `bin_id`, no `quantity`), `stock`, `item_tag`, `item_picture`, and
@@ -192,6 +192,23 @@ What follows from it:
 - **Tests:** suite 2027 passed on SQLite; the database tests 338 passed on
   SQLite and MariaDB 11.8, including a MariaDB conversion stopped after
   each non-transactional step and finished by the next run.
+
+## Interface to-do (asked 2026-11-25)
+
+1. **Landing page item list.** Below the information on the search page, a
+   scrollable box showing the first *n* items, with a dropdown for *n*:
+   10, 20, 50, All.
+2. **Selecting an item opens its page.** Clicking anywhere on an item's row
+   (in that list and in search results) goes to `/item/{id}`.
+3. **Copy item** button on the item page: makes a new item with the same
+   fields and tags and opens it to edit. The copy form shows the item's
+   existing pictures, each with a checkbox, so any of them can be carried
+   over to the copy. Location and quantity start blank (no stock rows are
+   copied).
+4. **Easy picture adding** on the item page and the new item page: drag
+   and drop one or more image files onto the page (and a plain "choose
+   files" button, which on the phone also offers the camera). Each upload
+   goes through `pictures.prepare` as usual.
 
 ## Pictures (decided and built 2026-11-25)
 
