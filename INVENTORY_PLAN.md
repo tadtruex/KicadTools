@@ -55,8 +55,12 @@ What follows from it:
   (still remembered in a cookie); "site" leaves the searched fields, since
   the location path already holds it.
 - **Name clash:** a bin has a free-text field `location` today ("rack by
-  the bench, top shelf"). With the table called `location` it needs
-  another name. Open question.
+  the bench, top shelf"). With the table called `location` it goes: a
+  location has one free-text `description`, which says both what it is and
+  where to find it (decided 2026-11-24). On `tadtruex_inventory` every
+  bin's `description`, `location` and `notes` is empty (checked
+  2026-11-24, read only), so the column is dropped with nothing to merge.
+  Search drops it from the searched fields.
 - **When:** before labels are printed (step 6), since a printed QR code
   holds the URL. Best before real data is entered through the deployed app,
   so the migration moves only the imported rows.
@@ -112,6 +116,71 @@ What follows from it:
   leaves the row; removing a row is a separate action on the item page.
   Later, optional maintenance: marking a row obsolete (no longer stocked
   there) or similar. Not planned yet.
+
+## Decided 2026-11-25: how the locations and stock migration runs
+
+- **An explicit command:** `kicadtools inventory migrate [--dry-run]`, run
+  from the user's account. Never on open: code with the new layout that
+  opens a database still in the old one stops with a message naming the
+  command. `meta` gets `inventory_schema = 2` to tell the layouts apart.
+- **Shape of the migration:** a top-level location `school`; each bin
+  becomes a location under it, keeping its id, so a stock row's
+  `location_id` is the old `item.bin_id`; `item` is rebuilt without
+  `bin_id` and `quantity`, with `item_tag` and `item_picture` pointing at
+  the new table. MariaDB commits each DDL statement on its own, so it is
+  not one transaction: a backup first, every new table built before an old
+  one is touched, counts checked at the end (on the real data: 122 items,
+  113 stock rows, 114 locations), and a run after a failure clears the
+  half-built tables and starts again.
+- **Cutover on the real database, with the service stopped:** finish the
+  release that holds the migration (so `master` has it);
+  `sudo systemctl stop kicadtools-web`; `kicadtools inventory migrate` from
+  the user's checkout of that release; then the deploy script again, which
+  sets the grants (`location`, `stock`, `item_picture`), fetches `master`
+  and restarts the service on it (no separate `inventory-web-update`). The
+  old release never runs against the new layout.
+- **Test copy:** `copy_inventory_to_test.py` copies the real database's
+  tables as they are (old layout) into the test database, then runs the
+  migration there, so every copy tests it on the real data. Once the real
+  database is migrated, the copy finds nothing to migrate.
+
+## Pictures (decided and built 2026-11-25)
+
+An item has any number of pictures, 0 or more, in order; the first is the
+main one, the one a list or search result would show.
+
+- **Table** `item_picture`: `id`, `item_id` (FK → item, cascade),
+  `position` (0, 1, 2 … kept dense: deleting or moving renumbers),
+  `content_type`, `width`, `height`, `data`, `thumb`, `caption`,
+  `created_at`. `MEDIUMBLOB` on MariaDB.
+- **In the database, not in files:** backups, `db pull` and the test copy
+  carry them with nothing more, the Mac reads them through the tunnel, and
+  the service (writable only in `.kicadtools`) needs no picture folder. At a
+  few hundred kB a picture, a thousand pictures is a few hundred MB.
+- **Stored form** (`kicadtools/pictures.py`, Pillow, in the `inventory` and
+  `web` extras): any image Pillow reads becomes a JPEG at most 1600 px on
+  its longer side, plus a 320 px thumbnail; turned upright by its EXIF
+  orientation, then the metadata dropped (a phone photo's EXIF holds where
+  it was taken); transparency on white. Uploads over 30 MB or 60 MP are
+  refused.
+- **InventoryDb:** `add_picture(item_id, image_bytes, caption=)` (adds it
+  last), `pictures(item_id)`, `picture(id)`, `picture_data(id, thumb=)`,
+  `update_picture(id, caption=)`, `move_picture(id, position)` (0 makes it
+  the main one), `delete_picture(id)`. `Item.pictures` is the ids in order,
+  `Item.picture` the main one's. `delete_item` deletes them.
+- **Released database:** the table is created on the next open by code
+  that has it (a plain `CREATE TABLE IF NOT EXISTS`). Code with pictures
+  opening a database read-only that lacks the table lists no pictures. The
+  web app's grants add `item_picture`; the deploy script has it, so the
+  release that brings pictures needs the script run again (it is safe to
+  repeat) for the grant.
+- **The item migration** (stock rows, above) rebuilds `item`, so it handles
+  `item_picture` as it does `item_tag`: its foreign key must point at the
+  new `item`.
+- **Not built yet:** the web app's part: pictures on the item page, upload
+  from the phone's camera (`<input type=file accept="image/*"
+  capture>`), the main picture's thumbnail in search results and on a
+  location's page, reorder and delete.
 
 ## Decided 2026-11-24: QR codes use a name the user owns
 
@@ -522,9 +591,8 @@ adding things fast; 7 is the BOM use.
 2. **Boxes 1–142.** Do they sit in something worth making a bin (a rack or
    a cabinet at school)? They were imported top-level; `move_bin` can put
    them inside one at any time.
-3. **The free-text `location` field.** A bin's `location` ("rack by the
-   bench, top shelf") needs a new name once the table is `location`
-   (see "Decided 2026-11-24").
+3. ~~**The free-text `location` field.**~~ Decided 2026-11-24: it goes;
+   the location's `description` holds it.
 4. **The QR code name.** Which domain and name, whether it resolves through
    public DNS or the tailnet's split DNS, and how HTTPS works on it (see
    "Decided 2026-11-24: QR codes use a name the user owns").

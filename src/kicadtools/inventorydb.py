@@ -18,6 +18,10 @@ The tables are in the parts database, beside the parts tables, and
   MPN, DigiKey PN, LCSC number, URL, description and notes.
 - ``item_tag`` — free words on an item (``arduino``, ``avr``), one row per
   tag, unique per item ignoring case.
+- ``item_picture`` — any number of pictures of an item, in order (the first
+  is the one a list shows). Each is a JPEG and its thumbnail, kept in the
+  database so backups and ``db pull`` carry them; :mod:`kicadtools.pictures`
+  makes them from an upload.
 
 Nothing is a fixed list: sites, categories, manufacturers and tags take any
 value, and :meth:`InventoryDb.values` and :meth:`InventoryDb.tags` give the
@@ -38,7 +42,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 from kicadtools.partsdb import PartsDb
 
 # Copied in this order by backups (parents before the rows that refer to them).
-INVENTORY_TABLES = ("bin", "item", "item_tag")
+INVENTORY_TABLES = ("bin", "item", "item_tag", "item_picture")
 
 SEP = "/"
 
@@ -79,6 +83,19 @@ _SQLITE_SCHEMA = [
   PRIMARY KEY (item_id, tag)
 )""",
     "CREATE INDEX IF NOT EXISTS item_tag_tag ON item_tag(tag)",
+    """CREATE TABLE IF NOT EXISTS item_picture (
+  id            INTEGER PRIMARY KEY,
+  item_id       INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+  position      INTEGER NOT NULL,
+  content_type  TEXT NOT NULL,
+  width         INTEGER NOT NULL,
+  height        INTEGER NOT NULL,
+  data          BLOB NOT NULL,
+  thumb         BLOB NOT NULL,
+  caption       TEXT,
+  created_at    TEXT NOT NULL
+)""",
+    "CREATE INDEX IF NOT EXISTS item_picture_item ON item_picture(item_id, position)",
 ]
 
 # MariaDB: the same tables. Text compared ignoring case uses utf8mb4_unicode_ci
@@ -126,6 +143,21 @@ _MARIA_SCHEMA = [
   KEY item_tag_tag (tag),
   FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE
 )""" + _OPTS,
+    # MEDIUMBLOB holds 16 MB; a stored picture is a few hundred kB.
+    f"""CREATE TABLE IF NOT EXISTS item_picture (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  item_id       INT NOT NULL,
+  position      INT NOT NULL,
+  content_type  VARCHAR(64) NOT NULL,
+  width         INT NOT NULL,
+  height        INT NOT NULL,
+  data          MEDIUMBLOB NOT NULL,
+  thumb         MEDIUMBLOB NOT NULL,
+  caption       TEXT,
+  created_at    VARCHAR(32) NOT NULL,
+  KEY item_picture_item (item_id, position),
+  FOREIGN KEY (item_id) REFERENCES item(id) ON DELETE CASCADE
+)""" + _OPTS,
 ]
 
 # The item fields set by add_item / update_item besides name, quantity, bin
@@ -135,6 +167,8 @@ _TEXT_FIELDS = ("description", "category", "manufacturer", "mpn", "digikey_pn", 
 _ITEM_COLS = ("id", "name", "description", "category", "manufacturer", "mpn",
               "digikey_pn", "lcsc", "quantity", "bin_id", "url", "notes",
               "created_at", "updated_at")
+_PICTURE_COLS = ("id", "item_id", "position", "content_type", "width", "height",
+                 "caption", "created_at")
 _BIN_COLS = ("id", "parent_id", "name", "path", "site", "description", "location", "notes",
              "updated_at")
 
@@ -147,7 +181,7 @@ _ADDED_COLUMNS = (
 
 # Free-text fields: only surrounding whitespace is removed, so line breaks
 # in a description are kept. Other text is cleaned of repeated spaces too.
-_FREE_TEXT = ("description", "location", "notes", "url")
+_FREE_TEXT = ("description", "location", "notes", "url", "caption")
 
 # Fields whose used values values() lists: item columns and bin columns.
 _ITEM_VALUE_FIELDS = ("category", "manufacturer")
@@ -201,6 +235,26 @@ class Item:
     tags: Tuple[str, ...]
     created_at: str
     updated_at: str
+    pictures: Tuple[int, ...] = ()   # picture ids in order; the first is the main one
+
+    @property
+    def picture(self) -> Optional[int]:
+        """The main picture's id, ``None`` when the item has none."""
+        return self.pictures[0] if self.pictures else None
+
+
+@dataclass(frozen=True)
+class Picture:
+    """A stored picture's details; the image itself is
+    :meth:`InventoryDb.picture_data`."""
+    id: int
+    item_id: int
+    position: int               # 0 is the main picture
+    content_type: str
+    width: int
+    height: int
+    caption: Optional[str]
+    created_at: str
 
 
 def natural_key(text: str) -> tuple:
@@ -298,6 +352,10 @@ class InventoryDb:
                 for statement in schema:
                     db._execute(statement)
                 self._add_missing_columns()
+        # A read-only database made by a release before pictures has no
+        # item_picture table: its items have none.
+        self._has_pictures = bool(db._execute(db._dialect.has_table(),
+                                              ("item_picture",)).fetchone())
 
     def _columns(self, table: str) -> List[str]:
         if self.db.backend == "mariadb":
@@ -523,11 +581,18 @@ class InventoryDb:
         for item_id, tag in self._x(
                 f"SELECT item_id, tag FROM item_tag WHERE item_id IN ({marks})", ids):
             tags[item_id].append(tag)
+        pictures: Dict[int, List[int]] = {i: [] for i in ids}
+        if self._has_pictures:
+            for item_id, picture_id in self._x(
+                    f"SELECT item_id, id FROM item_picture WHERE item_id IN ({marks})"
+                    " ORDER BY item_id, position", ids):
+                pictures[item_id].append(picture_id)
         out = []
         for r in rows:
             values = dict(zip(_ITEM_COLS, r[:len(_ITEM_COLS)]))
             out.append(Item(bin_path=r[len(_ITEM_COLS)],
                             tags=tuple(sorted(tags[values["id"]], key=natural_key)),
+                            pictures=tuple(pictures[values["id"]]),
                             **values))
         return out
 
@@ -652,8 +717,94 @@ class InventoryDb:
     def delete_item(self, item_id: int) -> None:
         with self._tx():
             self._need_item(item_id)
+            self._x("DELETE FROM item_picture WHERE item_id = ?", (int(item_id),))
             self._x("DELETE FROM item_tag WHERE item_id = ?", (int(item_id),))
             self._x("DELETE FROM item WHERE id = ?", (int(item_id),))
+
+    # ----- pictures --------------------------------------------------------
+
+    def _pictures_where(self, where: str, params: Sequence[Any]) -> List[Picture]:
+        rows = self._x(f"SELECT {', '.join(_PICTURE_COLS)} FROM item_picture"
+                       f" WHERE {where} ORDER BY item_id, position", params)
+        return [Picture(*r) for r in rows.fetchall()]
+
+    def pictures(self, item_id: int) -> List[Picture]:
+        """The item's pictures in order, the main one first."""
+        with self.db._lock:
+            return self._pictures_where("item_id = ?", (int(item_id),))
+
+    def picture(self, picture_id: int) -> Optional[Picture]:
+        with self.db._lock:
+            found = self._pictures_where("id = ?", (int(picture_id),))
+        return found[0] if found else None
+
+    def _need_picture(self, picture_id: int) -> Picture:
+        found = self.picture(picture_id)
+        if found is None:
+            raise InventoryError(f"no picture {picture_id}")
+        return found
+
+    def picture_data(self, picture_id: int, *,
+                     thumb: bool = False) -> Optional[Tuple[str, bytes]]:
+        """``(content type, bytes)`` of the picture or its thumbnail;
+        ``None`` when there is no such picture."""
+        column = "thumb" if thumb else "data"
+        with self.db._lock:
+            row = self._x(f"SELECT content_type, {column} FROM item_picture WHERE id = ?",
+                          (int(picture_id),)).fetchone()
+        return (row[0], bytes(row[1])) if row else None
+
+    def add_picture(self, item_id: int, image: bytes, *,
+                    caption: Optional[str] = None) -> Picture:
+        """Add the image *image* (the bytes of any picture Pillow reads) to
+        the item, after its other pictures. It is stored as
+        :func:`kicadtools.pictures.prepare` makes it; a bad image raises
+        :class:`~kicadtools.pictures.PictureError`."""
+        from kicadtools.pictures import prepare
+
+        prepared = prepare(image)
+        with self._tx():
+            target = self._need_item(item_id)
+            position = len(target.pictures)
+            stamp = self.db._now()
+            cur = self._x(
+                "INSERT INTO item_picture (item_id, position, content_type, width, height,"
+                " data, thumb, caption, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (target.id, position, prepared.content_type, prepared.width,
+                 prepared.height, prepared.data, prepared.thumb, _clean_free(caption), stamp))
+            new_id = self._new_id(cur)
+            self._x("UPDATE item SET updated_at = ? WHERE id = ?", (stamp, target.id))
+        return self.picture(new_id)
+
+    def update_picture(self, picture_id: int, *, caption: Optional[str]) -> Picture:
+        """Set the picture's caption; ``None`` or ``""`` clears it."""
+        with self._tx():
+            target = self._need_picture(picture_id)
+            self._x("UPDATE item_picture SET caption = ? WHERE id = ?",
+                    (_clean_free(caption), target.id))
+        return self.picture(target.id)
+
+    def _renumber(self, item_id: int, order: List[int]) -> None:
+        for position, picture_id in enumerate(order):
+            self._x("UPDATE item_picture SET position = ? WHERE id = ?", (position, picture_id))
+        self._x("UPDATE item SET updated_at = ? WHERE id = ?", (self.db._now(), item_id))
+
+    def move_picture(self, picture_id: int, position: int) -> Picture:
+        """Put the picture at *position* among its item's pictures (0 makes
+        it the main one); a position past the end puts it last."""
+        with self._tx():
+            target = self._need_picture(picture_id)
+            order = [p.id for p in self.pictures(target.item_id) if p.id != target.id]
+            order.insert(max(0, min(int(position), len(order))), target.id)
+            self._renumber(target.item_id, order)
+        return self.picture(target.id)
+
+    def delete_picture(self, picture_id: int) -> None:
+        """Delete the picture; the ones after it move up."""
+        with self._tx():
+            target = self._need_picture(picture_id)
+            self._x("DELETE FROM item_picture WHERE id = ?", (target.id,))
+            self._renumber(target.item_id, [p.id for p in self.pictures(target.item_id)])
 
     # ----- values used so far ---------------------------------------------
 

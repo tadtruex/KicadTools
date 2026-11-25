@@ -40,16 +40,26 @@ def main(test_config: str) -> None:
             sys.exit(f"refusing to overwrite {name!r}: the target must end in _test")
         src, dst = InventoryDb(source.db), InventoryDb(target.db)
         with dst._tx():
-            for table in ("item_tag", "item", "bin"):
+            for table in ("item_picture", "item_tag", "item", "bin"):
                 dst._x(f"DELETE FROM {table}")
             for b in sorted(src.bins(), key=lambda b: b.depth):
                 parent = b.path.rsplit("/", 1)[0] if "/" in b.path else None
                 dst.add_bin(b.name, parent, site=b.site, description=b.description,
                             location=b.location, notes=b.notes)
+            # A source made by a release without pictures lists none.
+            pictures = 0
             for i in src.items():
-                dst.add_item(i.name, bin=i.bin_path, quantity=i.quantity, tags=i.tags,
-                             **{f: getattr(i, f) for f in TEXT_FIELDS})
-        print(f"{name}: {len(dst.bins())} bins, {len(dst.items())} items")
+                copy = dst.add_item(i.name, bin=i.bin_path, quantity=i.quantity, tags=i.tags,
+                                    **{f: getattr(i, f) for f in TEXT_FIELDS})
+                for p in i.pictures:
+                    row = source.db._execute(
+                        "SELECT position, content_type, width, height, data, thumb, caption,"
+                        " created_at FROM item_picture WHERE id = ?", (p,)).fetchone()
+                    dst._x("INSERT INTO item_picture (item_id, position, content_type, width,"
+                           " height, data, thumb, caption, created_at)"
+                           " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (copy.id, *row))
+                    pictures += 1
+        print(f"{name}: {len(dst.bins())} bins, {len(dst.items())} items, {pictures} pictures")
     finally:
         source.close()
         target.close()
