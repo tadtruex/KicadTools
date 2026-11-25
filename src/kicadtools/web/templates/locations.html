@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Locations · Inventory{% endblock %}
+{% block main %}
+<h1>Locations</h1>
+{% if not locations %}<p class="hint">No locations yet.</p>{% endif %}
+<ul class="bins tree">
+{% for l in locations %}<li style="--depth: {{ l.depth }}"{% if l.depth == 0 %} class="top"{% endif %}><a href="{{ l.path|location_url }}">{{ l.name }}</a>
+  <span class="muted">{{ total.get(l.path, 0) }}</span>{% if l.description %} <span class="muted">· {{ l.description|truncate(60) }}</span>{% endif %}</li>{% endfor %}
+</ul>
+{% if unplaced %}
+<h2>In no location</h2>
+<ul class="results">{% for item in unplaced %}<li><a class="name" href="/item/{{ item.id }}">{{ item.name }}</a></li>{% endfor %}</ul>
+{% endif %}
+<details>
+  <summary>Add a location</summary>
+  <form method="post" action="/locations" class="fields">
+    <div class="two">
+      <label>Name <input name="name" required placeholder="C12"></label>
+      <label>Inside <input name="parent" list="dl-location" autocomplete="off" placeholder="(top level: a lab)"></label>
+    </div>
+    <div class="actions"><button type="submit" class="primary">Add location</button></div>
+  </form>
+</details>
+{% endblock %}

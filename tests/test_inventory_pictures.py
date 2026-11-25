@@ -152,8 +152,8 @@ def test_deleting_an_item_deletes_its_pictures(inv):
 
 
 def test_items_list_their_pictures(inv):
-    a = inv.add_item("Nano Every", bin="C12/5")
-    inv.add_item("STLink V3", bin="C12/5")
+    a = inv.add_item("Nano Every", location="C12/5")
+    inv.add_item("STLink V3", location="C12/5")
     pic = inv.add_picture(a.id, _image())
     assert {i.name: i.pictures for i in inv.items("C12")} == {
         "Nano Every": (pic.id,), "STLink V3": ()}
@@ -167,17 +167,3 @@ def test_pull_copies_the_pictures(inv, tmp_path):
     copy = InventoryDb(PartsDb.open_read_only(tmp_path / "copy.sqlite"))
     assert copy.item(item.id).pictures == (pic.id,)
     assert copy.picture_data(pic.id) == inv.picture_data(pic.id)
-
-
-def test_a_read_only_database_from_before_pictures_lists_none(tmp_path):
-    # The real database, opened read-only by newer code before a release
-    # with pictures has created the table there.
-    path = tmp_path / "old.sqlite"
-    db = PartsDb(path, now=lambda: STAMP)
-    inv = InventoryDb(db)
-    inv.add_item("Nano Every")
-    db._execute("DROP TABLE item_picture")
-    db.conn.commit()
-    db.close()
-    old = InventoryDb(PartsDb.open_read_only(path))
-    assert [(i.name, i.pictures) for i in old.items()] == [("Nano Every", ())]

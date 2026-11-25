@@ -4,7 +4,9 @@ step 7).
 :func:`pull` writes every table of an open :class:`~kicadtools.partsdb.PartsDb`
 (the server) to a new SQLite file: the tables of :mod:`kicadtools.dbimport`
 and, when the source has them, the inventory tables of
-:mod:`kicadtools.inventorydb`, read within one transaction, so the copy is one consistent state even while
+:mod:`kicadtools.inventorydb` (or of the first layout, unconverted, for a
+database :mod:`kicadtools.inventorymigrate` has not converted yet), read
+within one transaction, so the copy is one consistent state even while
 another machine writes. The file is written under a ``.partial`` name and
 renamed when complete, so a half-written file is never taken for a backup.
 
@@ -22,7 +24,8 @@ from typing import Dict, Optional
 
 from kicadtools.dbconfig import backups_dir
 from kicadtools.dbimport import ROTATIONS, TABLES
-from kicadtools.inventorydb import INVENTORY_TABLES, InventoryDb
+from kicadtools.inventorydb import INVENTORY_TABLES, InventoryDb, layout
+from kicadtools.inventorymigrate import V1_TABLES, create_v1
 from kicadtools.partsdb import PartsDb
 
 KEEP = 10
@@ -41,25 +44,31 @@ def pull(source: PartsDb, dest: Path) -> Dict[str, int]:
         try:
             # One transaction: InnoDB gives every SELECT in it the same
             # snapshot (REPEATABLE READ), as SQLite does for one connection.
-            inventory = tuple(t for t in INVENTORY_TABLES
+            first_layout = layout(source) == "1"
+            tables = V1_TABLES if first_layout else INVENTORY_TABLES
+            inventory = tuple(t for t in tables
                               if source._execute(source._dialect.has_table(), (t,)).fetchone())
             for table in TABLES + (ROTATIONS,) + inventory:
                 cur = source._execute(f'SELECT * FROM "{table}"')
                 data[table] = ([d[0] for d in cur.description], cur.fetchall())
         finally:
             source.conn.rollback()      # ends the read transaction
-    if "bin" in data:
-        # A bin refers to its parent: parents (fewer "/" in the path) first,
-        # whatever their ids, since a moved bin can have a smaller id than
-        # its new parent.
-        cols, rows = data["bin"]
-        at = cols.index("path")
-        data["bin"] = (cols, sorted(rows, key=lambda r: str(r[at]).count("/")))
+    for nested in ("location", "bin"):
+        if nested in data:
+            # A location refers to its parent: parents (fewer "/" in the
+            # path) first, whatever their ids, since a moved location can
+            # have a smaller id than its new parent.
+            cols, rows = data[nested]
+            at = cols.index("path")
+            data[nested] = (cols, sorted(rows, key=lambda r: str(r[at]).count("/")))
     copy = PartsDb(partial)
     try:
-        InventoryDb(copy)
+        if first_layout:
+            create_v1(copy, pictures="item_picture" in inventory)
+        else:
+            InventoryDb(copy)
         with copy._tx():
-            for table in TABLES + (ROTATIONS,) + INVENTORY_TABLES:
+            for table in TABLES + (ROTATIONS,) + tables:
                 cols, rows = data.get(table, ([], []))
                 if rows:
                     copy._insert_rows(table, cols, rows)

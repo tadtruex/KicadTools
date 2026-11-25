@@ -46,10 +46,19 @@ kicadtools-web --config ~/.kicadtools/config_test.toml --reload
 ```
 
 Step 1 opens the real database **read-only**: no schema statements run on
-it and the server refuses any write, so develop code cannot change it. Once
-develop holds a schema change (locations, stock rows), the copy reads tables
-the real database does not have yet and stops with an error; the copy then
-needs to convert the release's tables, which is part of that work.
+it and the server refuses any write, so develop code cannot change it. While
+the real database still has the release's layout (bins), the copy takes its
+tables as they are and then converts the test copy with the same
+`inventory migrate` code the cutover will use, so every copy is a trial of
+the conversion on the real data. Once the real database is converted, the
+copy takes the new tables directly.
+
+**Stop a develop app before step 1.** The copy drops and remakes the test
+database's inventory tables, and MariaDB makes a `DROP TABLE` wait for every
+connection that still has the table open in a transaction. The develop app
+no longer keeps one open between requests (fixed 2026-11-25), but a
+release from before that fix does, and so would any other long-lived
+connection.
 
 ## Looking at it
 

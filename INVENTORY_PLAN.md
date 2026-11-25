@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-24): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a`, at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Steps 6–7 not started. Decided 2026-11-24, not built: sites and bins become one hierarchy of locations, an item becomes a thing whose stock rows place it in any number of locations with a quantity each, and QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
+Status (2026-11-25): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a` (bins), at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Built on branch `feature/inventory-locations`, not released: locations instead of bins and sites, items with stock rows, item pictures (no web pages for pictures yet), and `kicadtools inventory migrate` to convert the real database at the cutover (see "Locations and stock — as built"). Steps 6–7 not started. QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import and the migration (user decision 2026-11-24: the web app is the interface).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -144,6 +144,55 @@ What follows from it:
   migration there, so every copy tests it on the real data. Once the real
   database is migrated, the copy finds nothing to migrate.
 
+## Locations and stock — as built (2026-11-25, branch `feature/inventory-locations`)
+
+- **`inventorydb.py`** holds the new layout only: `location`, `item` (no
+  `bin_id`, no `quantity`), `stock`, `item_tag`, `item_picture`, and
+  `meta.inventory_schema = 2`. Opening a database still in the first
+  layout raises `InventoryLayoutError` naming `kicadtools inventory
+  migrate`; so does one whose conversion stopped part way.
+- **API:** locations `add_location`, `ensure_location`, `location`,
+  `locations`, `children`, `subtree`, `update_location` (description,
+  notes), `rename_location`, `move_location`, `delete_location` (refused
+  while it holds stock, a row at 0 included, or locations). Items
+  `add_item(name, location=, quantity=)` (the first stock row), `item`,
+  `items(location)`, `unplaced`, `matching(name=, mpn=, digikey_pn=)`,
+  `update_item`, `delete_item`. Stock `add_stock` (adds to a row the item
+  already has there), `update_stock`, `adjust_stock` (stops at 0, keeps the
+  row), `move_stock` (merges into a row already there), `delete_stock`,
+  `stock_in(location)`. `Item.stock`, `Item.on_hand`, `Item.locations`.
+- **Reads end their transaction** (`InventoryDb._read`). Found 2026-11-25
+  on the test database: with MariaDB's REPEATABLE READ and no autocommit,
+  a long-lived connection kept reading its first snapshot, so the web app
+  did not see writes from other connections until it wrote itself, and its
+  open transaction made a `DROP TABLE` from another connection wait. The
+  released app (`kt_v0.1a`) has this bug; it does not matter while the app
+  is the only writer.
+- **`inventorymigrate.py`:** `plan` (the dry run), `migrate` (as decided
+  2026-11-25; the 9 items in no bin get a stock row in `unknown`, user
+  decision 2026-11-25), `create_v1` and `copy_v1_rows` (tests, the test
+  copy), and the first layout's schema. `db pull` and backups copy an
+  unconverted database in its own layout.
+- **CLI:** `kicadtools inventory migrate [--dry-run] [--no-backup]`; the
+  backup is `~/.kicadtools/backups/before-migrate-<date>.sqlite`, a name the
+  Cockpit's pruning does not touch. `kicadtools inventory import FILE
+  --location school` (was `--site`).
+- **On the real data** (dry run, read only, 2026-11-25): 115 locations
+  (`school`, `unknown`, the 113 bins under `school`), 122 items, 122 stock
+  rows. The test copy converted it on MariaDB and every item's name, part
+  numbers, location and quantity matched the original.
+- **Search:** one hit per item with its stock rows; the filter on the
+  top-level location (cookie `top`, was `site`) and the location filter keep
+  the rows there; "in stock" looks at those rows.
+- **Web app:** `/location/<path>` (was `/bin/`), `/locations` (was
+  `/bins`), stock rows on the item page (− / +, change, move, "not kept here
+  any more", add to another location), quick add offers a matching item.
+  Checked against the converted test copy: every page 3–20 ms.
+- **Deploy script:** grants on `location` and `stock` instead of `bin`.
+- **Tests:** suite 2027 passed on SQLite; the database tests 338 passed on
+  SQLite and MariaDB 11.8, including a MariaDB conversion stopped after
+  each non-transactional step and finished by the next run.
+
 ## Pictures (decided and built 2026-11-25)
 
 An item has any number of pictures, 0 or more, in order; the first is the
@@ -168,15 +217,12 @@ main one, the one a list or search result would show.
   `update_picture(id, caption=)`, `move_picture(id, position)` (0 makes it
   the main one), `delete_picture(id)`. `Item.pictures` is the ids in order,
   `Item.picture` the main one's. `delete_item` deletes them.
-- **Released database:** the table is created on the next open by code
-  that has it (a plain `CREATE TABLE IF NOT EXISTS`). Code with pictures
-  opening a database read-only that lacks the table lists no pictures. The
-  web app's grants add `item_picture`; the deploy script has it, so the
-  release that brings pictures needs the script run again (it is safe to
-  repeat) for the grant.
-- **The item migration** (stock rows, above) rebuilds `item`, so it handles
-  `item_picture` as it does `item_tag`: its foreign key must point at the
-  new `item`.
+- **Released database:** `item_picture` is part of the new layout and
+  ships with the locations release; the migration creates it when the
+  release had none. The web app's grants add it (deploy script).
+- **The item migration** rebuilds `item` on SQLite with foreign keys off,
+  so `item_tag` and `item_picture` keep pointing at `item`; on MariaDB
+  `item` is altered in place (tested both ways).
 - **Not built yet:** the web app's part: pictures on the item page, upload
   from the phone's camera (`<input type=file accept="image/*"
   capture>`), the main picture's thumbnail in search results and on a

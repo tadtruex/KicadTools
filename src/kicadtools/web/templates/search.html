@@ -6,9 +6,9 @@
   <input id="q" type="search" name="q" value="{{ q }}" placeholder="arduino, stlink v3, m6 screw…"
          autofocus autocomplete="off" autocapitalize="off" spellcheck="false">
   <div class="filters">
-    <select name="site" aria-label="Site">
-      <option value="">All sites</option>
-      {% for s in choices.site %}<option value="{{ s }}" {% if s|lower == site|lower %}selected{% endif %}>{{ s }}</option>{% endfor %}
+    <select name="top" aria-label="Where">
+      <option value="">Everywhere</option>
+      {% for t in choices.top %}<option value="{{ t }}" {% if t|lower == top|lower %}selected{% endif %}>{{ t }}</option>{% endfor %}
     </select>
     <select name="category" aria-label="Category">
       <option value="">Any category</option>

@@ -1,5 +1,5 @@
-"""Copy the real inventory (bins, items, tags) into a test database, to try
-the web app on real data without touching it.
+"""Copy the real inventory into a test database, to try the web app on real
+data without touching it.
 
 Run from Code/KicadTools with the venv:
 
@@ -9,21 +9,33 @@ The source is the database the normal KicadTools configuration names
 (``~/.kicadtools/config.toml`` or ``$KICADTOOLS_CONFIG``). It is opened
 read-only: no schema statements run on it and the server refuses any write,
 so a ``develop`` checkout with new tables or columns does not add them to
-the real database the release uses. Its tables must be ones this code
-reads.
+the real database the release uses.
+
 *TEST_CONFIG* is a copy of that file with ``database =`` set to a name
-ending ``_test`` (a SQLite file: named ``…_test.sqlite``); its inventory
-tables are emptied and refilled. Nothing else in either database is touched.
+ending ``_test`` (a SQLite file: named ``…_test.sqlite``). Its inventory
+tables, of either layout, are dropped and made again from the source:
+
+- a source still in the first layout (bins, release ``kt_v0.1a``) is copied
+  as it is and then converted with ``inventorymigrate.migrate``, so every
+  copy tries the conversion on the real data;
+- a converted source is copied table by table.
+
+Nothing else in either database is touched.
 """
 import os
 import sys
 
 from kicadtools.dbconfig import load_config, terminal_ask
 from kicadtools.dbconnect import open_parts_db
-from kicadtools.inventorydb import InventoryDb
+from kicadtools.inventorydb import INVENTORY_TABLES, LAYOUT, LAYOUT_KEY, InventoryDb, layout
+from kicadtools.inventorymigrate import copy_v1_rows, create_v1, migrate
 
-TEXT_FIELDS = ("description", "category", "manufacturer", "mpn", "digikey_pn",
-               "lcsc", "url", "notes")
+# Children before the tables they refer to, both layouts.
+DROP_ORDER = ("stock", "item_picture", "item_tag", "item", "location", "bin")
+
+
+def _has(db, table):
+    return bool(db._execute(db._dialect.has_table(), (table,)).fetchone())
 
 
 def main(test_config: str) -> None:
@@ -31,35 +43,47 @@ def main(test_config: str) -> None:
     os.environ["KICADTOOLS_CONFIG"] = test_config
     target = open_parts_db(load_config(), terminal_ask)
     try:
-        if target.db.backend == "mariadb":
-            name = target.db._execute("SELECT DATABASE()").fetchone()[0]
+        src, dst = source.db, target.db
+        if dst.backend == "mariadb":
+            name = dst._execute("SELECT DATABASE()").fetchone()[0]
         else:   # the file's name without its extension: parts_test.sqlite
-            path = target.db._execute("PRAGMA database_list").fetchone()[2]
+            path = dst._execute("PRAGMA database_list").fetchone()[2]
             name = os.path.splitext(path)[0] if path else ":memory:"
         if not name.endswith("_test"):
             sys.exit(f"refusing to overwrite {name!r}: the target must end in _test")
-        src, dst = InventoryDb(source.db), InventoryDb(target.db)
+        found = layout(src)
+        if found not in ("1", LAYOUT):
+            sys.exit(f"the source inventory is in layout {found!r}; nothing copied")
+
         with dst._tx():
-            for table in ("item_picture", "item_tag", "item", "bin"):
-                dst._x(f"DELETE FROM {table}")
-            for b in sorted(src.bins(), key=lambda b: b.depth):
-                parent = b.path.rsplit("/", 1)[0] if "/" in b.path else None
-                dst.add_bin(b.name, parent, site=b.site, description=b.description,
-                            location=b.location, notes=b.notes)
-            # A source made by a release without pictures lists none.
-            pictures = 0
-            for i in src.items():
-                copy = dst.add_item(i.name, bin=i.bin_path, quantity=i.quantity, tags=i.tags,
-                                    **{f: getattr(i, f) for f in TEXT_FIELDS})
-                for p in i.pictures:
-                    row = source.db._execute(
-                        "SELECT position, content_type, width, height, data, thumb, caption,"
-                        " created_at FROM item_picture WHERE id = ?", (p,)).fetchone()
-                    dst._x("INSERT INTO item_picture (item_id, position, content_type, width,"
-                           " height, data, thumb, caption, created_at)"
-                           " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (copy.id, *row))
-                    pictures += 1
-        print(f"{name}: {len(dst.bins())} bins, {len(dst.items())} items, {pictures} pictures")
+            for table in DROP_ORDER:
+                dst._execute(f"DROP TABLE IF EXISTS {table}")
+            dst._execute('DELETE FROM meta WHERE "key" = ?', (LAYOUT_KEY,))
+
+        if found == "1":
+            create_v1(dst, pictures=_has(src, "item_picture"))
+            counts = copy_v1_rows(src, dst)
+            print(f"copied (first layout): {counts}")
+            done = migrate(dst)
+            print("converted: " + done.summary().replace("\n", "\n  "))
+        else:
+            InventoryDb(dst)
+            with dst._tx():
+                for table in INVENTORY_TABLES:
+                    cur = src._execute(f"SELECT * FROM {table}")
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    if table == "location":
+                        at = cols.index("path")
+                        rows = sorted(rows, key=lambda r: str(r[at]).count("/"))
+                    if rows:
+                        dst._insert_rows(table, cols, rows)
+            print("copied (converted source)")
+        inv = InventoryDb(dst)
+        items = inv.items()
+        print(f"{name}: {len(inv.locations())} locations, {len(items)} items, "
+              f"{sum(len(i.stock) for i in items)} stock rows, "
+              f"{sum(len(i.pictures) for i in items)} pictures")
     finally:
         source.close()
         target.close()

@@ -43,7 +43,7 @@ def test_sqlite_read_only_runs_no_schema_and_refuses_writes(tmp_path):
     session = open_parts_db(DbConfig(sqlite_path=path), _never_ask, read_only=True)
     try:
         assert session.db.read_only and session.read_only
-        InventoryDb(session.db)              # would create bin, item, item_tag
+        InventoryDb(session.db)              # would create location, item, stock …
         with pytest.raises(sqlite3.OperationalError):
             session.db._execute("INSERT INTO settings VALUES ('k', 'v')")
         again = session.connect_again()
@@ -62,7 +62,7 @@ def test_sqlite_default_still_writes(tmp_path):
         InventoryDb(session.db)
     finally:
         session.close()
-    assert {"bin", "item", "item_tag"} <= _sqlite_tables(path)
+    assert {"location", "item", "item_tag", "stock"} <= _sqlite_tables(path)
 
 
 # ----- MariaDB ----------------------------------------------------------------
@@ -118,25 +118,62 @@ def _config(path: Path, db: Path) -> Path:
     return path
 
 
-def test_copy_script_leaves_the_source_unchanged(tmp_path, monkeypatch, capsys):
-    source = tmp_path / "parts.sqlite"
-    db = PartsDb(source)
-    inv = InventoryDb(db)
-    inv.add_item("Nano Every", bin="C12/5", quantity=3, tags=["arduino"])
-    inv.add_item("0.1uF 0603", bin="57", quantity=50)
-    db.close()
-    snapshot = source.read_bytes()
-
+def _run_copy(tmp_path, monkeypatch, source: Path) -> Path:
     monkeypatch.delenv("KICADTOOLS_PARTS_DB", raising=False)
     monkeypatch.setenv("KICADTOOLS_CONFIG", str(_config(tmp_path / "real.toml", source)))
     target = tmp_path / "parts_test.sqlite"
     _load_script().main(str(_config(tmp_path / "test.toml", target)))
+    return target
 
-    assert source.read_bytes() == snapshot
-    assert "3 bins, 2 items" in capsys.readouterr().out
+
+def _stock(target: Path) -> list:
     copy = PartsDb(target)
     try:
-        names = sorted(i.name for i in InventoryDb(copy).items())
+        return sorted((i.name, i.locations, i.on_hand) for i in InventoryDb(copy).items())
     finally:
         copy.close()
-    assert names == ["0.1uF 0603", "Nano Every"]
+
+
+def test_copy_script_converts_a_first_layout_source_and_leaves_it_unchanged(
+        tmp_path, monkeypatch, capsys):
+    # The real database before the cutover: bins, release kt_v0.1a.
+    from kicadtools.inventorymigrate import create_v1
+    source = tmp_path / "parts.sqlite"
+    db = PartsDb(source)
+    create_v1(db, pictures=False)
+    with db._tx():
+        db._execute("INSERT INTO bin (id, name, path, site, updated_at)"
+                    " VALUES (1, '57', '57', 'school', 'x')")
+        db._execute("INSERT INTO item (name, quantity, bin_id, created_at, updated_at)"
+                    " VALUES ('0.1uF 0603', 50, 1, 'x', 'x')")
+        db._execute("INSERT INTO item (name, quantity, created_at, updated_at)"
+                    " VALUES ('Nano Every', 3, 'x', 'x')")
+    db.close()
+    snapshot = source.read_bytes()
+
+    target = _run_copy(tmp_path, monkeypatch, source)
+    assert source.read_bytes() == snapshot
+    out = capsys.readouterr().out
+    assert "copied (first layout)" in out and "3 locations, 2 items, 2 stock rows" in out
+    assert _stock(target) == [("0.1uF 0603", ("school/57",), 50),
+                              ("Nano Every", ("unknown",), 3)]
+    # Run again: the test database is emptied and made again.
+    _run_copy(tmp_path, monkeypatch, source)
+    assert len(_stock(target)) == 2
+
+
+def test_copy_script_copies_a_converted_source(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "parts.sqlite"
+    db = PartsDb(source)
+    inv = InventoryDb(db)
+    nano = inv.add_item("Nano Every", location="school/C12/5", quantity=3, tags=["arduino"])
+    inv.add_stock(nano.id, "home", 1)
+    inv.add_item("0.1uF 0603", location="school/57", quantity=50)
+    db.close()
+    snapshot = source.read_bytes()
+
+    target = _run_copy(tmp_path, monkeypatch, source)
+    assert source.read_bytes() == snapshot
+    assert "copied (converted source)" in capsys.readouterr().out
+    assert _stock(target) == [("0.1uF 0603", ("school/57",), 50),
+                              ("Nano Every", ("home", "school/C12/5"), 4)]

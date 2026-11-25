@@ -3,6 +3,29 @@
 Scratch pad for cross-machine handoff: where things stand and what's next.
 Not user docs (see `README.md` for those).
 
+## Handoff: locations, stock rows and the migration built (2026-11-25)
+
+Branch `feature/inventory-locations` (git-flow feature off `develop`).
+`INVENTORY_PLAN.md`, "Locations and stock — as built", has the details.
+
+- Built: the new layout (locations, items, stock rows, pictures), search
+  and web app on it, `kicadtools inventory migrate`, the test copy that
+  converts the real data, and the deploy script's grants. Suite green on
+  SQLite and MariaDB.
+- The real `tadtruex_inventory` is **unchanged** (only read). The released
+  service still runs `kt_v0.1a` on bins.
+- Found and fixed on the branch: a long-lived MariaDB connection kept its
+  first snapshot (see the plan). The release has the bug.
+
+### Next
+
+1. Look at the develop app on the converted test copy (README_TEST.md),
+   on the phone too. Stop it before running the copy again.
+2. Pictures in the web app (upload, show, reorder).
+3. The cutover, as in the plan ("how the locations and stock migration
+   runs"): finish a release from `develop` with this branch merged; stop
+   the service; `kicadtools inventory migrate`; re-run the deploy script.
+
 ## Handoff: inventory web app deployed on broadpeak (2026-11-24)
 
 Pick-up point for the lab inventory. Supersedes the "Next" list of the
