@@ -26,7 +26,8 @@
 #      nothing on the LAN or the internet reaches it). A Caddyfile not
 #      written by this script is kept as Caddyfile.orig.
 #   5. `tailscale serve` on port 443 turned off (Caddy takes the port), and
-#      if ufw is active, 443 allowed in on tailscale0.
+#      if ufw is active, 443 allowed in on tailscale0. Caddy does not listen
+#      on port 80 (no HTTP-to-HTTPS redirect).
 #   6. Caddy (re)started and both names checked over HTTPS.
 #
 # DNS (done by hand at Cloudflare): an A record `inventory` ->
@@ -61,7 +62,7 @@ echo "tailnet: $TS_NAME $TS_IP4 $TS_IP6"
 say "Caddy"
 if ! dpkg -s caddy >/dev/null 2>&1; then
     apt-get update -q
-    apt-get install -y -q debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+    apt-get install -y -q curl gnupg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
         | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
@@ -115,6 +116,10 @@ Wants=tailscaled.service
 
 [Service]
 EnvironmentFile=$TOKEN_FILE
+# The packaged unit runs \`caddy run --environ\`, which writes the whole
+# environment, the token included, to the journal at every start.
+ExecStart=
+ExecStart=/usr/bin/caddy run --config $CADDYFILE
 Restart=on-failure
 RestartSec=5
 EOF
@@ -147,8 +152,12 @@ cat > "$CADDYFILE" <<EOF
 $MARKER
 # The lab inventory web app (kicadtools-web on 127.0.0.1:$PORT). Both names
 # answer only on broadpeak's tailnet addresses.
+# No HTTP-to-HTTPS redirect, so nothing listens on port 80: browsers try
+# https first, and the certificates come by DNS (Cloudflare) and from
+# tailscaled, neither of which needs port 80.
 {
 	default_bind $BIND
+	auto_https disable_redirects
 }
 
 $NAME {
@@ -172,11 +181,19 @@ tailscale serve --https=443 off >/dev/null 2>&1 || true
 tailscale serve status 2>&1 || true
 if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
     ufw allow in on tailscale0 to any port 443 proto tcp >/dev/null
-    ufw allow in on tailscale0 to any port 80 proto tcp >/dev/null
-    echo "ufw: 80 and 443 allowed in on tailscale0"
+    echo "ufw: 443 allowed in on tailscale0"
 fi
 
 # --- 6. start and check --------------------------------------------------
+say "port 443"
+systemctl stop caddy
+# Anything still listening on 443 (on every address, or on a tailnet one)
+# stops Caddy from starting.
+holders=$(ss -ltnpH 'sport = :443' | grep -E "(\\*|0\\.0\\.0\\.0|\\[::\\]|$TS_IP4|\\[$TS_IP6\\]):443" || true)
+[[ -z $holders ]] || fail "something else listens on port 443:
+$holders"
+echo "free"
+
 say "Caddy (re)start"
 systemctl enable caddy >/dev/null
 systemctl restart caddy
