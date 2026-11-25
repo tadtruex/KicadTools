@@ -18,17 +18,16 @@ On `develop` (commit e50c569, pushed). `INVENTORY_PLAN.md`, "Locations and stock
 
 ### Next
 
-1. Look at the develop app on the converted test copy (README_TEST.md),
-   on the phone too. Stop it before running the copy again.
-2. Pictures in the web app: built (add, show, make main, delete); no
-   drag to reorder yet (GitHub issue #1). No captions on this interface
-   (user decision 2026-11-25): don't build or suggest them.
-3. The cutover, as in the plan ("how the locations and stock migration
+Web app work is tracked as GitHub issues (tadtruex/KicadTools): #1 drag
+to reorder pictures, #2 GUI check of drag and drop and the phone camera.
+No captions on this interface (user decision 2026-11-25): don't build or
+suggest them.
+
+1. The cutover, as in the plan ("how the locations and stock migration
    runs"): finish a release from `develop`; stop the service;
    `kicadtools inventory migrate`; re-run the deploy script.
-4. Interface to-do (plan): built, with pictures on the item page. Try
-   drag and drop and the phone camera in a real browser.
-5. Interface to-do, second list (plan): built (collapsible Locations
+2. Interface to-do (plan): built, with pictures on the item page.
+3. Interface to-do, second list (plan): built (collapsible Locations
    tree, release version in the footer).
 
 ## Handoff: inventory web app deployed on broadpeak (2026-11-24)
@@ -75,16 +74,13 @@ handoff below; its setup and test details still hold.
 
 1. **The phone:** Tailscale on it, then a look at the pages. Expect layout
    and wording fixes.
-2. **Fix the two spreadsheet errors** in the app (bin 19, bin 3; see the
-   2026-11-23 handoff below). These are the first writes through the app
-   on the real database.
-3. **Locations** (plan, "Decided 2026-11-24"): the rename and the
+2. **Locations** (plan, "Decided 2026-11-24"): the rename and the
    site-to-first-level migration. First settle open question 3 (the new
    name for a bin's free-text `location` field). Best done before much
    real data goes in through the app.
-4. **Step 6** (labels, DigiKey autofill) after the nameserver and open
+3. **Step 6** (labels, DigiKey autofill) after the nameserver and open
    questions 1 and 4. The QR base URL becomes a config setting.
-5. The Cockpit's `config.toml` can name `broadpeak.tail7c4deb.ts.net`
+4. The Cockpit's `config.toml` can name `broadpeak.tail7c4deb.ts.net`
    instead of `10.0.10.13`, which opens the database tunnel from the barn
    and the school (DB plan step 8).
 
@@ -187,8 +183,6 @@ that session ends.
    and Claude's shell cannot answer a sudo prompt).
 3. Step 6: labels with QR codes (Brother model still an open question),
    DigiKey autofill on quick add.
-4. Fix the two spreadsheet errors through the app (bin 19, bin 3; see
-   below) once it is on the real database.
 
 ### Loose ends
 
@@ -340,9 +334,7 @@ Things to know for that work:
 - Free text (description, location, notes, URL) keeps line breaks; names,
   categories, part numbers, sites and tags have repeated spaces collapsed.
   Bin names cannot contain `/`.
-- Known data errors from the spreadsheet, to fix through the app: bin 19
-  (`1M 0603`) has tolerance `1%%` and a DigiKey PN for a 10k part; bin 3's
-  MPN reads `CR003-JW-331ELF` beside DigiKey `CR0603-JW-331ELFCT-ND`.
+- Known data errors from the spreadsheet (bin 19, bin 3): GitHub issue #3.
 - Tailscale (step 5) is not installed yet. Until it is, the web app is
   reachable from the home network only.
 
