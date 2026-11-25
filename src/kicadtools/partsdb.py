@@ -694,7 +694,7 @@ class PartsDb:
             # thread and searches it on a worker thread; self._lock serializes use.
             self.conn = sqlite3.connect(str(path), check_same_thread=False)
         try:
-            self._dialect.setup(self.conn)
+            self._setup_session()
             if _read_only:
                 self._check_version(path)
                 return
@@ -729,8 +729,18 @@ class PartsDb:
             before = self.conn.thread_id()
             self.conn.ping(reconnect=True)
             if self.conn.thread_id() != before:
-                self._dialect.setup(self.conn)
+                self._setup_session()
         self._last_used = now
+
+    def _setup_session(self) -> None:
+        """Per-connection settings, again after a reconnect. A read-only
+        server connection is also read-only to the server
+        (``SET SESSION TRANSACTION READ ONLY``), so a write is refused there
+        and not only by this class skipping the schema."""
+        self._dialect.setup(self.conn)
+        if self.read_only and self._dialect is MARIADB:
+            with self.conn.cursor() as cur:
+                cur.execute("SET SESSION TRANSACTION READ ONLY")
 
     def _execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
         """Run *sql* (``?`` placeholders) with *params*; the cursor."""
@@ -765,11 +775,14 @@ class PartsDb:
     @classmethod
     def connect_mariadb(cls, *, host: str, port: int, user: str, password: str,
                         database: str, now: Optional[Callable[[], str]] = None,
-                        connect_timeout: int = 10) -> "PartsDb":
+                        connect_timeout: int = 10,
+                        read_only: bool = False) -> "PartsDb":
         """The parts database in MariaDB *database* (``DB_PLAN.md``): the same
         tables and methods as a SQLite file. Needs PyMySQL (``pip install
         kicadtools[server]``). The tables are created when missing and the
-        schema version checked, as for a file. Raises
+        schema version checked, as for a file. With *read_only* the schema
+        is not applied (only the version is checked) and the server refuses
+        every write in the session. Raises
         :class:`pymysql.err.OperationalError` when the login fails."""
         import pymysql
 
@@ -777,7 +790,7 @@ class PartsDb:
                                database=database, charset="utf8mb4", autocommit=False,
                                connect_timeout=connect_timeout)
         return cls(f"{user}@{host}:{port}/{database}", now=now, _conn=conn,
-                   _dialect=MARIADB)
+                   _dialect=MARIADB, _read_only=read_only)
 
     @classmethod
     def open_read_only(cls, path: Path | str,

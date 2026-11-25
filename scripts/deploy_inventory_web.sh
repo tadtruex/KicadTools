@@ -15,7 +15,9 @@
 #   4. a backup of tadtruex_inventory (mariadb-dump) before the app can
 #      write to it;
 #   5. a MariaDB user `inventory_web`@`localhost`: SELECT on every table,
-#      INSERT/UPDATE/DELETE on bin, item and item_tag only. Opening the
+#      INSERT/UPDATE/DELETE on location, item, item_tag, item_picture
+#      and stock only (the inventory after `kicadtools inventory migrate`,
+#      run from your own account first: this user cannot ALTER). Opening the
 #      database runs CREATE TABLE / CREATE INDEX IF NOT EXISTS and
 #      INSERT IGNORE INTO meta, and MariaDB checks privileges before it
 #      checks whether the table exists, so the user also holds CREATE,
@@ -155,9 +157,11 @@ CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$PW';
 ALTER USER '$DB_USER'@'localhost' IDENTIFIED BY '$PW';
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM '$DB_USER'@'localhost';
 GRANT SELECT, CREATE, INDEX, REFERENCES ON \`$DATABASE\`.* TO '$DB_USER'@'localhost';
-GRANT INSERT, UPDATE, DELETE ON \`$DATABASE\`.bin      TO '$DB_USER'@'localhost';
-GRANT INSERT, UPDATE, DELETE ON \`$DATABASE\`.item     TO '$DB_USER'@'localhost';
-GRANT INSERT, UPDATE, DELETE ON \`$DATABASE\`.item_tag TO '$DB_USER'@'localhost';
+GRANT INSERT, UPDATE, DELETE ON \`$DATABASE\`.location     TO '$DB_USER'@'localhost';
+GRANT INSERT, UPDATE, DELETE ON \`$DATABASE\`.item         TO '$DB_USER'@'localhost';
+GRANT INSERT, UPDATE, DELETE ON \`$DATABASE\`.item_tag     TO '$DB_USER'@'localhost';
+GRANT INSERT, UPDATE, DELETE ON \`$DATABASE\`.item_picture TO '$DB_USER'@'localhost';
+GRANT INSERT, UPDATE, DELETE ON \`$DATABASE\`.stock        TO '$DB_USER'@'localhost';
 GRANT INSERT ON \`$DATABASE\`.meta TO '$DB_USER'@'localhost';
 SQL
 mariadb -e "SHOW GRANTS FOR '$DB_USER'@'localhost'" | sed 's/IDENTIFIED BY PASSWORD .*/IDENTIFIED BY PASSWORD .../'

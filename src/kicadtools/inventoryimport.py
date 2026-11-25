@@ -9,10 +9,11 @@
 Columns (matched by header, ignoring case and spacing; others are ignored
 and listed in the report):
 
-- **Comp Number** — the bin: a top-level bin named after the number
-  (``17.0`` → ``"17"``), with the site given and nothing else; its
-  description, location and notes are set later on the bin itself. Blank:
-  the item is in no bin.
+- **Comp Number** — the bin: a location named after the number inside the
+  location given (``17.0`` with ``school`` → ``"school/17"``), with nothing
+  else set; its description and notes are set later on the location
+  itself. Blank: the item goes to the top-level location ``unknown``, with
+  its quantity (as :mod:`kicadtools.inventorymigrate` does).
 - **Component Type** — the category: ``R`` Resistor, ``C`` Capacitor, ``L``
   Inductor, ``D`` Diode, ``Q`` Transistor, ``U`` IC, ``VR`` Regulator, ``P``
   Processor, ``Y`` Crystal; any other code is kept as written.
@@ -36,7 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from kicadtools.inventorydb import InventoryDb, InventoryError
+from kicadtools.inventorydb import SEP, InventoryDb, InventoryError, location_name
+from kicadtools.inventorymigrate import UNPLACED
 
 CATEGORIES = {
     "R": "Resistor", "C": "Capacitor", "L": "Inductor", "D": "Diode",
@@ -80,8 +82,8 @@ class ImportItem:
 @dataclass
 class ImportReport:
     items: int = 0
-    bins: int = 0
-    unbinned: List[str] = field(default_factory=list)
+    bins: int = 0                    # locations made for Comp Numbers
+    unbinned: List[str] = field(default_factory=list)   # put in UNPLACED
     skipped: List[str] = field(default_factory=list)      # rows with no value
     ignored_columns: List[str] = field(default_factory=list)
     dry_run: bool = False
@@ -90,7 +92,8 @@ class ImportReport:
         out = [f"{self.items} items, {self.bins} bins"
                + (" (dry run: rolled back)" if self.dry_run else "")]
         if self.unbinned:
-            out.append(f"in no bin ({len(self.unbinned)}): " + ", ".join(self.unbinned))
+            out.append(f"in no bin, put in {UNPLACED!r} ({len(self.unbinned)}): "
+                       + ", ".join(self.unbinned))
         if self.skipped:
             out.append(f"skipped ({len(self.skipped)}): " + "; ".join(self.skipped))
         if self.ignored_columns:
@@ -255,28 +258,33 @@ class _DryRun(Exception):
     pass
 
 
-def import_items(inv: InventoryDb, items: Sequence[ImportItem], *, site: str,
+def import_items(inv: InventoryDb, items: Sequence[ImportItem], *, location: str,
                  report: Optional[ImportReport] = None,
                  dry_run: bool = False) -> ImportReport:
-    """Add *items* to the empty inventory *inv*, their bins top-level with
-    site *site*, in one transaction; with *dry_run* everything is done and
-    rolled back. Refuses an inventory that already holds bins or items."""
+    """Add *items* to the empty inventory *inv* in one transaction, each
+    with one stock row: in *location*/Comp Number (``school/17``), or in
+    ``unknown`` for a row with no Comp Number. With *dry_run* everything is
+    done and rolled back. Refuses an inventory that already holds locations
+    or items."""
     report = report or ImportReport()
     report.dry_run = dry_run
-    if not (site or "").strip():
-        raise InventoryImportError("a site is needed for the imported bins")
-    if inv.bins() or inv.items():
+    try:
+        top = location_name(location or "")
+    except InventoryError as exc:
+        raise InventoryImportError(f"a location is needed for the imported bins: {exc}") \
+            from exc
+    if inv.locations() or inv.items():
         raise InventoryImportError(
-            f"{inv.db.label}: the inventory already holds bins or items; "
+            f"{inv.db.label}: the inventory already holds locations or items; "
             "the import only fills an empty one")
     try:
         with inv._tx():
             for item in items:
-                if item.bin is not None and inv.bin(item.bin) is None:
-                    inv.add_bin(item.bin, site=site)
+                where = f"{top}{SEP}{item.bin}" if item.bin is not None else UNPLACED
+                if item.bin is not None and inv.location(where) is None:
                     report.bins += 1
                 try:
-                    inv.add_item(item.name, bin=item.bin, quantity=item.quantity,
+                    inv.add_item(item.name, location=where, quantity=item.quantity,
                                  category=item.category, description=item.description,
                                  mpn=item.mpn, digikey_pn=item.digikey_pn)
                 except InventoryError as exc:

@@ -1,20 +1,55 @@
 {% extends "base.html" %}
 {% block title %}Add · Inventory{% endblock %}
 {% block main %}
-<h1>Add an item</h1>
-{% if added %}<p class="ok">Added <a href="/item/{{ added.id }}">{{ added.name }}</a>{% if added.bin_path %} to {{ added.bin_path }}{% endif %}.</p>{% endif %}
+<h1>{% if copy_of %}Copy of {{ copy_of.name }}{% else %}Add an item{% endif %}</h1>
+{% if added %}<p class="ok">Added <a href="/item/{{ added.id }}">{{ added.name }}</a>{% if added.locations %} to {{ added.locations|join(', ') }}{% endif %}.</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
-<form method="post" action="/add" class="fields">
+{% if matches %}
+<div class="matches">
+  <p><strong>Already known:</strong> put this stock on {{ 'it' if matches|length == 1 else 'one of them' }} instead of making a second item?</p>
+  <ul class="results">
+  {% for m in matches %}
+    <li>
+      <a class="name" href="/item/{{ m.id }}">{{ m.name }}</a> <span class="qty">{{ m.on_hand|qty }}</span>
+      <div class="where">{% for row in m.stock %}{{ row.location_path }}{% if not loop.last %} · {% endif %}{% else %}<span class="muted">in no location</span>{% endfor %}</div>
+      {% if location %}
+      <form method="post" action="/item/{{ m.id }}/stock" class="inline">
+        <input type="hidden" name="location" value="{{ location }}">
+        <input type="hidden" name="quantity" value="{{ form.get('quantity', '') }}">
+        <button type="submit" class="primary">Add {{ form.get('quantity', '') or 'it' }} in {{ location }}</button>
+      </form>
+      {% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% if dropped %}<p class="hint">Choose the pictures again: a browser cannot keep them across this step.</p>{% endif %}
+<form method="post" action="/add" class="fields" enctype="multipart/form-data">
+  {% if matches or copy_of %}<input type="hidden" name="new" value="1">{% endif %}
+  {% if copy_of %}<input type="hidden" name="copy_from" value="{{ copy_of.id }}">{% endif %}
   <label>Name <input name="name" required autofocus value="{{ form.get('name', '') or request.query_params.get('name', '') }}"></label>
   <div class="two">
-    <label>Bin <input name="bin" list="dl-bin" value="{{ bin }}" autocomplete="off" placeholder="C12/5" title="A new path makes the bin"></label>
+    <label>Location <input name="location" list="dl-location" value="{{ location }}" autocomplete="off" placeholder="school/C12/5" title="A new path makes the location"></label>
     <label>Quantity <input name="quantity" inputmode="numeric" value="{{ form.get('quantity', '') }}"></label>
   </div>
-  <details {% if form and (form.get('category') or form.get('tags') or form.get('mpn')) %}open{% endif %}>
+  {% if copy_pictures %}
+  <fieldset class="copy-pictures">
+    <legend>Pictures of {{ copy_of.name }} to copy</legend>
+    <ul class="gallery">
+    {% for p in copy_pictures %}
+      <li><label><img src="/picture/{{ p.id }}/thumb" alt="{{ p.caption or copy_of.name }}" loading="lazy">
+        <span><input type="checkbox" name="copy_picture" value="{{ p.id }}" {% if p.id in chosen %}checked{% endif %}> copy</span></label></li>
+    {% endfor %}
+    </ul>
+  </fieldset>
+  {% endif %}
+  {% set autosubmit = false %}{% include "_dropzone.html" %}
+  <details {% if copy_of or (form and (form.get('category') or form.get('tags') or form.get('mpn'))) %}open{% endif %}>
     <summary>More fields</summary>
     {% set item = none %}
     {% include "_item_fields.html" %}
   </details>
-  <div class="actions"><button type="submit" class="primary">Save</button></div>
+  <div class="actions"><button type="submit" class="primary">{% if matches %}Make a new item anyway{% else %}Save{% endif %}</button></div>
 </form>
 {% endblock %}

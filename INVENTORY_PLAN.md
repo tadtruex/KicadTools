@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-24): steps 1–3 done and step 4 built (the web app runs on broadpeak against `tadtruex_inventory_test`, not yet tried in a browser); the master component list is imported into `tadtruex_inventory`. Steps 5–7 not started. No inventory CLI beyond the import (user decision 2026-11-24: the web app is the interface; a CLI only if it speeds up building it).
+Status (2026-11-25): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a` (bins), at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Built on `develop`, not released: locations instead of bins and sites, items with stock rows, item pictures (no web pages for pictures yet), and `kicadtools inventory migrate` to convert the real database at the cutover (see "Locations and stock — as built"). Steps 6–7 not started. QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import and the migration (user decision 2026-11-24: the web app is the interface).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -23,6 +23,264 @@ Number** column: 113 rows have one, all different (one item per bin today);
 (`100uF`, `150uF`, `Gecko BT Module`, `47pF`, `1uF`, `10nF`, `USBDF01W5`,
 `USBDF02W6`, `30V 100mA Schottky`) and were imported with none.
 
+## Decided 2026-11-24: sites become locations, bins become locations
+
+Not built yet. This changes the "Bins" and "Imported bins" decisions
+below and the data model, search and web app sections after them; those
+sections still describe what is built today.
+
+- **No site.** The site is the first element of the hierarchy, not a
+  field: what is `17` with site `school` today becomes `school/17`. The
+  `site` column, `site_of`, `values("site")` and the inherit-from-parent
+  rule go.
+- **"Bin" becomes "Location".** A location is anything in the hierarchy:
+  a lab (`school`), a cabinet (`school/C12`), a drawer (`school/C12/5`), a
+  box. The word covers all of them; "bin" fits only the last two. Applies
+  to the table, the code (`InventoryDb`, `inventory.py`, the web app), the
+  URLs (`/location/school/C12/5`, the address a QR code encodes) and every
+  word on the pages.
+
+What follows from it:
+
+- **Data:** the 113 imported bins move under one top-level location
+  `school`; the 9 items with no bin stay with no location.
+- **Schema:** `bin` → `location`, `site` dropped; `item.bin_id` moves
+  into stock rows (see "an item is a thing" below). This is a migration on a populated database
+  (rename, move, drop), unlike the `CREATE TABLE IF NOT EXISTS` additions
+  so far. It runs from the user's account: the web app's database user
+  (`deploy_inventory_web.sh`) cannot ALTER, and its grants name `bin`, so
+  the script changes with it. Backups and `kicadtools db pull` change to
+  the new table name.
+- **Search:** the site filter becomes a filter on the top-level location
+  (still remembered in a cookie); "site" leaves the searched fields, since
+  the location path already holds it.
+- **Name clash:** a bin has a free-text field `location` today ("rack by
+  the bench, top shelf"). With the table called `location` it goes: a
+  location has one free-text `description`, which says both what it is and
+  where to find it (decided 2026-11-24). On `tadtruex_inventory` every
+  bin's `description`, `location` and `notes` is empty (checked
+  2026-11-24, read only), so the column is dropped with nothing to merge.
+  Search drops it from the searched fields.
+- **When:** before labels are printed (step 6), since a printed QR code
+  holds the URL. Best before real data is entered through the deployed app,
+  so the migration moves only the imported rows.
+
+## Decided 2026-11-24: an item is a thing; stock rows place it
+
+Not built yet. Changes the data model below (`item.bin_id`,
+`item.quantity`) together with the locations decision above.
+
+- **An item** is a kind of thing ("Nano Every", "0.1µF 0603
+  CL10B104MB8NNNC", "M6 x 5 mm pan head screw"): name, description,
+  category, tags, manufacturer, part numbers, URL, notes. It has no
+  location and no quantity.
+- **A stock row** says some of an item is in a location, with its own
+  approximate quantity: `(item, location, quantity, notes, updated_at)`,
+  one row per item and location. An item can be in any number of
+  locations, or in none (known, none on hand that anyone has placed).
+  The table is `stock` (decided 2026-11-24).
+
+What follows from it:
+
+- **Schema:** a new table `stock` (`item_id` FK → item, `location_id` FK
+  → location, `quantity` optional integer, `notes`, `updated_at`; unique
+  on `item_id, location_id`). `item.bin_id` and `item.quantity` go. A
+  location holding stock rows is not deleted, as with items today. The web
+  app's grants add `stock` to the tables it writes. Backups and `db pull`
+  add the table.
+- **Migration**, in the same run as the locations one: each item in a bin
+  gets one stock row there with its quantity; the 9 items in no bin get
+  none. Checked on `tadtruex_inventory` (2026-11-24, read only): 122 items,
+  113 in a bin, each bin holding one item; no MPN or DigiKey PN appears
+  twice. Four names repeat (`0.1uF 0603` in 57 and 58, `1uF 0603`, `56uF`,
+  `USB SOT23-5`), each pair with different MPNs: different things, kept as
+  separate items. So the migration is one to one and merges nothing.
+- **Item page:** the item's fields once, then its stock rows (location,
+  ~quantity, − / +, move to another location), and "add to another
+  location". Moving a row to a location the item already has adds the
+  quantities into one row.
+- **Location page:** the stock rows in it and in the locations inside it,
+  grouped by location, each showing the item.
+- **Quick add:** name, location, quantity, as today; it makes the item and
+  its first stock row. A name or part number that matches an existing item
+  offers that item instead, so a second box of something adds a stock row,
+  not a second item.
+- **Search:** one hit per item, listing its locations with their
+  quantities. The location filter keeps items with a stock row in that
+  location or below it; "in stock only" keeps items with a row whose
+  quantity is above 0 or unknown.
+- **BOM use (step 7):** on hand is the sum of an item's stock rows, with
+  each location listed ("~50: school/57, ~10: home/C3/2").
+- **Quantity 0:** a stock row at 0 is kept, a record of where the item
+  is stored when there is some (decided 2026-11-24). − stops at 0 and
+  leaves the row; removing a row is a separate action on the item page.
+  Later, optional maintenance: marking a row obsolete (no longer stocked
+  there) or similar. Not planned yet.
+
+## Decided 2026-11-25: how the locations and stock migration runs
+
+- **An explicit command:** `kicadtools inventory migrate [--dry-run]`, run
+  from the user's account. Never on open: code with the new layout that
+  opens a database still in the old one stops with a message naming the
+  command. `meta` gets `inventory_schema = 2` to tell the layouts apart.
+- **Shape of the migration:** a top-level location `school`; each bin
+  becomes a location under it, keeping its id, so a stock row's
+  `location_id` is the old `item.bin_id`; `item` is rebuilt without
+  `bin_id` and `quantity`, with `item_tag` and `item_picture` pointing at
+  the new table. MariaDB commits each DDL statement on its own, so it is
+  not one transaction: a backup first, every new table built before an old
+  one is touched, counts checked at the end (on the real data: 122 items,
+  113 stock rows, 114 locations), and a run after a failure clears the
+  half-built tables and starts again.
+- **Cutover on the real database, with the service stopped:** finish the
+  release that holds the migration (so `master` has it);
+  `sudo systemctl stop kicadtools-web`; `kicadtools inventory migrate` from
+  the user's checkout of that release; then the deploy script again, which
+  sets the grants (`location`, `stock`, `item_picture`), fetches `master`
+  and restarts the service on it (no separate `inventory-web-update`). The
+  old release never runs against the new layout.
+- **Test copy:** `copy_inventory_to_test.py` copies the real database's
+  tables as they are (old layout) into the test database, then runs the
+  migration there, so every copy tests it on the real data. Once the real
+  database is migrated, the copy finds nothing to migrate.
+
+## Locations and stock — as built (2026-11-25)
+
+- **`inventorydb.py`** holds the new layout only: `location`, `item` (no
+  `bin_id`, no `quantity`), `stock`, `item_tag`, `item_picture`, and
+  `meta.inventory_schema = 2`. Opening a database still in the first
+  layout raises `InventoryLayoutError` naming `kicadtools inventory
+  migrate`; so does one whose conversion stopped part way.
+- **API:** locations `add_location`, `ensure_location`, `location`,
+  `locations`, `children`, `subtree`, `update_location` (description,
+  notes), `rename_location`, `move_location`, `delete_location` (refused
+  while it holds stock, a row at 0 included, or locations). Items
+  `add_item(name, location=, quantity=)` (the first stock row), `item`,
+  `items(location)`, `unplaced`, `matching(name=, mpn=, digikey_pn=)`,
+  `update_item`, `delete_item`. Stock `add_stock` (adds to a row the item
+  already has there), `update_stock`, `adjust_stock` (stops at 0, keeps the
+  row), `move_stock` (merges into a row already there), `delete_stock`,
+  `stock_in(location)`. `Item.stock`, `Item.on_hand`, `Item.locations`.
+- **Reads end their transaction** (`InventoryDb._read`). Found 2026-11-25
+  on the test database: with MariaDB's REPEATABLE READ and no autocommit,
+  a long-lived connection kept reading its first snapshot, so the web app
+  did not see writes from other connections until it wrote itself, and its
+  open transaction made a `DROP TABLE` from another connection wait. The
+  released app (`kt_v0.1a`) has this bug; it does not matter while the app
+  is the only writer.
+- **`inventorymigrate.py`:** `plan` (the dry run), `migrate` (as decided
+  2026-11-25; the 9 items in no bin get a stock row in `unknown`, user
+  decision 2026-11-25), `create_v1` and `copy_v1_rows` (tests, the test
+  copy), and the first layout's schema. `db pull` and backups copy an
+  unconverted database in its own layout.
+- **CLI:** `kicadtools inventory migrate [--dry-run] [--no-backup]`; the
+  backup is `~/.kicadtools/backups/before-migrate-<date>.sqlite`, a name the
+  Cockpit's pruning does not touch. `kicadtools inventory import FILE
+  --location school` (was `--site`).
+- **On the real data** (dry run, read only, 2026-11-25): 115 locations
+  (`school`, `unknown`, the 113 bins under `school`), 122 items, 122 stock
+  rows. The test copy converted it on MariaDB and every item's name, part
+  numbers, location and quantity matched the original.
+- **Search:** one hit per item with its stock rows; the filter on the
+  top-level location (cookie `top`, was `site`) and the location filter keep
+  the rows there; "in stock" looks at those rows.
+- **Web app:** `/location/<path>` (was `/bin/`), `/locations` (was
+  `/bins`), stock rows on the item page (− / +, change, move, "not kept here
+  any more", add to another location), quick add offers a matching item.
+  Checked against the converted test copy: every page 3–20 ms.
+- **Deploy script:** grants on `location` and `stock` instead of `bin`.
+- **Tests:** suite 2027 passed on SQLite; the database tests 338 passed on
+  SQLite and MariaDB 11.8, including a MariaDB conversion stopped after
+  each non-transactional step and finished by the next run.
+
+## Interface to-do (asked 2026-11-25; built 2026-11-25)
+
+Built as below on `develop`. Beyond the list: the item page shows its
+pictures (thumbnails, full size opens in a new tab, "Main", delete), and a
+result row shows the item's main picture as a thumbnail. Pasting an image
+(a screenshot) works like dropping one. The list size is remembered in the
+`list_n` cookie and follows the "Where" and "In stock" filters. A copy
+copies the stored picture as it is (`InventoryDb.copy_picture`), and opens
+the new item's page. Drag and drop (`static/pictures.js`) is not yet
+tried in a real browser.
+
+
+1. **Landing page item list.** Below the information on the search page, a
+   scrollable box showing the first *n* items, with a dropdown for *n*:
+   10, 20, 50, All.
+2. **Selecting an item opens its page.** Clicking anywhere on an item's row
+   (in that list and in search results) goes to `/item/{id}`.
+3. **Copy item** button on the item page: makes a new item with the same
+   fields and tags and opens it to edit. The copy form shows the item's
+   existing pictures, each with a checkbox, so any of them can be carried
+   over to the copy. Location and quantity start blank (no stock rows are
+   copied).
+4. **Easy picture adding** on the item page and the new item page: drag
+   and drop one or more image files onto the page (and a plain "choose
+   files" button, which on the phone also offers the camera). Each upload
+   goes through `pictures.prepare` as usual.
+
+## Pictures (decided and built 2026-11-25)
+
+An item has any number of pictures, 0 or more, in order; the first is the
+main one, the one a list or search result would show.
+
+- **Table** `item_picture`: `id`, `item_id` (FK → item, cascade),
+  `position` (0, 1, 2 … kept dense: deleting or moving renumbers),
+  `content_type`, `width`, `height`, `data`, `thumb`, `caption`,
+  `created_at`. `MEDIUMBLOB` on MariaDB.
+- **In the database, not in files:** backups, `db pull` and the test copy
+  carry them with nothing more, the Mac reads them through the tunnel, and
+  the service (writable only in `.kicadtools`) needs no picture folder. At a
+  few hundred kB a picture, a thousand pictures is a few hundred MB.
+- **Stored form** (`kicadtools/pictures.py`, Pillow, in the `inventory` and
+  `web` extras): any image Pillow reads becomes a JPEG at most 1600 px on
+  its longer side, plus a 320 px thumbnail; turned upright by its EXIF
+  orientation, then the metadata dropped (a phone photo's EXIF holds where
+  it was taken); transparency on white. Uploads over 30 MB or 60 MP are
+  refused.
+- **InventoryDb:** `add_picture(item_id, image_bytes, caption=)` (adds it
+  last), `pictures(item_id)`, `picture(id)`, `picture_data(id, thumb=)`,
+  `update_picture(id, caption=)`, `move_picture(id, position)` (0 makes it
+  the main one), `delete_picture(id)`. `Item.pictures` is the ids in order,
+  `Item.picture` the main one's. `delete_item` deletes them.
+- **Released database:** `item_picture` is part of the new layout and
+  ships with the locations release; the migration creates it when the
+  release had none. The web app's grants add it (deploy script).
+- **The item migration** rebuilds `item` on SQLite with foreign keys off,
+  so `item_tag` and `item_picture` keep pointing at `item`; on MariaDB
+  `item` is altered in place (tested both ways).
+- **Not built yet:** the web app's part: pictures on the item page, upload
+  from the phone's camera (`<input type=file accept="image/*"
+  capture>`), the main picture's thumbnail in search results and on a
+  location's page, reorder and delete.
+
+## Decided 2026-11-24: QR codes use a name the user owns
+
+The QR codes do not encode `broadpeak.tail7c4deb.ts.net`. That name is
+Tailscale's, and it changes if the tailnet or the machine is renamed or
+moved off Tailscale, which would make every printed label wrong. The labels
+encode a name under a domain the user controls (e.g.
+`inventory.<domain>`), which can point somewhere else later.
+
+- **Prerequisite (the user's):** a nameserver up and running for that
+  domain. Before step 6.
+- **Labels:** the base URL a QR code encodes is a setting
+  (`config.toml` on the service account), not taken from the request and
+  not written in the code.
+- **What the name resolves to:** broadpeak's tailnet address
+  (`100.120.78.89`), so it still answers only to devices in the tailnet.
+  Not decided: a public record holding a private address, or the
+  nameserver added to the tailnet as split DNS for the domain.
+- **Certificate:** `tailscale serve` has a certificate for the `ts.net`
+  name only. HTTPS on the new name needs its own certificate, e.g. from
+  Let's Encrypt with a DNS-01 challenge against the new nameserver
+  (broadpeak's ports 80 and 443 are closed to the internet, so HTTP-01 is
+  out), and something on broadpeak that presents it (Caddy, or uvicorn
+  with the certificate files). Plain HTTP over the tailnet is the
+  alternative: WireGuard already encrypts it, but phones warn about
+  `http://` pages.
+
 ## Decisions (2026-11-23)
 
 | Topic | Decision |
@@ -42,7 +300,8 @@ Number** column: 113 rows have one, all different (one item per bin today);
 |---|---|
 | Machine | Ubuntu 26.04.1, 32 cores, 61 GB RAM, 148 GB free on `/` |
 | Installed | MariaDB 11.8 (127.0.0.1 only), Python 3.14, Node 22, git |
-| Not installed | Docker, nginx, Caddy, Tailscale (to be installed, step 5) |
+| Not installed | Docker, nginx, Caddy |
+| Tailscale (2026-11-24) | 1.104.7; tailnet name `broadpeak.tail7c4deb.ts.net`, address `100.120.78.89`. The Mac (`t2864`) is in the tailnet too; from the school network its traffic goes through Tailscale's NYC relay (about 30 ms), not a direct connection |
 | Ports | 80 and 443 closed from this Mac; SSH, Samba and a few others open |
 | Network | `10.0.10.13`, a private address: reachable from the home network only |
 | Sudo | needs a password (the user runs the root steps) |
@@ -166,7 +425,10 @@ address, so the app needs a way in from outside the home network:
   on the home router and nothing is on the public internet, so no login
   page is needed while the user is the only user: being in the tailnet is
   the login.
-- The QR codes encode that URL, so a scan works in any of the three labs.
+- The QR codes encode a name under the user's own domain that resolves to
+  broadpeak in the tailnet, not the `ts.net` URL (decided 2026-11-24, see
+  "QR codes use a name the user owns"), so a scan works in any of the
+  three labs.
 - The same tailnet fixes the Cockpit's database access away from home:
   `config.toml` names `broadpeak` instead of `10.0.10.13`, and the SSH
   tunnel works from the barn and the school (DB plan step 8).
@@ -349,6 +611,50 @@ adding things fast; 7 is the BOM use.
 - Not built from the step 4 list: nothing. From later steps: DigiKey
   autofill on quick add and labels (step 6).
 
+## Step 5 — as built (2026-11-24)
+
+- `scripts/deploy_inventory_web.sh`, run once by the user with sudo from
+  their checkout on broadpeak; safe to run again. It installs
+  `scripts/inventory_web_update.sh` as `/usr/local/sbin/inventory-web-update`.
+- **Release, not develop:** the service runs `master`, the current
+  git-flow release (`kt_v0.1a` at deploy). `sudo inventory-web-update`
+  fetches `master` and its tags, reinstalls, restarts, checks `/healthz`
+  and prints the release before and after.
+- **Account:** system user `inventory`, home `/srv/inventory` (mode 750,
+  closed to `tad`), no login shell. GitHub access through a read-only
+  deploy key on the Boards repo (the repo is private); GitHub's host key is
+  pinned in the script.
+- **Checkout:** `/srv/inventory/Boards`, depth 1, blobs on demand, sparse:
+  only `Code/KicadTools` (about 5 MB). `KICADTOOLS_REPO_ROOT` in the unit
+  points `repo_root()` at it, so no `Libraries` folder is needed. Venv
+  `/srv/inventory/venv` with the `server,inventory,web` extras.
+- **Database user** `inventory_web@localhost`, password random, in
+  `/srv/inventory/.kicadtools/db_password` (0600); config beside it names
+  `tadtruex_inventory` on port 3306 (no tunnel). Grants: SELECT on the
+  database; INSERT, UPDATE, DELETE on `bin`, `item`, `item_tag`; plus
+  CREATE, INDEX and REFERENCES on the database and INSERT on `meta`.
+  The extra four are beyond the plan: opening the database runs `CREATE
+  TABLE` / `CREATE INDEX IF NOT EXISTS` and `INSERT IGNORE INTO meta`, and
+  MariaDB checks privileges before it checks whether the table exists.
+  None of them can drop, alter or change rows in an existing table. The
+  user has no ALTER: a release that adds a column (`_ADDED_COLUMNS`) needs
+  the database opened once from the user's own account before the update.
+- **Backup** before the first start: `mariadb-dump` of `tadtruex_inventory`
+  to `/srv/inventory/backups/` (root only).
+- **Service:** systemd unit `kicadtools-web`, enabled at boot, on
+  `127.0.0.1:8090`. The plan said 8080; that port stays free for a
+  development run of `kicadtools-web`. `ProtectSystem=strict`,
+  `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`; writable only
+  `/srv/inventory/.kicadtools`.
+- **Tailscale:** `tailscale serve --bg --https=443` forwards
+  `https://broadpeak.tail7c4deb.ts.net/` to it, tailnet only, with a Let's
+  Encrypt certificate Tailscale renews (valid to 2027-02-22 at deploy).
+- Checked from the Mac over the tailnet: `/healthz` ok, search (`stm32` →
+  4 items) and the bins list, 0.14–0.23 s a page through the relay.
+- Not done from the step 5 list: the phone (Tailscale on it, then a look
+  at the pages). The Cockpit's `config.toml` naming `broadpeak` instead of
+  `10.0.10.13` (DB plan step 8) is now possible but not done.
+
 ## Open questions
 
 1. **Brother model.** Which one (a QL with die-cut labels or continuous
@@ -358,3 +664,8 @@ adding things fast; 7 is the BOM use.
 2. **Boxes 1–142.** Do they sit in something worth making a bin (a rack or
    a cabinet at school)? They were imported top-level; `move_bin` can put
    them inside one at any time.
+3. ~~**The free-text `location` field.**~~ Decided 2026-11-24: it goes;
+   the location's `description` holds it.
+4. **The QR code name.** Which domain and name, whether it resolves through
+   public DNS or the tailnet's split DNS, and how HTTPS works on it (see
+   "Decided 2026-11-24: QR codes use a name the user owns").

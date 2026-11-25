@@ -1,16 +1,28 @@
-"""The lab inventory web app (``INVENTORY_PLAN.md``, step 4).
+"""The lab inventory web app (``INVENTORY_PLAN.md``).
 
 Server-rendered pages (Jinja2) with htmx for search-as-you-type and the
 quantity buttons; every page also works as plain HTML forms. Pages:
 
-- ``/`` search (the front page); the site filter is remembered in a cookie;
-- ``/item/<id>`` an item: every field, quantity − / +, move to another bin;
-- ``/add`` quick add (``/add?bin=C12/5`` from a bin page fills the bin);
-- ``/bin/<path>`` a bin: its fields, the bins inside it, everything in it and
-  in those bins (the page a QR code opens), add item here, add bin inside;
-- ``/bins`` every bin, by site, with item counts.
+- ``/`` search (the front page); the top-level location filter (the lab) is
+  remembered in a cookie. With nothing typed it lists the first *n* items by
+  name (10, 20, 50 or all, also remembered);
+- ``/item/<id>`` an item: its pictures (drop image files on the page to add
+  some), its stock rows (location, ~quantity, − / +, move, remove), "add to
+  another location", its fields, and "copy item";
+- ``/add`` quick add: name, location, quantity, pictures
+  (``/add?location=school/C12/5`` from a location's page fills the location).
+  A name or part number that matches an item already known offers that item
+  instead, so a second box of something becomes a stock row, not a second
+  item. ``/add?copy=<id>`` starts from another item's fields and tags, with a
+  choice of its pictures, and no location or quantity;
+- ``/picture/<id>`` and ``/picture/<id>/thumb`` a stored picture;
+- ``/location/<path>`` a location: its fields, the locations inside it, the
+  stock in it and in those locations (the page a QR code opens), add item
+  here, add location inside;
+- ``/locations`` every location as a tree, with counts, and the items in no
+  location.
 
-Open-ended fields (site, category, manufacturer, tags, bin) are one box with
+Open-ended fields (category, manufacturer, tags, location) are one box with
 a ``<datalist>`` of the values already used: the browser lists matching ones
 while typing and keeps whatever new value is typed.
 
@@ -31,26 +43,35 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
-from kicadtools.inventory import SearchHit, effective_sites, search_items
-from kicadtools.inventorydb import SEP, Bin, InventoryDb, InventoryError, Item, natural_key
+from kicadtools.inventory import SearchHit, search_items
+from kicadtools.inventorydb import (SEP, InventoryDb, InventoryError, Item, Location, Stock,
+                                    natural_key, path_key)
+from kicadtools.pictures import MAX_UPLOAD, PictureError
 
 HERE = Path(__file__).parent
-SITE_COOKIE = "site"
+TOP_COOKIE = "top"
+LIST_COOKIE = "list_n"
+# How many items the front page lists with nothing typed; 0 is all of them.
+LIST_SIZES = (10, 20, 50, 0)
+LIST_DEFAULT = 20
+# A stored picture never changes under its id, so it may be cached for good.
+PICTURE_CACHE = "private, max-age=31536000, immutable"
 # Search results shown at most; the count says when there are more.
 MAX_RESULTS = 200
 ITEM_TEXT_FIELDS = ("category", "manufacturer", "mpn", "digikey_pn", "lcsc", "url",
                     "description", "notes")
-BIN_TEXT_FIELDS = ("site", "description", "location", "notes")
+LOCATION_TEXT_FIELDS = ("description", "notes")
 
 Opener = Callable[[], Tuple[InventoryDb, Optional[Callable[[], None]]]]
 
 
 # ----- helpers -------------------------------------------------------------
 
-def bin_url(path: Optional[str]) -> str:
-    """``/bin/C12/5``, each name quoted (names may hold spaces)."""
-    return "/bin/" + SEP.join(quote(p, safe="") for p in (path or "").split(SEP))
+def location_url(path: Optional[str]) -> str:
+    """``/location/school/C12/5``, each name quoted (names may hold spaces)."""
+    return "/location/" + SEP.join(quote(p, safe="") for p in (path or "").split(SEP))
 
 
 def fmt_qty(quantity: Optional[int]) -> str:
@@ -78,26 +99,67 @@ def parse_quantity(text: Optional[str]) -> Optional[int]:
         raise InventoryError(f"the quantity must be a whole number, not {text!r}") from None
 
 
+def parse_list_size(text: Optional[str]) -> int:
+    """The front page list's size: one of :data:`LIST_SIZES` (``"all"`` is
+    0), else :data:`LIST_DEFAULT`."""
+    text = (text or "").strip().lower()
+    if text == "all":
+        return 0
+    try:
+        n = int(text)
+    except ValueError:
+        return LIST_DEFAULT
+    return n if n in LIST_SIZES else LIST_DEFAULT
+
+
+async def read_uploads(form: Mapping[str, Any], key: str = "picture") -> List[Tuple[str, bytes]]:
+    """``(file name, bytes)`` of each file uploaded as *key*, skipping the
+    empty part a form sends when no file was chosen. A file over
+    :data:`~kicadtools.pictures.MAX_UPLOAD` raises :class:`PictureError`."""
+    files = []
+    for upload in form.getlist(key):
+        if not hasattr(upload, "read"):
+            continue
+        data = await upload.read(MAX_UPLOAD + 1)
+        name = upload.filename or "picture"
+        if not data:
+            continue
+        if len(data) > MAX_UPLOAD:
+            raise PictureError(f"{name} is larger than {MAX_UPLOAD // (1024 * 1024)} MB")
+        files.append((name, data))
+    return files
+
+
 def parse_tags(text: Optional[str]) -> List[str]:
     """Tags typed as one box, separated by commas."""
     return [t.strip() for t in (text or "").split(",") if t.strip()]
 
 
-def bin_chain(bins_by_path: Mapping[str, Bin], path: Optional[str]) -> List[Bin]:
-    """The bin at *path* and every bin it is inside, outermost first."""
+def location_chain(by_path: Mapping[str, Location], path: Optional[str]) -> List[Location]:
+    """The location at *path* and every location it is inside, outermost
+    first."""
     if not path:
         return []
     parts = path.split(SEP)
-    return [bins_by_path[p] for p in (SEP.join(parts[:d]) for d in range(1, len(parts) + 1))
-            if p in bins_by_path]
+    return [by_path[p] for p in (SEP.join(parts[:d]) for d in range(1, len(parts) + 1))
+            if p in by_path]
 
 
-def where_text(chain: List[Bin]) -> Optional[str]:
-    """The location of the innermost bin in *chain* that has one."""
-    for b in reversed(chain):
-        if b.location:
-            return b.location
-    return None
+def item_counts(items: List[Item]) -> Tuple[Dict[str, int], Dict[str, int]]:
+    """Items with stock directly in each location, and in it or any
+    location inside it (an item counted once per location)."""
+    direct: Dict[str, int] = {}
+    total: Dict[str, int] = {}
+    for item in items:
+        seen = set()
+        for row in item.stock:
+            direct[row.location_path] = direct.get(row.location_path, 0) + 1
+            parts = row.location_path.split(SEP)
+            for d in range(1, len(parts) + 1):
+                seen.add(SEP.join(parts[:d]))
+        for key in seen:
+            total[key] = total.get(key, 0) + 1
+    return direct, total
 
 
 # ----- the app -------------------------------------------------------------
@@ -123,7 +185,7 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
         app.state.inv = source
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
-    templates.env.filters["bin_url"] = bin_url
+    templates.env.filters["location_url"] = location_url
     templates.env.filters["qty"] = fmt_qty
     templates.env.globals["urlencode"] = urlencode
 
@@ -132,12 +194,13 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
 
     def choices(i: InventoryDb) -> Dict[str, List[str]]:
         """The values already used in each open-ended field."""
+        locations = i.locations()
         return {
-            "site": i.values("site"),
+            "top": [loc.path for loc in locations if loc.parent_id is None],
             "category": i.values("category"),
             "manufacturer": i.values("manufacturer"),
             "tag": i.tags(),
-            "bin": [b.path for b in i.bins()],
+            "location": [loc.path for loc in locations],
         }
 
     def page(request: Request, name: str, status: int = 200, **context) -> HTMLResponse:
@@ -149,54 +212,62 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
     def is_htmx(request: Request) -> bool:
         return request.headers.get("hx-request") == "true"
 
+    def missing(request: Request, what: str, **context) -> HTMLResponse:
+        return page(request, "missing.html", 404, what=what, **context)
+
     # ----- search ----------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
-    def search_page(request: Request, q: str = "", site: Optional[str] = None,
-                    category: str = "", in_stock: str = ""):
+    def search_page(request: Request, q: str = "", top: Optional[str] = None,
+                    category: str = "", in_stock: str = "", n: Optional[str] = None):
         i = inv(request)
-        remembered = site is None
+        remembered = top is None
         if remembered:
-            site = request.cookies.get(SITE_COOKIE, "")
-        site = site.strip()
+            top = request.cookies.get(TOP_COOKIE, "")
+        top = top.strip()
+        n_remembered = n is None
+        list_n = parse_list_size(request.cookies.get(LIST_COOKIE) if n_remembered else n)
         stock = in_stock not in ("", "0", "false")
         filtered = bool(q.strip() or category.strip())
-        hits: List[SearchHit] = []
-        if filtered:
-            bins = i.bins()
-            hits = search_items(i.items(), bins, q, site=site or None,
+        # With nothing typed, an empty query lists every item by name.
+        items, locations = i.items(), i.locations()
+        try:
+            hits = search_items(items, locations, q, top=top or None,
                                 category=category or None, in_stock=stock)
-            by_path = {b.path: b for b in bins}
-            wheres = {h.item.id: where_text(bin_chain(by_path, h.item.bin_path))
-                      for h in hits[:MAX_RESULTS]}
-        else:
-            wheres = {}
-        context = dict(q=q, site=site, category=category, in_stock=stock, hits=hits[:MAX_RESULTS],
-                       total=len(hits), filtered=filtered, wheres=wheres)
+        except InventoryError:              # a remembered top that is no name now
+            top = ""
+            hits = search_items(items, locations, q, category=category or None,
+                                in_stock=stock)
+        limit = MAX_RESULTS if filtered else (list_n or len(hits))
+        context = dict(q=q, top=top, category=category, in_stock=stock,
+                       hits=hits[:limit], total=len(hits), filtered=filtered,
+                       list_n=list_n, list_sizes=LIST_SIZES)
         if is_htmx(request) and request.headers.get("hx-target") == "results":
             response = page(request, "_results.html", **context)
         else:
             response = page(request, "search.html", choices=choices(i), **context)
+        year = 365 * 24 * 3600
         if not remembered:
-            response.set_cookie(SITE_COOKIE, site, max_age=365 * 24 * 3600, samesite="lax")
+            response.set_cookie(TOP_COOKIE, top, max_age=year, samesite="lax")
+        if not n_remembered:
+            response.set_cookie(LIST_COOKIE, str(list_n), max_age=year, samesite="lax")
         return response
 
     # ----- items -----------------------------------------------------------
 
-    def item_context(i: InventoryDb, item: Item) -> Dict[str, Any]:
-        by_path = {b.path: b for b in i.bins()}
-        chain = bin_chain(by_path, item.bin_path)
-        site = effective_sites(by_path.values()).get(item.bin_path) if item.bin_path else None
-        return dict(item=item, chain=chain, site=site, where=where_text(chain))
+    def item_page_response(request: Request, i: InventoryDb, item: Item, *, status: int = 200,
+                           saved: bool = False, error: Optional[str] = None,
+                           form: Any = None) -> HTMLResponse:
+        return page(request, "item.html", status, choices=choices(i), item=item, saved=saved,
+                    error=error, form=form, pictures=i.pictures(item.id))
 
     @app.get("/item/{item_id}", response_class=HTMLResponse)
     def item_page(request: Request, item_id: int, saved: str = ""):
         i = inv(request)
         item = i.item(item_id)
         if item is None:
-            return page(request, "missing.html", 404, what=f"item {item_id}")
-        return page(request, "item.html", choices=choices(i), saved=bool(saved),
-                    error=None, **item_context(i, item))
+            return missing(request, f"item {item_id}")
+        return item_page_response(request, i, item, saved=bool(saved))
 
     @app.post("/item/{item_id}", response_class=HTMLResponse)
     async def item_save(request: Request, item_id: int):
@@ -204,32 +275,34 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
         form = await request.form()
         item = i.item(item_id)
         if item is None:
-            return page(request, "missing.html", 404, what=f"item {item_id}")
+            return missing(request, f"item {item_id}")
         try:
             i.update_item(
                 item_id,
                 name=_text(form, "name"),
-                quantity=parse_quantity(_text(form, "quantity")),
-                bin=_text(form, "bin"),
                 tags=parse_tags(_text(form, "tags")),
                 **{f: _text(form, f) for f in ITEM_TEXT_FIELDS},
             )
         except InventoryError as e:
-            return page(request, "item.html", 400, choices=choices(i), saved=False,
-                        error=str(e), form=form, **item_context(i, item))
+            return item_page_response(request, i, item, status=400, error=str(e), form=form)
         return back(f"/item/{item_id}?saved=1")
 
-    @app.post("/item/{item_id}/qty", response_class=HTMLResponse)
-    async def item_qty(request: Request, item_id: int):
+    @app.post("/item/{item_id}/stock", response_class=HTMLResponse)
+    async def item_add_stock(request: Request, item_id: int):
+        """Put some of the item in a location ("add to another location", and
+        quick add's "add to this item")."""
         i = inv(request)
         form = await request.form()
+        item = i.item(item_id)
+        if item is None:
+            return missing(request, f"item {item_id}")
         try:
-            delta = int(str(form.get("delta", "0")))
-            item = i.adjust_quantity(item_id, delta)
-        except (InventoryError, ValueError) as e:
-            return HTMLResponse(f'<span class="error">{e}</span>', status_code=400)
-        if is_htmx(request):
-            return page(request, "_qty.html", item=item)
+            where = _text(form, "location")
+            if where is None:
+                raise InventoryError("a location is needed")
+            i.add_stock(item_id, where, parse_quantity(_text(form, "quantity")))
+        except InventoryError as e:
+            return item_page_response(request, i, item, status=400, error=str(e))
         return back(f"/item/{item_id}")
 
     @app.post("/item/{item_id}/delete")
@@ -238,139 +311,277 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
         item = i.item(item_id)
         if item is not None:
             i.delete_item(item_id)
-        return back(bin_url(item.bin_path) if item and item.bin_path else "/")
+        return back(location_url(item.locations[0]) if item and item.locations else "/")
+
+    # ----- pictures --------------------------------------------------------
+
+    async def add_uploads(i: InventoryDb, item_id: int,
+                          files: List[Tuple[str, bytes]]) -> List[str]:
+        """Add each uploaded file to the item; the errors, one per file
+        refused. Making a picture ready is slow, so it runs off the event
+        loop."""
+        errors = []
+        for name, data in files:
+            try:
+                await run_in_threadpool(i.add_picture, item_id, data)
+            except PictureError as e:
+                errors.append(f"{name}: {e}")
+        return errors
+
+    @app.post("/item/{item_id}/pictures", response_class=HTMLResponse)
+    async def item_add_pictures(request: Request, item_id: int):
+        i = inv(request)
+        item = i.item(item_id)
+        if item is None:
+            return missing(request, f"item {item_id}")
+        try:
+            files = await read_uploads(await request.form())
+        except PictureError as e:
+            return item_page_response(request, i, item, status=400, error=str(e))
+        errors = await add_uploads(i, item_id, files)
+        if errors:
+            return item_page_response(request, i, i.item(item_id), status=400,
+                                      error="Not added: " + "; ".join(errors))
+        return back(f"/item/{item_id}#pictures")
+
+    def picture_response(picture_id: int, thumb: bool) -> Response:
+        found = app.state.inv.picture_data(picture_id, thumb=thumb)
+        if found is None:
+            return Response("no such picture", status_code=404, media_type="text/plain")
+        content_type, data = found
+        return Response(data, media_type=content_type,
+                        headers={"Cache-Control": PICTURE_CACHE})
+
+    @app.get("/picture/{picture_id}")
+    def picture_full(picture_id: int) -> Response:
+        return picture_response(picture_id, thumb=False)
+
+    @app.get("/picture/{picture_id}/thumb")
+    def picture_thumb(picture_id: int) -> Response:
+        return picture_response(picture_id, thumb=True)
+
+    @app.post("/picture/{picture_id}", response_class=HTMLResponse)
+    async def picture_action(request: Request, picture_id: int):
+        """``action``: ``main`` (make it the main picture), ``delete``."""
+        i = inv(request)
+        form = await request.form()
+        target = i.picture(picture_id)
+        if target is None:
+            return missing(request, f"picture {picture_id}")
+        action = str(form.get("action", ""))
+        try:
+            if action == "main":
+                i.move_picture(picture_id, 0)
+            elif action == "delete":
+                i.delete_picture(picture_id)
+            else:
+                raise InventoryError(f"unknown action {action!r}")
+        except InventoryError as e:
+            return item_page_response(request, i, i.item(target.item_id), status=400,
+                                      error=str(e))
+        return back(f"/item/{target.item_id}#pictures")
+
+    # ----- stock rows ------------------------------------------------------
+
+    @app.post("/stock/{stock_id}/qty", response_class=HTMLResponse)
+    async def stock_qty(request: Request, stock_id: int):
+        i = inv(request)
+        form = await request.form()
+        try:
+            delta = int(str(form.get("delta", "0")))
+            row = i.adjust_stock(stock_id, delta)
+        except (InventoryError, ValueError) as e:
+            return HTMLResponse(f'<span class="error">{e}</span>', status_code=400)
+        if is_htmx(request):
+            return page(request, "_qty.html", row=row)
+        return back(f"/item/{row.item_id}")
+
+    @app.post("/stock/{stock_id}", response_class=HTMLResponse)
+    async def stock_action(request: Request, stock_id: int):
+        """One form endpoint per stock row; ``action`` says what: ``set``
+        (quantity, notes), ``move`` (to another location; one the item is
+        already in takes the quantity), ``delete`` (the item is no longer
+        kept there)."""
+        i = inv(request)
+        form = await request.form()
+        row = i.stock_row(stock_id)
+        if row is None:
+            return missing(request, f"stock row {stock_id}")
+        action = str(form.get("action", "set"))
+        try:
+            if action == "set":
+                i.update_stock(stock_id, quantity=parse_quantity(_text(form, "quantity")),
+                               notes=_text(form, "notes"))
+            elif action == "move":
+                where = _text(form, "location")
+                if where is None:
+                    raise InventoryError("a location to move to is needed")
+                i.move_stock(stock_id, where)
+            elif action == "delete":
+                i.delete_stock(stock_id)
+            else:
+                raise InventoryError(f"unknown action {action!r}")
+        except InventoryError as e:
+            return item_page_response(request, i, i.item(row.item_id), status=400, error=str(e))
+        return back(f"/item/{row.item_id}")
 
     # ----- quick add -------------------------------------------------------
 
+    def add_response(request: Request, i: InventoryDb, *, status: int = 200,
+                     location: str = "", form: Any = None, error: Optional[str] = None,
+                     added: Optional[Item] = None, matches: Optional[List[Item]] = None,
+                     copy_of: Optional[Item] = None, chosen: Tuple[int, ...] = (),
+                     dropped: bool = False) -> HTMLResponse:
+        return page(request, "add.html", status, choices=choices(i), location=location,
+                    error=error, form=form or {}, added=added, matches=matches or [],
+                    copy_of=copy_of, copy_pictures=i.pictures(copy_of.id) if copy_of else [],
+                    chosen=chosen, dropped=dropped)
+
+    def copy_form(item: Item) -> Dict[str, str]:
+        """The fields of *item* as quick add's form, to start a copy."""
+        form = {f: getattr(item, f) or "" for f in ITEM_TEXT_FIELDS}
+        form.update(name=item.name, tags=", ".join(item.tags))
+        return form
+
     @app.get("/add", response_class=HTMLResponse)
-    def add_page(request: Request, bin: str = "", added: Optional[int] = None):
+    def add_page(request: Request, location: str = "", added: Optional[int] = None,
+                 copy: Optional[int] = None):
         i = inv(request)
         just_added = i.item(added) if added else None
-        return page(request, "add.html", choices=choices(i), bin=bin, error=None,
-                    form={}, added=just_added)
+        source = i.item(copy) if copy else None
+        if copy and source is None:
+            return missing(request, f"item {copy}")
+        return add_response(request, i, location=location, added=just_added, copy_of=source,
+                            form=copy_form(source) if source else None)
 
     @app.post("/add", response_class=HTMLResponse)
     async def add_save(request: Request):
         i = inv(request)
         form = await request.form()
-        bin_path = _text(form, "bin")
+        where = _text(form, "location")
+        source = None
+        copy_from = _text(form, "copy_from")
+        if copy_from and copy_from.isdigit():
+            source = i.item(int(copy_from))
+        source_pictures = {p.id for p in i.pictures(source.id)} if source else set()
+        chosen = tuple(int(v) for v in form.getlist("copy_picture")
+                       if str(v).isdigit() and int(v) in source_pictures)
+        again = dict(location=where or "", form=form, copy_of=source, chosen=chosen)
         try:
+            files = await read_uploads(form)
+            quantity = parse_quantity(_text(form, "quantity"))
+            if not form.get("new"):
+                matches = i.matching(name=_text(form, "name"), mpn=_text(form, "mpn"),
+                                     digikey_pn=_text(form, "digikey_pn"))
+                if matches:
+                    return add_response(request, i, matches=matches, dropped=bool(files),
+                                        **again)
             item = i.add_item(
                 _text(form, "name") or "",
-                bin=bin_path,
-                quantity=parse_quantity(_text(form, "quantity")),
+                location=where,
+                quantity=quantity,
                 tags=parse_tags(_text(form, "tags")),
                 **{f: _text(form, f) for f in ITEM_TEXT_FIELDS},
             )
-        except InventoryError as e:
-            return page(request, "add.html", 400, choices=choices(i), bin=bin_path or "",
-                        error=str(e), form=form, added=None)
-        # Back to an empty form with the same bin, for the next item.
-        return back("/add?" + urlencode({"bin": item.bin_path or "", "added": item.id}))
+        except (InventoryError, PictureError) as e:
+            return add_response(request, i, status=400, error=str(e), **again)
+        for picture_id in chosen:
+            i.copy_picture(picture_id, item.id)
+        errors = await add_uploads(i, item.id, files)
+        if errors:
+            return item_page_response(request, i, i.item(item.id), status=400,
+                                      error="Saved, but not added: " + "; ".join(errors))
+        if source is not None:
+            return back(f"/item/{item.id}?saved=1")      # a copy opens to be edited
+        # Back to an empty form with the same location, for the next item.
+        return back("/add?" + urlencode({"location": where or "", "added": item.id}))
 
-    # ----- bins ------------------------------------------------------------
+    # ----- locations -------------------------------------------------------
 
-    def counts(i: InventoryDb) -> Tuple[Dict[str, int], Dict[str, int]]:
-        """Items directly in each bin, and in it plus every bin inside it."""
-        direct: Dict[str, int] = {}
-        for item in i.items():
-            if item.bin_path:
-                direct[item.bin_path] = direct.get(item.bin_path, 0) + 1
-        total: Dict[str, int] = {}
-        for path, n in direct.items():
-            parts = path.split(SEP)
-            for d in range(1, len(parts) + 1):
-                key = SEP.join(parts[:d])
-                total[key] = total.get(key, 0) + n
-        return direct, total
+    def location_context(i: InventoryDb, loc: Location) -> Dict[str, Any]:
+        all_locations = i.locations()
+        by_path = {x.path: x for x in all_locations}
+        items = i.items()
+        names = {item.id: item for item in items}
+        groups: "OrderedDict[str, List[Tuple[Stock, Item]]]" = OrderedDict()
+        for row in i.stock_in(loc.path):
+            groups.setdefault(row.location_path, []).append((row, names[row.item_id]))
+        for rows in groups.values():
+            rows.sort(key=lambda pair: natural_key(pair[1].name))
+        _, total = item_counts(items)
+        return dict(location=loc, chain=location_chain(by_path, loc.path),
+                    children=i.children(loc.path), groups=groups, total=total)
 
-    def bin_context(i: InventoryDb, b: Bin) -> Dict[str, Any]:
-        all_bins = i.bins()
-        by_path = {x.path: x for x in all_bins}
-        sites = effective_sites(all_bins)
-        groups: "OrderedDict[str, List[Item]]" = OrderedDict()
-        for item in i.items(b.path):
-            groups.setdefault(item.bin_path, []).append(item)
-        _, total = counts(i)
-        return dict(
-            bin=b, chain=bin_chain(by_path, b.path), site=sites.get(b.path),
-            inherited_site=b.site is None and sites.get(b.path) is not None,
-            children=i.children(b.path), groups=groups, total=total,
-        )
-
-    @app.get("/bin/{path:path}", response_class=HTMLResponse)
-    def bin_page(request: Request, path: str, saved: str = ""):
+    @app.get("/location/{path:path}", response_class=HTMLResponse)
+    def location_page(request: Request, path: str, saved: str = ""):
         i = inv(request)
-        b = i.bin(path)
-        if b is None:
-            return page(request, "missing.html", 404, what=f"bin {path}",
-                        make_bin=path)
-        return page(request, "bin.html", choices=choices(i), saved=bool(saved), error=None,
-                    **bin_context(i, b))
+        try:
+            loc = i.location(path)
+        except InventoryError:
+            loc = None
+        if loc is None:
+            return missing(request, f"location {path}", make_location=path)
+        return page(request, "location.html", choices=choices(i), saved=bool(saved),
+                    error=None, **location_context(i, loc))
 
-    @app.post("/bin/{path:path}", response_class=HTMLResponse)
-    async def bin_action(request: Request, path: str):
-        """One form endpoint per bin; the form's ``action`` field says what:
-        ``save`` (site, description, location, notes), ``add_bin`` (a bin
-        inside), ``rename``, ``move`` (to another parent; empty = top level),
-        ``delete`` (only an empty bin)."""
+    @app.post("/location/{path:path}", response_class=HTMLResponse)
+    async def location_action(request: Request, path: str):
+        """One form endpoint per location; the form's ``action`` field says
+        what: ``save`` (description, notes), ``add_location`` (one inside),
+        ``rename``, ``move`` (to another parent; empty = top level),
+        ``delete`` (only an empty location)."""
         i = inv(request)
         form = await request.form()
-        b = i.bin(path)
-        if b is None:
-            return page(request, "missing.html", 404, what=f"bin {path}")
+        loc = i.location(path)
+        if loc is None:
+            return missing(request, f"location {path}")
         action = str(form.get("action", "save"))
         try:
             if action == "save":
-                i.update_bin(b.path, **{f: _text(form, f) for f in BIN_TEXT_FIELDS})
-                return back(bin_url(b.path) + "?saved=1")
-            if action == "add_bin":
-                child = i.add_bin(_text(form, "name") or "", b.path)
-                return back(bin_url(child.path))
+                i.update_location(loc.path, **{f: _text(form, f) for f in LOCATION_TEXT_FIELDS})
+                return back(location_url(loc.path) + "?saved=1")
+            if action == "add_location":
+                child = i.add_location(_text(form, "name") or "", loc.path)
+                return back(location_url(child.path))
             if action == "rename":
-                moved = i.rename_bin(b.path, _text(form, "name") or "")
-                return back(bin_url(moved.path))
+                moved = i.rename_location(loc.path, _text(form, "name") or "")
+                return back(location_url(moved.path))
             if action == "move":
-                moved = i.move_bin(b.path, _text(form, "parent"))
-                return back(bin_url(moved.path))
+                moved = i.move_location(loc.path, _text(form, "parent"))
+                return back(location_url(moved.path))
             if action == "delete":
-                parent = SEP.join(b.path.split(SEP)[:-1])
-                i.delete_bin(b.path)
-                return back(bin_url(parent) if parent else "/bins")
+                parent = SEP.join(loc.path.split(SEP)[:-1])
+                i.delete_location(loc.path)
+                return back(location_url(parent) if parent else "/locations")
             raise InventoryError(f"unknown action {action!r}")
         except InventoryError as e:
-            return page(request, "bin.html", 400, choices=choices(i), saved=False,
-                        error=str(e), **bin_context(i, b))
+            return page(request, "location.html", 400, choices=choices(i), saved=False,
+                        error=str(e), **location_context(i, loc))
 
-    @app.get("/bins", response_class=HTMLResponse)
-    def bins_page(request: Request):
+    @app.get("/locations", response_class=HTMLResponse)
+    def locations_page(request: Request):
         i = inv(request)
-        all_bins = i.bins()
-        sites = effective_sites(all_bins)
-        direct, total = counts(i)
-        by_site: Dict[str, List[Bin]] = {}
-        for b in sorted(all_bins, key=lambda x: [natural_key(n) for n in x.path.split(SEP)]):
-            by_site.setdefault(sites.get(b.path) or "", []).append(b)
-        ordered = sorted(by_site.items(), key=lambda kv: (kv[0] == "", natural_key(kv[0])))
-        return page(request, "bins.html", by_site=ordered, direct=direct, total=total,
-                    unbinned=i.unbinned(), choices=choices(i), error=None)
+        all_locations = sorted(i.locations(), key=lambda x: path_key(x.path))
+        _, total = item_counts(i.items())
+        return page(request, "locations.html", locations=all_locations, total=total,
+                    unplaced=i.unplaced(), choices=choices(i), error=None)
 
-    @app.post("/bins", response_class=HTMLResponse)
-    async def bins_add(request: Request):
+    @app.post("/locations", response_class=HTMLResponse)
+    async def locations_add(request: Request):
         i = inv(request)
         form = await request.form()
         try:
             parent = _text(form, "parent")
             if parent is not None:
-                parent = i.ensure_bin(parent).path
-            b = i.add_bin(_text(form, "name") or "", parent, site=_text(form, "site"))
+                parent = i.ensure_location(parent).path
+            loc = i.add_location(_text(form, "name") or "", parent)
         except InventoryError as e:
-            return page(request, "error.html", 400, error=str(e), back_url="/bins")
-        return back(bin_url(b.path))
+            return page(request, "error.html", 400, error=str(e), back_url="/locations")
+        return back(location_url(loc.path))
 
     @app.get("/healthz")
     def healthz(request: Request) -> Response:
-        inv(request).bins()
+        inv(request).locations()
         return Response("ok", media_type="text/plain")
 
     return app
@@ -384,7 +595,11 @@ def open_configured() -> Tuple[InventoryDb, Callable[[], None]]:
     from kicadtools.dbconnect import open_parts_db
 
     session = open_parts_db(load_config(), terminal_ask)
-    return InventoryDb(session.db), session.close
+    try:
+        return InventoryDb(session.db), session.close
+    except Exception:
+        session.close()
+        raise
 
 
 def configured_app() -> FastAPI:

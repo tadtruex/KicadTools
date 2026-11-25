@@ -129,39 +129,42 @@ def _items():
     return convert(rows)
 
 
-def test_import_fills_bins_and_items():
+def test_import_fills_locations_items_and_stock():
     inv = InventoryDb(new_db(now=lambda: STAMP))
     items, report = _items()
-    report = import_items(inv, items, site="school", report=report)
+    report = import_items(inv, items, location="school", report=report)
     assert (report.items, report.bins, report.unbinned) == (4, 3, ["47pF 0603"])
-    assert [b.path for b in inv.bins()] == ["5", "57", "10001"]
-    # A bin is made with its name and the site only; the rest is set on the bin later.
-    assert all((b.location, b.notes, b.parent_id) == (None, None, None) for b in inv.bins())
-    inv.update_bin("10001", notes="Partial reel")
-    assert inv.bin("10001").notes == "Partial reel"
-    assert {inv.site_of(b.path) for b in inv.bins()} == {"school"}
-    capacitor = inv.items("57")[0]
-    assert (capacitor.name, capacitor.quantity, capacitor.description, capacitor.category) == (
+    assert [loc.path for loc in inv.locations()] == [
+        "school", "school/5", "school/57", "school/10001", "unknown"]
+    # A location is made with its name only; the rest is set on it later.
+    assert all((loc.description, loc.notes) == (None, None) for loc in inv.locations())
+    inv.update_location("school/10001", notes="Partial reel")
+    assert inv.location("school/10001").notes == "Partial reel"
+    capacitor = inv.items("school/57")[0]
+    assert (capacitor.name, capacitor.on_hand, capacitor.description, capacitor.category) == (
         "0.1uF 0603", 100, "X7R, 50V", "Capacitor")
-    assert [i.name for i in inv.unbinned()] == ["47pF 0603"]
+    # No Comp Number: a stock row in "unknown" with the quantity.
+    assert [(i.name, i.on_hand) for i in inv.items("unknown")] == [("47pF 0603", 50)]
 
 
 def test_dry_run_writes_nothing():
     inv = InventoryDb(new_db(now=lambda: STAMP))
     items, _ = _items()
-    report = import_items(inv, items, site="school", dry_run=True)
+    report = import_items(inv, items, location="school", dry_run=True)
     assert report.items == 4 and report.dry_run
-    assert inv.bins() == [] and inv.items() == []
+    assert inv.locations() == [] and inv.items() == []
 
 
 def test_import_refuses_an_inventory_that_holds_something():
     inv = InventoryDb(new_db(now=lambda: STAMP))
-    inv.add_bin("C12")
+    inv.add_location("C12")
     items, _ = _items()
     with pytest.raises(InventoryImportError, match="already holds"):
-        import_items(inv, items, site="school")
-    with pytest.raises(InventoryImportError, match="site"):
-        import_items(InventoryDb(new_db()), items, site=" ")
+        import_items(inv, items, location="school")
+    with pytest.raises(InventoryImportError, match="location"):
+        import_items(InventoryDb(new_db()), items, location=" ")
+    with pytest.raises(InventoryImportError, match="location"):
+        import_items(InventoryDb(new_db()), items, location="a/b")
 
 
 def test_a_bad_row_rolls_the_whole_import_back():
@@ -169,8 +172,8 @@ def test_a_bad_row_rolls_the_whole_import_back():
     items, _ = _items()
     bad = convert([_row("R", 9.0, "x" * 300, None, None, None, 1.0, None, None, line=9)])[0]
     with pytest.raises(InventoryImportError, match="row 9"):
-        import_items(inv, items + bad, site="school")
-    assert inv.bins() == [] and inv.items() == []
+        import_items(inv, items + bad, location="school")
+    assert inv.locations() == [] and inv.items() == []
 
 
 @pytest.mark.skipif(not MASTER.exists(), reason="the master component list is not checked out")
@@ -181,7 +184,7 @@ def test_the_master_component_list_converts():
     assert len({i.bin for i in items if i.bin}) == 113
     if current() == MARIADB:
         inv = InventoryDb(new_db(now=lambda: STAMP))
-        assert import_items(inv, items, site="school", dry_run=True).items == 122
+        assert import_items(inv, items, location="school", dry_run=True).items == 122
 
 
 def test_cli_import(tmp_path, monkeypatch):
@@ -194,11 +197,42 @@ def test_cli_import(tmp_path, monkeypatch):
     parts = tmp_path / "parts.sqlite"
     config = dbconfig.DbConfig(backend=dbconfig.SQLITE, sqlite_path=parts, source="test")
     monkeypatch.setattr(dbconfig, "load_config", lambda: config)
-    assert cli.main(["inventory", "import", str(path), "--site", "school", "--dry-run"]) == 0
-    assert cli.main(["inventory", "import", str(path), "--site", "school"]) == 0
-    assert cli.main(["inventory", "import", str(path), "--site", "school"]) == 1  # not empty
+    assert cli.main(["inventory", "import", str(path), "--location", "school",
+                     "--dry-run"]) == 0
+    assert cli.main(["inventory", "import", str(path), "--location", "school"]) == 0
+    assert cli.main(["inventory", "import", str(path), "--location", "school"]) == 1
     from kicadtools.partsdb import PartsDb
     inv = InventoryDb(PartsDb(parts))
-    # Items in no bin sort first.
-    assert [(i.name, i.bin_path) for i in inv.items()] == [("47pF 0603", None),
-                                                           ("4.7k 0603", "5")]
+    assert [(i.name, i.locations) for i in inv.items()] == [("4.7k 0603", ("school/5",)),
+                                                           ("47pF 0603", ("unknown",))]
+
+
+def test_cli_migrate(tmp_path, monkeypatch, capsys):
+    if current() == MARIADB:
+        pytest.skip("CLI wiring only; the database is a SQLite file")
+    from kicadtools import cli, dbconfig
+    from kicadtools.inventorydb import layout
+    from kicadtools.inventorymigrate import create_v1
+    from kicadtools.partsdb import PartsDb
+    parts = tmp_path / "parts.sqlite"
+    db = PartsDb(parts, now=lambda: STAMP)
+    create_v1(db)
+    with db._tx():
+        db._execute("INSERT INTO bin (id, name, path, site, updated_at)"
+                    " VALUES (1, '17', '17', 'school', ?)", (STAMP,))
+        db._execute("INSERT INTO item (name, quantity, bin_id, created_at, updated_at)"
+                    " VALUES ('4.7k 0603', 100, 1, ?, ?)", (STAMP, STAMP))
+    db.close()
+    config = dbconfig.DbConfig(backend=dbconfig.SQLITE, sqlite_path=parts, source="test")
+    monkeypatch.setattr(dbconfig, "load_config", lambda: config)
+    monkeypatch.setattr(dbconfig, "backups_dir", lambda: tmp_path / "backups")
+    assert cli.main(["inventory", "migrate", "--dry-run"]) == 0
+    assert "2 locations" in capsys.readouterr().out
+    assert cli.main(["inventory", "migrate"]) == 0
+    out = capsys.readouterr().out
+    assert "converted" in out and "backup:" in out
+    assert len(list((tmp_path / "backups").glob("before-migrate-*.sqlite"))) == 1
+    assert cli.main(["inventory", "migrate"]) == 1                # already converted
+    db = PartsDb(parts)
+    assert layout(db) == "2"
+    assert InventoryDb(db).items()[0].locations == ("school/17",)

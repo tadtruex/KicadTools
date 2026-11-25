@@ -1,7 +1,7 @@
 """Keyword search over the lab inventory (``INVENTORY_PLAN.md``, step 3).
 
 The inventory is small (hundreds to a few thousand items), so :func:`search`
-loads every item and bin once and matches in Python rather than through
+loads every item and location once and matches in Python rather than through
 MariaDB ``FULLTEXT``, which ignores short words ("M6", "V3") and does no
 substring match.
 
@@ -19,14 +19,16 @@ Matching, per query word (every word must match somewhere):
   ``100nf`` into ``10nF``, a different part.
 
 Fields searched: the item's name, tags, category, MPN, DigiKey PN, LCSC
-number, manufacturer, description, and its bin's path, site (its own or
-inherited), and the description and location of its bin and of every bin
-that bin is inside (a drawer is found by its cabinet's location).
+number, manufacturer, description, the paths of the locations it has stock
+in, and the descriptions of those locations and of every location they are
+inside (a drawer is found by its cabinet's description; the top level, the
+lab, is part of every path).
 
 Ranking: each word scores the weight of the best field it matched (a name
-match above a tag or category match, above a part number, above the bin,
-above the description), the item's score is the sum, and ties put items with
-a quantity above items with none or zero, then sort by name.
+match above a tag or category match, above a part number, above the
+location, above the description), the item's score is the sum, and ties
+put items with some on hand above items with none or zero, then sort by
+name.
 """
 from __future__ import annotations
 
@@ -36,7 +38,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from rapidfuzz.distance import Levenshtein
 
-from kicadtools.inventorydb import SEP, Bin, InventoryDb, Item, natural_key, norm_path
+from kicadtools.inventorydb import (SEP, InventoryDb, Item, Location, Stock, in_location,
+                                    natural_key, norm_path, path_key)
 
 # Field weights: a match in a heavier field ranks the item higher.
 WEIGHTS: Dict[str, float] = {
@@ -47,10 +50,8 @@ WEIGHTS: Dict[str, float] = {
     "digikey_pn": 5.0,
     "lcsc": 5.0,
     "manufacturer": 4.0,
-    "bin": 3.0,
-    "site": 2.0,
-    "bin_description": 2.0,
-    "bin_location": 2.0,
+    "location": 3.0,
+    "location_description": 2.0,
     "description": 1.0,
 }
 # A typo match counts this fraction of the field's weight.
@@ -119,45 +120,38 @@ def _match(word: str, field: _Field) -> float:
 
 @dataclass(frozen=True)
 class SearchHit:
-    """One item found: the item, its bin (``None`` when in no bin), the site
-    it is at (the bin's own or inherited), its score, and the fields that
+    """One item found: the item, its stock rows the filters looked at (all
+    of them without a location filter), its score, and the fields that
     matched, heaviest first."""
     item: Item
-    bin: Optional[Bin]
-    site: Optional[str]
+    rows: Tuple[Stock, ...]
     score: float
     matched: Tuple[str, ...]
 
-
-def effective_sites(bins: Iterable[Bin]) -> Dict[str, Optional[str]]:
-    """Each bin's site by path: its own, else its nearest ancestor's."""
-    own = {b.path: b.site for b in bins}
-    out: Dict[str, Optional[str]] = {}
-    for path in own:
-        parts = path.split(SEP)
-        site = None
-        for depth in range(len(parts), 0, -1):
-            site = own.get(SEP.join(parts[:depth]))
-            if site:
-                break
-        out[path] = site or None
-    return out
+    @property
+    def on_hand(self) -> Optional[int]:
+        """The known quantities of :attr:`rows`, summed; ``None`` when none
+        is known."""
+        known = [s.quantity for s in self.rows if s.quantity is not None]
+        return sum(known) if known else None
 
 
-def _ancestors(bin: Optional[Bin], by_path: Dict[str, Bin]) -> List[Bin]:
-    """*bin* and every bin it is inside, innermost first."""
-    if bin is None:
-        return []
-    parts = bin.path.split(SEP)
+def _chain(path: str, by_path: Dict[str, Location]) -> List[Location]:
+    """The location at *path* and every location it is inside."""
+    parts = path.split(SEP)
     return [by_path[p] for p in (SEP.join(parts[:d]) for d in range(len(parts), 0, -1))
             if p in by_path]
 
 
 def _joined(values: Iterable[Optional[str]]) -> Optional[str]:
-    return "\n".join(v for v in values if v) or None
+    seen: List[str] = []
+    for v in values:
+        if v and v not in seen:
+            seen.append(v)
+    return "\n".join(seen) or None
 
 
-def _fields(item: Item, chain: Sequence[Bin], site: Optional[str]) -> Dict[str, _Field]:
+def _fields(item: Item, by_path: Dict[str, Location]) -> Dict[str, _Field]:
     texts = {
         "name": item.name,
         "tags": " ".join(item.tags),
@@ -167,62 +161,57 @@ def _fields(item: Item, chain: Sequence[Bin], site: Optional[str]) -> Dict[str, 
         "lcsc": item.lcsc,
         "manufacturer": item.manufacturer,
         "description": item.description,
-        "bin": item.bin_path,
-        "site": site,
-        "bin_description": _joined(b.description for b in chain),
-        "bin_location": _joined(b.location for b in chain),
+        "location": "\n".join(item.locations),
+        "location_description": _joined(
+            loc.description for path in item.locations for loc in _chain(path, by_path)),
     }
     return {k: _Field.of(v) for k, v in texts.items() if v}
 
 
-def _in_bin(item: Item, path: str) -> bool:
-    if item.bin_path is None:
-        return False
-    a, b = item.bin_path.casefold(), path.casefold()
-    return a == b or a.startswith(b + SEP)
+def _stocked(row: Stock) -> bool:
+    return row.quantity is None or row.quantity > 0
 
 
 def search_items(
     items: Sequence[Item],
-    bins: Sequence[Bin],
+    locations: Sequence[Location],
     query: str,
     *,
-    site: Optional[str] = None,
+    top: Optional[str] = None,
     category: Optional[str] = None,
-    bin: Optional[str] = None,
+    location: Optional[str] = None,
     in_stock: bool = False,
 ) -> List[SearchHit]:
     """The items matching *query* (see the module docstring), best first.
 
-    Filters, all ignoring case: *site* (the item's bin's site, its own or
-    inherited; an item in no bin has none), *category*, *bin* (that bin and
-    every bin inside it), and *in_stock*, which leaves out items whose
-    quantity is zero (an unknown quantity is kept).
+    Filters, all ignoring case: *top* (a top-level location, the lab),
+    *location* (that location and every location inside it): each keeps the
+    items with a stock row there, and the hit's rows are those rows.
+    *category*; and *in_stock*, which keeps items with a row (among those
+    the location filters kept) whose quantity is above 0 or unknown.
 
-    An empty *query* lists every item the filters let through, by bin and
-    name."""
-    by_id = {b.id: b for b in bins}
-    by_path = {b.path: b for b in bins}
-    sites = effective_sites(bins)
+    An empty *query* lists every item the filters let through, by name."""
+    by_path = {loc.path: loc for loc in locations}
     words = query_words(query)
-    want_site = fold(site.strip()) if site and site.strip() else None
+    want_top = norm_path(top) if top and top.strip() else None
     want_cat = fold(category.strip()) if category and category.strip() else None
-    want_bin = norm_path(bin) if bin and bin.strip() else None
+    want_loc = norm_path(location) if location and location.strip() else None
 
     hits: List[SearchHit] = []
     for item in items:
-        item_bin = by_id.get(item.bin_id) if item.bin_id is not None else None
-        item_site = sites.get(item_bin.path) if item_bin else None
-        if want_site is not None and (item_site is None or fold(item_site) != want_site):
-            continue
         if want_cat is not None and (item.category is None or fold(item.category) != want_cat):
             continue
-        if want_bin is not None and not _in_bin(item, want_bin):
+        rows = item.stock
+        if want_top is not None:
+            rows = tuple(r for r in rows if in_location(r.location_path, want_top))
+        if want_loc is not None:
+            rows = tuple(r for r in rows if in_location(r.location_path, want_loc))
+        if (want_top is not None or want_loc is not None) and not rows:
             continue
-        if in_stock and item.quantity == 0:
+        if in_stock and not any(_stocked(r) for r in rows):
             continue
 
-        fields = _fields(item, _ancestors(item_bin, by_path), item_site)
+        fields = _fields(item, by_path)
         score = 0.0
         matched: Dict[str, float] = {}
         for word in words:
@@ -237,20 +226,15 @@ def search_items(
             matched[best_field] = max(matched.get(best_field, 0.0), best)
         else:
             order = tuple(sorted(matched, key=lambda f: -WEIGHTS[f]))
-            hits.append(SearchHit(item, item_bin, item_site, score, order))
-
-    def key(hit: SearchHit):
-        stocked = 0 if hit.item.quantity else 1
-        return (-hit.score, stocked, natural_key(hit.item.name),
-                [natural_key(n) for n in (hit.item.bin_path or "").split(SEP)])
+            hits.append(SearchHit(item, rows, score, order))
 
     if not words:
-        return sorted(hits, key=lambda h: (
-            [natural_key(n) for n in (h.item.bin_path or "").split(SEP)],
-            natural_key(h.item.name)))
-    return sorted(hits, key=key)
+        return sorted(hits, key=lambda h: natural_key(h.item.name))
+    return sorted(hits, key=lambda h: (-h.score, 0 if h.on_hand else 1,
+                                       natural_key(h.item.name),
+                                       path_key(h.rows[0].location_path if h.rows else "")))
 
 
 def search(inv: InventoryDb, query: str, **filters) -> List[SearchHit]:
-    """:func:`search_items` over every item and bin in *inv*, read once."""
-    return search_items(inv.items(), inv.bins(), query, **filters)
+    """:func:`search_items` over every item and location in *inv*, read once."""
+    return search_items(inv.items(), inv.locations(), query, **filters)

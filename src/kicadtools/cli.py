@@ -639,12 +639,12 @@ def _db_import(args) -> int:
 
 
 def _inventory_import(args) -> int:
-    """``kicadtools inventory import FILE --site SITE``: the one-time copy of
+    """``kicadtools inventory import FILE --location school``: the one-time copy of
     the master component list into the empty inventory of the configured
     parts database (INVENTORY_PLAN.md step 2)."""
     from kicadtools.dbconfig import ConfigError, PasswordCancelled, load_config, terminal_ask
     from kicadtools.dbconnect import open_parts_db
-    from kicadtools.inventorydb import InventoryDb
+    from kicadtools.inventorydb import InventoryDb, InventoryLayoutError
     from kicadtools.inventoryimport import (InventoryImportError, convert, import_items,
                                             read_table)
 
@@ -668,15 +668,64 @@ def _inventory_import(args) -> int:
         print(f"error: could not open {config.label}: {exc}", file=sys.stderr)
         return 1
     try:
-        report = import_items(InventoryDb(session.db), items, site=args.site,
+        report = import_items(InventoryDb(session.db), items, location=args.location,
                               report=report, dry_run=args.dry_run)
-    except InventoryImportError as exc:
+    except (InventoryImportError, InventoryLayoutError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
         session.close()
-    print(f"{source} -> {config.label}, site {args.site}")
+    print(f"{source} -> {config.label}, inside {args.location}")
     for line in report.lines():
+        print("  " + line)
+    return 0
+
+
+def _inventory_migrate(args) -> int:
+    """``kicadtools inventory migrate [--dry-run]``: convert the configured
+    parts database's inventory from bins to locations and stock rows
+    (INVENTORY_PLAN.md, "how the locations and stock migration runs"). A
+    backup is written first; a MariaDB conversion that stopped part way is
+    finished by running it again."""
+    from datetime import datetime
+
+    from kicadtools.dbbackup import pull
+    from kicadtools.dbconfig import (ConfigError, PasswordCancelled, backups_dir, load_config,
+                                     terminal_ask)
+    from kicadtools.dbconnect import open_parts_db
+    from kicadtools.inventorymigrate import MigrationError, migrate
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        session = open_parts_db(config, terminal_ask)
+    except PasswordCancelled:
+        print("cancelled", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - TunnelError, PyMySQL errors: reported
+        print(f"error: could not open {config.label}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        if args.dry_run:
+            done = migrate(session.db, dry_run=True)
+            print(f"{config.label}: would write")
+        else:
+            if not args.no_backup:
+                # Not a parts-*.sqlite name: the Cockpit's pruning keeps it.
+                backup = backups_dir() / f"before-migrate-{datetime.now():%Y-%m-%d-%H%M%S}.sqlite"
+                pull(session.db, backup)
+                print(f"backup: {backup}")
+            done = migrate(session.db)
+            print(f"{config.label}: converted")
+    except MigrationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+    for line in done.summary().splitlines():
         print("  " + line)
     return 0
 
@@ -873,11 +922,20 @@ def main(argv=None) -> int:
         "import",
         help="Copy the master component list (.numbers or .csv) into the empty inventory, once")
     inv_imp.add_argument("file", help="the spreadsheet: .numbers, or a CSV export of it")
-    inv_imp.add_argument("--site", required=True,
-                         help="the site of every imported bin, such as school")
+    inv_imp.add_argument("--location", required=True,
+                         help="the location every imported bin goes inside, such as school")
     inv_imp.add_argument("--dry-run", action="store_true",
                          help="convert and write everything, then roll back")
     inv_imp.set_defaults(func=_inventory_import)
+    inv_mig = inv_sub.add_parser(
+        "migrate",
+        help="Convert the inventory from bins to locations and stock rows, once "
+             "(stop the web app first)")
+    inv_mig.add_argument("--dry-run", action="store_true",
+                         help="only report what the conversion would write")
+    inv_mig.add_argument("--no-backup", action="store_true",
+                         help="skip the backup made before converting")
+    inv_mig.set_defaults(func=_inventory_migrate)
 
     args = parser.parse_args(argv)
     return args.func(args)

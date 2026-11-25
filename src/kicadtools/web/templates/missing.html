@@ -2,11 +2,11 @@
 {% block main %}
 <h1>Not found</h1>
 <p>There is no {{ what }}.</p>
-{% if make_bin %}
-<form method="post" action="/bins" class="inline">
-  <input type="hidden" name="name" value="{{ make_bin.split('/')[-1] }}">
-  {% if '/' in make_bin %}<input type="hidden" name="parent" value="{{ make_bin.rsplit('/', 1)[0] }}">{% endif %}
-  <button type="submit">Make bin {{ make_bin }}</button>
+{% if make_location %}
+<form method="post" action="/locations" class="inline">
+  <input type="hidden" name="name" value="{{ make_location.split('/')[-1] }}">
+  {% if '/' in make_location %}<input type="hidden" name="parent" value="{{ make_location.rsplit('/', 1)[0] }}">{% endif %}
+  <button type="submit">Make location {{ make_location }}</button>
 </form>
 {% endif %}
 <p><a href="/">Search</a></p>

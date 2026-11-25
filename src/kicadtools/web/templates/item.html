@@ -1,39 +1,90 @@
 {% extends "base.html" %}
 {% block title %}{{ item.name }} · Inventory{% endblock %}
 {% block main %}
-<p class="crumbs">
-  {% if chain %}{% for b in chain %}<a href="{{ b.path|bin_url }}">{{ b.name }}</a>{% if not loop.last %} / {% endif %}{% endfor %}
-  {% if site %}<span class="site">{{ site }}</span>{% endif %}{% if where %} <span class="muted">· {{ where }}</span>{% endif %}
-  {% else %}<span class="muted">In no bin</span>{% endif %}
-</p>
 <h1>{{ item.name }}</h1>
 {% if saved %}<p class="ok">Saved.</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
-<div class="qtyrow">
-  <form method="post" action="/item/{{ item.id }}/qty" hx-post="/item/{{ item.id }}/qty" hx-target="#qty" hx-swap="outerHTML">
-    <input type="hidden" name="delta" value="-1"><button class="round" aria-label="One fewer">−</button>
-  </form>
-  {% include "_qty.html" %}
-  <form method="post" action="/item/{{ item.id }}/qty" hx-post="/item/{{ item.id }}/qty" hx-target="#qty" hx-swap="outerHTML">
-    <input type="hidden" name="delta" value="1"><button class="round" aria-label="One more">+</button>
-  </form>
-</div>
+<section id="pictures">
+{% if pictures %}
+<ul class="gallery">
+{% for p in pictures %}
+  <li{% if loop.first %} class="main"{% endif %}>
+    <a href="/picture/{{ p.id }}" target="_blank" rel="noopener"><img src="/picture/{{ p.id }}/thumb" alt="{{ p.caption or item.name }}" loading="lazy"></a>
+    <div class="pic-actions">
+      {% if not loop.first %}<form method="post" action="/picture/{{ p.id }}"><input type="hidden" name="action" value="main"><button type="submit" class="small" title="Make it the main picture">Main</button></form>{% else %}<span class="muted small">main</span>{% endif %}
+      <form method="post" action="/picture/{{ p.id }}" onsubmit="return confirm('Delete this picture?')"><input type="hidden" name="action" value="delete"><button type="submit" class="small" aria-label="Delete picture">✕</button></form>
+    </div>
+  </li>
+{% endfor %}
+</ul>
+{% endif %}
+<form method="post" action="/item/{{ item.id }}/pictures" enctype="multipart/form-data" class="pictures-form">
+  {% set autosubmit = true %}{% include "_dropzone.html" %}
+  <noscript><button type="submit">Add pictures</button></noscript>
+</form>
+</section>
 
+<h2>Where{% if item.stock|length > 1 %} <span class="muted">· {{ item.on_hand|qty }} in all</span>{% endif %}</h2>
+{% if not item.stock %}<p class="hint">In no location.</p>{% endif %}
+<ul class="stock-rows">
+{% for row in item.stock %}
+  <li>
+    <a class="loc" href="{{ row.location_path|location_url }}">{{ row.location_path }}</a>
+    <div class="qtyrow">
+      <form method="post" action="/stock/{{ row.id }}/qty" hx-post="/stock/{{ row.id }}/qty" hx-target="#qty-{{ row.id }}" hx-swap="outerHTML">
+        <input type="hidden" name="delta" value="-1"><button class="round" aria-label="One fewer">−</button>
+      </form>
+      {% include "_qty.html" %}
+      <form method="post" action="/stock/{{ row.id }}/qty" hx-post="/stock/{{ row.id }}/qty" hx-target="#qty-{{ row.id }}" hx-swap="outerHTML">
+        <input type="hidden" name="delta" value="1"><button class="round" aria-label="One more">+</button>
+      </form>
+    </div>
+    {% if row.notes %}<p class="muted small">{{ row.notes }}</p>{% endif %}
+    <details>
+      <summary>Change</summary>
+      <form method="post" action="/stock/{{ row.id }}" class="fields">
+        <input type="hidden" name="action" value="set">
+        <div class="two">
+          <label>Quantity <input name="quantity" inputmode="numeric" value="{{ '' if row.quantity is none else row.quantity }}" placeholder="unknown"></label>
+          <label>Notes <input name="notes" value="{{ row.notes or '' }}"></label>
+        </div>
+        <div class="actions"><button type="submit">Save</button></div>
+      </form>
+      <form method="post" action="/stock/{{ row.id }}" class="inline">
+        <input type="hidden" name="action" value="move">
+        <input name="location" list="dl-location" placeholder="Move to…" autocomplete="off" required><button type="submit">Move</button>
+      </form>
+      <form method="post" action="/stock/{{ row.id }}" class="danger" onsubmit="return confirm('No more {{ item.name|e }} kept in {{ row.location_path|e }}?')">
+        <input type="hidden" name="action" value="delete"><button type="submit">Not kept here any more</button>
+      </form>
+    </details>
+  </li>
+{% endfor %}
+</ul>
+<details {% if not item.stock %}open{% endif %}>
+  <summary>Add to {% if item.stock %}another {% endif %}location</summary>
+  <form method="post" action="/item/{{ item.id }}/stock" class="fields">
+    <div class="two">
+      <label>Location <input name="location" list="dl-location" autocomplete="off" required placeholder="school/C12/5" title="A new path makes the location"></label>
+      <label>Quantity <input name="quantity" inputmode="numeric"></label>
+    </div>
+    <div class="actions"><button type="submit" class="primary">Add</button></div>
+  </form>
+</details>
+
+<h2>About it</h2>
 <form method="post" action="/item/{{ item.id }}" class="fields">
   <label>Name <input name="name" required value="{% if form %}{{ form.get('name', '') }}{% else %}{{ item.name }}{% endif %}"></label>
-  <div class="two">
-    <label>Quantity <input name="quantity" inputmode="numeric" value="{% if form %}{{ form.get('quantity', '') }}{% elif item.quantity is not none %}{{ item.quantity }}{% endif %}"></label>
-    <label>Bin <input name="bin" list="dl-bin" value="{% if form %}{{ form.get('bin', '') }}{% else %}{{ item.bin_path or '' }}{% endif %}" autocomplete="off"
-      title="A new path makes the bin"></label>
-  </div>
   {% include "_item_fields.html" %}
   {% if item.url %}<p><a href="{{ item.url }}" target="_blank" rel="noopener">Open the link ↗</a></p>{% endif %}
   <div class="actions"><button type="submit" class="primary">Save</button></div>
 </form>
 
+<p><a class="button" href="/add?copy={{ item.id }}">Copy item</a></p>
+
 <form method="post" action="/item/{{ item.id }}/delete" class="danger"
-      onsubmit="return confirm('Delete {{ item.name|e }}?')">
+      onsubmit="return confirm('Delete {{ item.name|e }} and everywhere it is kept?')">
   <button type="submit">Delete item</button>
 </form>
 <p class="muted small">Added {{ item.created_at[:10] }} · changed {{ item.updated_at[:10] }}</p>
