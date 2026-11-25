@@ -61,7 +61,7 @@ echo "tailnet: $TS_NAME $TS_IP4 $TS_IP6"
 say "Caddy"
 if ! dpkg -s caddy >/dev/null 2>&1; then
     apt-get update -q
-    apt-get install -y -q debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+    apt-get install -y -q curl gnupg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
         | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
