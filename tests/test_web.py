@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from kicadtools.inventorydb import InventoryDb  # noqa: E402
 from kicadtools.partsdb import PartsDb  # noqa: E402
-from kicadtools.web.app import (create_app, fmt_qty, item_counts, location_url,  # noqa: E402
-                                parse_quantity, parse_tags)
+from kicadtools.web.app import (create_app, fmt_qty, item_counts, location_tree,  # noqa: E402
+                                location_url, parse_quantity, parse_tags, release_version)
 
 HX = {"HX-Request": "true", "HX-Target": "results"}
 
@@ -295,6 +295,37 @@ def test_locations_page(client, inv):
     text = re.sub(r"\s+", " ", r.text)
     assert text.index(">barn<") < text.index(">school<")
     assert "In no location" in text and "loose resistor" in text
+
+
+def test_locations_page_is_a_collapsed_tree(client, inv):
+    inv.ensure_location("school/C2")
+    text = re.sub(r"\s+", " ", client.get("/locations").text)
+    assert "<details open" not in text and "Expand all" in text
+    # school holds C2 and C12 (C2 first); C12 holds 5, a leaf
+    school = text.index('href="/location/school"')
+    c2 = text.index('href="/location/school/C2"')
+    c12 = text.index('href="/location/school/C12"')
+    five = text.index('href="/location/school/C12/5"')
+    assert school < c2 < c12 < five
+    assert text.count("<details>") == 4            # barn, school, school/C12 have insides; + add form
+    assert '<div class="leaf"><a href="/location/school/C12/5">5</a> <span class="muted">1</span>' in text
+
+
+def test_location_tree(inv):
+    inv.ensure_location("school/C2")
+    tree = location_tree(inv.locations())
+    assert [n.location.path for n in tree] == ["barn", "school"]
+    school = tree[1]
+    assert [n.location.path for n in school.children] == ["school/C2", "school/C12"]
+    assert [n.location.path for n in school.children[1].children] == ["school/C12/5"]
+    assert location_tree([]) == []
+
+
+def test_footer_names_the_release(client, tmp_path):
+    version = release_version()
+    assert version and f"Lab inventory · {version}" in client.get("/").text
+    from kicadtools import __version__
+    assert release_version(tmp_path) == __version__        # not a git checkout
 
 
 def test_healthz(client):

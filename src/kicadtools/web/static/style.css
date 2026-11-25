@@ -46,7 +46,6 @@ label.check input { width: auto; }
 .results .where, .results .desc { grid-column: 1 / -1; font-size: 0.9rem; }
 .results .desc { color: var(--muted); }
 .bins li { padding: 6px 0; border-bottom: 1px solid var(--line); }
-.bins.tree li { padding-left: calc(var(--depth, 0) * 18px); }
 .crumbs { color: var(--muted); margin: 0; font-size: 0.9rem; }
 .fields { display: grid; gap: 10px; margin: 12px 0; }
 .fields label { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
@@ -69,7 +68,6 @@ form.danger button { color: var(--err); border-color: var(--err); background: tr
 .stock-rows .loc { font-weight: 600; }
 .stock-rows details { margin: 6px 0 0; }
 .matches { border: 1px solid var(--accent); border-radius: 10px; padding: 4px 12px; margin: 12px 0; }
-.bins.tree li.top { font-weight: 600; }
 /* The whole row of a result opens the item; its location links and forms stay their own. */
 .results li { position: relative; }
 .results .name::after { content: ""; position: absolute; inset: 0; border-radius: 10px; }
@@ -103,3 +101,14 @@ button.small { padding: 2px 8px; font-size: 0.85rem; }
 .dropzone.over { border-color: var(--accent); background: var(--chip); color: var(--fg); }
 .dropzone.busy { opacity: 0.6; }
 .dropzone .chosen { display: block; margin-top: 4px; }
+/* Locations tree: each branch a <details>, collapsed until opened. */
+.tree-tools { display: flex; gap: 8px; margin: 0 0 8px; }
+.loctree, .loctree ul { list-style: none; margin: 0; padding: 0; }
+.loctree ul { padding-left: 18px; border-left: 1px solid var(--line); margin-left: 6px; }
+.loctree li { margin: 0; }
+.loctree li.top > details > summary, .loctree li.top > .leaf { font-weight: 600; }
+.loctree details { margin: 0; }
+.loctree summary { color: var(--fg); padding: 5px 0; }
+.loctree summary::marker { color: var(--muted); }
+.loctree .leaf { padding: 5px 0 5px 16px; }
+footer { max-width: 760px; margin: 0 auto; padding: 24px 16px 32px; text-align: center; }

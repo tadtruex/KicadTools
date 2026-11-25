@@ -27,7 +27,8 @@
 #      /srv/inventory/.kicadtools/db_password (0600, owner inventory);
 #   6. a systemd unit `kicadtools-web` on 127.0.0.1:8090 (8080 stays free
 #      for a development run);
-#   7. `tailscale serve`: https://<broadpeak's tailnet name>/ forwards to it;
+#   7. `tailscale serve`: https://<broadpeak's tailnet name>/ forwards to it
+#      (skipped once deploy_inventory_https.sh has put Caddy on port 443);
 #   8. /usr/local/sbin/inventory-web-update: pull master, reinstall,
 #      restart, check.
 #
@@ -232,11 +233,17 @@ else
 fi
 
 # --- 7. tailscale serve --------------------------------------------------
-say "tailscale serve"
-# If HTTPS is not enabled for the tailnet yet, this prints a link to the
-# admin console that enables it, and finishes once it is enabled.
-tailscale serve --bg --https=443 "http://127.0.0.1:$PORT"
-tailscale serve status
+HTTPS_MARKER="# Written by Code/KicadTools/scripts/deploy_inventory_https.sh"
+if grep -qxF "$HTTPS_MARKER" /etc/caddy/Caddyfile 2>/dev/null; then
+    say "HTTPS: Caddy (deploy_inventory_https.sh), not tailscale serve"
+    systemctl is-active --quiet caddy && echo "caddy is running" || echo "caddy is NOT running"
+else
+    say "tailscale serve"
+    # If HTTPS is not enabled for the tailnet yet, this prints a link to the
+    # admin console that enables it, and finishes once it is enabled.
+    tailscale serve --bg --https=443 "http://127.0.0.1:$PORT"
+    tailscale serve status
+fi
 
 # --- 8. update command ---------------------------------------------------
 say "update command $UPDATE_CMD"

@@ -2,11 +2,24 @@
 {% block title %}Locations · Inventory{% endblock %}
 {% block main %}
 <h1>Locations</h1>
-{% if not locations %}<p class="hint">No locations yet.</p>{% endif %}
-<ul class="bins tree">
-{% for l in locations %}<li style="--depth: {{ l.depth }}"{% if l.depth == 0 %} class="top"{% endif %}><a href="{{ l.path|location_url }}">{{ l.name }}</a>
-  <span class="muted">{{ total.get(l.path, 0) }}</span>{% if l.description %} <span class="muted">· {{ l.description|truncate(60) }}</span>{% endif %}</li>{% endfor %}
+{% if not tree %}<p class="hint">No locations yet.</p>{% else %}
+<p class="tree-tools">
+  <button type="button" class="small" onclick="document.querySelectorAll('.loctree details').forEach(d => d.open = true)">Expand all</button>
+  <button type="button" class="small" onclick="document.querySelectorAll('.loctree details').forEach(d => d.open = false)">Collapse all</button>
+</p>
+<ul class="loctree">
+{% for node in tree recursive %}{% set l = node.location %}
+  <li{% if l.depth == 0 %} class="top"{% endif %}>
+  {% macro label() %}<a href="{{ l.path|location_url }}">{{ l.name }}</a> <span class="muted">{{ total.get(l.path, 0) }}</span>{% if l.description %} <span class="muted">· {{ l.description|truncate(60) }}</span>{% endif %}{% endmacro %}
+  {% if node.children %}
+    <details><summary>{{ label() }} <span class="muted small">({{ node.children|length }} inside)</span></summary>
+      <ul>{{ loop(node.children) }}</ul>
+    </details>
+  {% else %}<div class="leaf">{{ label() }}</div>{% endif %}
+  </li>
+{% endfor %}
 </ul>
+{% endif %}
 {% if unplaced %}
 <h2>In no location</h2>
 <ul class="results">{% for item in unplaced %}<li><a class="name" href="/item/{{ item.id }}">{{ item.name }}</a></li>{% endfor %}</ul>

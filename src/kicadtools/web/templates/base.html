@@ -19,6 +19,7 @@
 <main>
 {% block main %}{% endblock %}
 </main>
+<footer><span class="muted small">Lab inventory · {{ version }}</span></footer>
 {% if choices %}
 <datalist id="dl-category">{% for v in choices.category %}<option value="{{ v }}">{% endfor %}</datalist>
 <datalist id="dl-manufacturer">{% for v in choices.manufacturer %}<option value="{{ v }}">{% endfor %}</datalist>
