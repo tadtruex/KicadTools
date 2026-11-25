@@ -220,6 +220,17 @@ tried in a real browser.
    files" button, which on the phone also offers the camera). Each upload
    goes through `pictures.prepare` as usual.
 
+## Interface to-do, second list (asked 2026-11-25, after kt_v0.2a)
+
+1. **Locations page as a tree** that expands and collapses, every branch
+   collapsed at first. Each location keeps its link and item count; a
+   branch opens to show the locations inside it.
+2. **Version in the footer** of every page, so it is plain which release
+   the service runs (e.g. `kt_v0.2a`). Not yet decided where it comes
+   from: the release tag of the checkout (`git describe`, read when the
+   app starts) or `__version__` / `pyproject.toml` (both still `0.1.0`,
+   never bumped), which would then be bumped at each release.
+
 ## Pictures (decided and built 2026-11-25)
 
 An item has any number of pictures, 0 or more, in order; the first is the
