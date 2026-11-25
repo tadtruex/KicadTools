@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-25): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a` (bins), at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Built on `develop`, not released: locations instead of bins and sites, items with stock rows, item pictures (no web pages for pictures yet), and `kicadtools inventory migrate` to convert the real database at the cutover (see "Locations and stock — as built"). Steps 6–7 not started. QR codes will encode a name under the user's own domain, which needs a nameserver first. No inventory CLI beyond the import and the migration (user decision 2026-11-24: the web app is the interface).
+Status (2026-11-25): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a` (bins), at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Built on `develop`, not released: locations instead of bins and sites, items with stock rows, item pictures (no web pages for pictures yet), and `kicadtools inventory migrate` to convert the real database at the cutover (see "Locations and stock — as built"). Steps 6–7 not started. QR codes will encode `inventory.tadtruex.net`, served by Caddy (`scripts/deploy_inventory_https.sh`, not yet run). No inventory CLI beyond the import and the migration (user decision 2026-11-24: the web app is the interface).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -284,23 +284,26 @@ moved off Tailscale, which would make every printed label wrong. The labels
 encode a name under a domain the user controls (e.g.
 `inventory.<domain>`), which can point somewhere else later.
 
-- **Prerequisite (the user's):** a nameserver up and running for that
-  domain. Before step 6.
+- **The name (decided 2026-11-25):** `inventory.tadtruex.net`. The
+  domain is registered at GoDaddy; its DNS moved to Cloudflare (free plan)
+  on 2026-11-25, so a Cloudflare API token can be limited to editing DNS
+  for that one zone (a GoDaddy API key controls the whole account).
 - **Labels:** the base URL a QR code encodes is a setting
   (`config.toml` on the service account), not taken from the request and
   not written in the code.
-- **What the name resolves to:** broadpeak's tailnet address
-  (`100.120.78.89`), so it still answers only to devices in the tailnet.
-  Not decided: a public record holding a private address, or the
-  nameserver added to the tailnet as split DNS for the domain.
-- **Certificate:** `tailscale serve` has a certificate for the `ts.net`
-  name only. HTTPS on the new name needs its own certificate, e.g. from
-  Let's Encrypt with a DNS-01 challenge against the new nameserver
-  (broadpeak's ports 80 and 443 are closed to the internet, so HTTP-01 is
-  out), and something on broadpeak that presents it (Caddy, or uvicorn
-  with the certificate files). Plain HTTP over the tailnet is the
-  alternative: WireGuard already encrypts it, but phones warn about
-  `http://` pages.
+- **What the name resolves to (decided 2026-11-25):** a public A record
+  at Cloudflare, `inventory` → broadpeak's tailnet address
+  (`100.120.78.89`), proxy off. Devices outside the tailnet resolve it but
+  cannot reach the address. No split DNS.
+- **Certificate (decided 2026-11-25):** `tailscale serve` cannot present
+  a certificate for another name, so Caddy replaces it on port 443:
+  Let's Encrypt with a DNS-01 challenge through the Cloudflare plugin
+  (broadpeak needs no port open to the internet), bound to the tailnet
+  addresses only, forwarding to 127.0.0.1:8090. Caddy also serves the
+  `ts.net` name with tailscaled's certificate, so the old address keeps
+  working. Set up by `scripts/deploy_inventory_https.sh` (sudo, run once
+  on broadpeak after `deploy_inventory_web.sh`); `deploy_inventory_web.sh`
+  then leaves `tailscale serve` off. Not yet run.
 
 ## Decisions (2026-11-23)
 
