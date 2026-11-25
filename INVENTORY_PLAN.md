@@ -1,6 +1,6 @@
 # Lab inventory — plan (sketch)
 
-Status (2026-11-25): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a` (bins), at `https://broadpeak.tail7c4deb.ts.net` (tailnet only); not yet tried on the phone. Built on `develop`, not released: locations instead of bins and sites, items with stock rows, item pictures (no web pages for pictures yet), and `kicadtools inventory migrate` to convert the real database at the cutover (see "Locations and stock — as built"). Steps 6–7 not started. QR codes will encode `inventory.tadtruex.net`, served by Caddy (`scripts/deploy_inventory_https.sh`, not yet run). No inventory CLI beyond the import and the migration (user decision 2026-11-24: the web app is the interface).
+Status (2026-11-25): steps 1–5 done. The web app runs on broadpeak as a service on the real `tadtruex_inventory`, release `kt_v0.1a` (bins), at `https://broadpeak.tail7c4deb.ts.net` and `https://inventory.tadtruex.net` (tailnet only, served by Caddy); checked from the phone 2026-11-25. Built on `develop`, not released: locations instead of bins and sites, items with stock rows, item pictures (no web pages for pictures yet), and `kicadtools inventory migrate` to convert the real database at the cutover (see "Locations and stock — as built"). Steps 6–7 not started. QR codes will encode `inventory.tadtruex.net`. No inventory CLI beyond the import and the migration (user decision 2026-11-24: the web app is the interface).
 
 Two uses for one inventory of what is physically in the labs:
 
@@ -303,7 +303,8 @@ encode a name under a domain the user controls (e.g.
   `ts.net` name with tailscaled's certificate, so the old address keeps
   working. Set up by `scripts/deploy_inventory_https.sh` (sudo, run once
   on broadpeak after `deploy_inventory_web.sh`); `deploy_inventory_web.sh`
-  then leaves `tailscale serve` off. Not yet run.
+  then leaves `tailscale serve` off. Run on broadpeak 2026-11-25; both
+  names answer over HTTPS, from the Mac and the phone.
 
 ## Decisions (2026-11-23)
 
@@ -670,13 +671,15 @@ adding things fast; 7 is the BOM use.
   development run of `kicadtools-web`. `ProtectSystem=strict`,
   `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`; writable only
   `/srv/inventory/.kicadtools`.
-- **Tailscale:** `tailscale serve --bg --https=443` forwards
-  `https://broadpeak.tail7c4deb.ts.net/` to it, tailnet only, with a Let's
-  Encrypt certificate Tailscale renews (valid to 2027-02-22 at deploy).
+- **Tailscale:** at first `tailscale serve --bg --https=443` forwarded
+  `https://broadpeak.tail7c4deb.ts.net/` to it. Since 2026-11-25 Caddy
+  holds port 443 instead (`scripts/deploy_inventory_https.sh`), serving
+  `inventory.tadtruex.net` (Let's Encrypt by DNS-01 through Cloudflare) and
+  the ts.net name (certificate from tailscaled), tailnet addresses only.
 - Checked from the Mac over the tailnet: `/healthz` ok, search (`stm32` →
   4 items) and the bins list, 0.14–0.23 s a page through the relay.
-- Not done from the step 5 list: the phone (Tailscale on it, then a look
-  at the pages). The Cockpit's `config.toml` naming `broadpeak` instead of
+- Checked from the phone over the tailnet (2026-11-25), at both names.
+- Not done from the step 5 list: the Cockpit's `config.toml` naming `broadpeak` instead of
   `10.0.10.13` (DB plan step 8) is now possible but not done.
 
 ## Open questions
