@@ -21,7 +21,8 @@ On `develop` (commit e50c569, pushed). `INVENTORY_PLAN.md`, "Locations and stock
 1. Look at the develop app on the converted test copy (README_TEST.md),
    on the phone too. Stop it before running the copy again.
 2. Pictures in the web app: built (add, show, make main, delete); no
-   captions or drag to reorder yet.
+   drag to reorder yet (GitHub issue #1). No captions on this interface
+   (user decision 2026-11-25): don't build or suggest them.
 3. The cutover, as in the plan ("how the locations and stock migration
    runs"): finish a release from `develop`; stop the service;
    `kicadtools inventory migrate`; re-run the deploy script.

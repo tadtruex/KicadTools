@@ -265,6 +265,10 @@ main one, the one a list or search result would show.
   `update_picture(id, caption=)`, `move_picture(id, position)` (0 makes it
   the main one), `delete_picture(id)`. `Item.pictures` is the ids in order,
   `Item.picture` the main one's. `delete_item` deletes them.
+- **No captions in the web app** (user decision 2026-11-25). The
+  `caption` column and the `caption=` arguments stay in the database
+  layer, but the web interface doesn't show or edit captions, and they
+  aren't planned.
 - **Released database:** `item_picture` is part of the new layout and
   ships with the locations release; the migration creates it when the
   release had none. The web app's grants add it (deploy script).
