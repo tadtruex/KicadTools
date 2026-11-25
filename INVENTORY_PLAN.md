@@ -220,7 +220,16 @@ tried in a real browser.
    files" button, which on the phone also offers the camera). Each upload
    goes through `pictures.prepare` as usual.
 
-## Interface to-do, second list (asked 2026-11-25, after kt_v0.2a)
+## Interface to-do, second list (asked 2026-11-25, after kt_v0.2a; built 2026-11-25)
+
+Built on `develop`. The tree is nested `<details>` (no script), with
+"Expand all" / "Collapse all" buttons; a location's name is still its link
+and clicking beside it opens the branch. The footer's version is
+`git describe --tags --always --dirty` of the app's checkout, read when the
+app starts (`kt_v0.2a` on the service; `kt_v0.2a-2-gf75fa6a` on `develop`
+two commits later), falling back to `__version__` outside a checkout, so
+nothing needs bumping at a release.
+
 
 1. **Locations page as a tree** that expands and collapses, every branch
    collapsed at first. Each location keeps its link and item count; a
@@ -229,7 +238,8 @@ tried in a real browser.
    the service runs (e.g. `kt_v0.2a`). Not yet decided where it comes
    from: the release tag of the checkout (`git describe`, read when the
    app starts) or `__version__` / `pyproject.toml` (both still `0.1.0`,
-   never bumped), which would then be bumped at each release.
+   never bumped), which would then be bumped at each release. Decided:
+   `git describe`.
 
 ## Pictures (decided and built 2026-11-25)
 

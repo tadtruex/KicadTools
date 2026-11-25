@@ -27,8 +27,8 @@ On `develop` (commit e50c569, pushed). `INVENTORY_PLAN.md`, "Locations and stock
    `kicadtools inventory migrate`; re-run the deploy script.
 4. Interface to-do (plan): built, with pictures on the item page. Try
    drag and drop and the phone camera in a real browser.
-5. Interface to-do, second list (plan): Locations page as a collapsible
-   tree; the release version in the footer.
+5. Interface to-do, second list (plan): built (collapsible Locations
+   tree, release version in the footer).
 
 ## Handoff: inventory web app deployed on broadpeak (2026-11-24)
 

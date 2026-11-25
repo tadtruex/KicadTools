@@ -19,8 +19,10 @@ quantity buttons; every page also works as plain HTML forms. Pages:
 - ``/location/<path>`` a location: its fields, the locations inside it, the
   stock in it and in those locations (the page a QR code opens), add item
   here, add location inside;
-- ``/locations`` every location as a tree, with counts, and the items in no
-  location.
+- ``/locations`` every location as a tree, each branch collapsed until
+  opened, with counts, and the items in no location.
+
+Every page's footer names the release running (:func:`release_version`).
 
 Open-ended fields (category, manufacturer, tags, location) are one box with
 a ``<datalist>`` of the values already used: the browser lists matching ones
@@ -33,8 +35,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 from urllib.parse import quote, urlencode
@@ -45,7 +49,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from kicadtools.inventory import SearchHit, search_items
+from kicadtools import __version__
+from kicadtools.inventory import search_items
 from kicadtools.inventorydb import (SEP, InventoryDb, InventoryError, Item, Location, Stock,
                                     natural_key, path_key)
 from kicadtools.pictures import MAX_UPLOAD, PictureError
@@ -145,6 +150,38 @@ def location_chain(by_path: Mapping[str, Location], path: Optional[str]) -> List
             if p in by_path]
 
 
+def release_version(where: Path = HERE) -> str:
+    """The release the code at *where* is: ``git describe`` of its checkout
+    (``kt_v0.2a``, or ``kt_v0.2a-3-gf75fa6a`` three commits after it, with
+    ``-dirty`` for uncommitted changes), else the package version."""
+    try:
+        out = subprocess.run(["git", "-C", str(where), "describe", "--tags", "--always",
+                              "--dirty"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        out = None
+    if out is not None and out.returncode == 0 and out.stdout.strip():
+        return out.stdout.strip()
+    return __version__
+
+
+@dataclass
+class TreeNode:
+    """A location and the locations inside it, for the Locations page."""
+    location: Location
+    children: List["TreeNode"] = field(default_factory=list)
+
+
+def location_tree(locations: List[Location]) -> List[TreeNode]:
+    """The top-level locations, each with the tree inside it, every level
+    in natural order."""
+    nodes = {loc.id: TreeNode(loc) for loc in sorted(locations, key=lambda x: path_key(x.path))}
+    tops: List[TreeNode] = []
+    for node in nodes.values():
+        parent = nodes.get(node.location.parent_id)
+        (parent.children if parent else tops).append(node)
+    return tops
+
+
 def item_counts(items: List[Item]) -> Tuple[Dict[str, int], Dict[str, int]]:
     """Items with stock directly in each location, and in it or any
     location inside it (an item counted once per location)."""
@@ -188,6 +225,7 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
     templates.env.filters["location_url"] = location_url
     templates.env.filters["qty"] = fmt_qty
     templates.env.globals["urlencode"] = urlencode
+    templates.env.globals["version"] = release_version()
 
     def inv(request: Request) -> InventoryDb:
         return request.app.state.inv
@@ -561,9 +599,8 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
     @app.get("/locations", response_class=HTMLResponse)
     def locations_page(request: Request):
         i = inv(request)
-        all_locations = sorted(i.locations(), key=lambda x: path_key(x.path))
         _, total = item_counts(i.items())
-        return page(request, "locations.html", locations=all_locations, total=total,
+        return page(request, "locations.html", tree=location_tree(i.locations()), total=total,
                     unplaced=i.unplaced(), choices=choices(i), error=None)
 
     @app.post("/locations", response_class=HTMLResponse)
