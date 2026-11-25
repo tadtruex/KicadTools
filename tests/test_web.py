@@ -299,3 +299,154 @@ def test_locations_page(client, inv):
 
 def test_healthz(client):
     assert client.get("/healthz").text == "ok"
+
+
+# ----- the front page list --------------------------------------------------
+
+def _many(inv, count=30):
+    for k in range(count):
+        inv.add_item(f"Resistor {k:02d}", location="barn/top shelf", quantity=k)
+
+
+def test_front_page_lists_the_first_items_by_name(client, inv):
+    _many(inv)
+    r = client.get("/")
+    assert "First 20 of 32 items" in r.text and 'class="scrollbox"' in r.text
+    assert "M6 x 5 mm" in r.text and "Resistor 17" in r.text and "Resistor 18" not in r.text
+    assert '<option value="20" selected>' in r.text
+
+
+def test_list_size_is_chosen_and_remembered(client, inv):
+    _many(inv)
+    r = client.get("/", params={"n": "10"}, headers=HX)
+    assert "First 10 of 32 items" in r.text and "<html" not in r.text
+    assert client.cookies.get("list_n") == "10"
+    assert "First 10 of 32" in client.get("/").text
+    r = client.get("/", params={"n": "all"})
+    assert "32 items" in r.text and "Resistor 29" in r.text and "First" not in r.text
+    assert client.cookies.get("list_n") == "0"
+    assert "First 20 of 32" in client.get("/", params={"n": "7"}).text   # not a choice
+
+
+def test_front_page_list_follows_the_top_and_in_stock_filters(client, inv):
+    inv.add_item("1uF 0805")                            # in no location
+    r = client.get("/", params={"top": "school"})
+    assert "1 item at school" in r.text and "Nano Every" in r.text and "M6" not in r.text
+    r = client.get("/", params={"top": ""})
+    assert "3 items" in r.text and "1uF 0805" in r.text
+
+
+def test_a_result_row_opens_the_item(client, inv):
+    nano = _item(inv, "Nano Every")
+    r = client.get("/", params={"q": "nano"})
+    assert f'<a class="name" href="/item/{nano.id}">' in r.text
+
+
+# ----- pictures --------------------------------------------------------------
+
+PIL = pytest.importorskip("PIL")
+
+
+def _jpeg(color=(200, 30, 30), size=(400, 300)) -> bytes:
+    import io
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", size, color).save(out, "JPEG")
+    return out.getvalue()
+
+
+def _upload(*files):
+    return [("picture", (name, data, "image/jpeg")) for name, data in files]
+
+
+def test_pictures_are_added_shown_and_served(client, inv):
+    nano = _item(inv, "Nano Every")
+    r = client.post(f"/item/{nano.id}/pictures", files=_upload(("a.jpg", _jpeg()),
+                                                               ("b.jpg", _jpeg((0, 0, 200)))),
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"/item/{nano.id}#pictures"
+    first, second = inv.pictures(nano.id)
+    page = client.get(f"/item/{nano.id}").text
+    assert f'src="/picture/{first.id}/thumb"' in page and f'src="/picture/{second.id}/thumb"' in page
+    assert 'class="dropzone" data-autosubmit' in page and 'src="/static/pictures.js"' in page
+    full = client.get(f"/picture/{first.id}")
+    assert full.headers["content-type"] == "image/jpeg" and full.content[:2] == b"\xff\xd8"
+    assert "immutable" in full.headers["cache-control"]
+    assert client.get(f"/picture/{first.id}/thumb").content == inv.picture_data(first.id, thumb=True)[1]
+    assert client.get("/picture/999").status_code == 404
+    # the main picture shows in search results
+    assert f'src="/picture/{first.id}/thumb"' in client.get("/", params={"q": "nano"}).text
+
+
+def test_picture_main_and_delete(client, inv):
+    nano = _item(inv, "Nano Every")
+    a = inv.add_picture(nano.id, _jpeg())
+    b = inv.add_picture(nano.id, _jpeg((0, 0, 200)))
+    client.post(f"/picture/{b.id}", data={"action": "main"})
+    assert [p.id for p in inv.pictures(nano.id)] == [b.id, a.id]
+    client.post(f"/picture/{b.id}", data={"action": "delete"})
+    assert [p.id for p in inv.pictures(nano.id)] == [a.id]
+    assert client.post(f"/picture/{a.id}", data={"action": "spin"}).status_code == 400
+    assert client.post("/picture/999", data={"action": "delete"}).status_code == 404
+
+
+def test_a_file_that_is_no_picture_is_refused_the_rest_are_added(client, inv):
+    nano = _item(inv, "Nano Every")
+    r = client.post(f"/item/{nano.id}/pictures",
+                    files=_upload(("notes.txt", b"not a picture"), ("ok.jpg", _jpeg())))
+    assert r.status_code == 400 and "notes.txt" in r.text
+    assert len(inv.pictures(nano.id)) == 1
+    r = client.post(f"/item/{nano.id}/pictures", data={})          # nothing chosen
+    assert r.status_code == 200 and len(inv.pictures(nano.id)) == 1
+
+
+def test_quick_add_takes_pictures(client, inv):
+    r = client.post("/add", data={"name": "STLink V3", "location": "school/C12"},
+                    files=_upload(("st.jpg", _jpeg())), follow_redirects=False)
+    assert r.status_code == 303
+    item = _item(inv, "STLink V3")
+    assert len(item.pictures) == 1 and item.locations == ("school/C12",)
+    assert 'class="dropzone"' in client.get("/add").text
+
+
+def test_quick_add_asks_for_pictures_again_when_it_offers_a_match(client, inv):
+    r = client.post("/add", data={"name": "nano every", "location": "school/C12"},
+                    files=_upload(("n.jpg", _jpeg())))
+    assert "Already known" in r.text and "Choose the pictures again" in r.text
+    assert len(_item(inv, "Nano Every").pictures) == 0
+
+
+# ----- copy item -------------------------------------------------------------
+
+def test_copy_item_starts_from_its_fields_and_offers_its_pictures(client, inv):
+    nano = _item(inv, "Nano Every")
+    pic = inv.add_picture(nano.id, _jpeg())
+    page = client.get(f"/item/{nano.id}").text
+    assert f'href="/add?copy={nano.id}"' in page
+    r = client.get("/add", params={"copy": nano.id})
+    assert "Copy of Nano Every" in r.text
+    assert 'value="Nano Every"' in r.text and 'value="Dev board"' in r.text
+    assert 'value="arduino"' in r.text and "ATmega4809 board" in r.text
+    assert f'name="copy_picture" value="{pic.id}" >' in r.text        # offered, not ticked
+    assert re.search(r'name="location"[^>]*value=""', r.text)
+    assert re.search(r'name="quantity"[^>]*value=""', r.text)
+    assert f'name="copy_from" value="{nano.id}"' in r.text and 'name="new" value="1"' in r.text
+    assert client.get("/add", params={"copy": 999}).status_code == 404
+
+
+def test_copy_item_makes_a_new_item_with_the_chosen_pictures(client, inv):
+    nano = _item(inv, "Nano Every")
+    keep = inv.add_picture(nano.id, _jpeg())
+    inv.add_picture(nano.id, _jpeg((0, 0, 200)))
+    other = inv.add_picture(_item(inv, "M6 x 5 mm pan head screw").id, _jpeg())
+    form = {"copy_from": str(nano.id), "new": "1", "name": "Nano Every (5 V)",
+            "category": "Dev board", "tags": "arduino", "copy_picture": [str(keep.id), str(other.id)]}
+    r = client.post("/add", data=form, files=_upload(("new.jpg", _jpeg((0, 200, 0)))),
+                    follow_redirects=False)
+    copy = _item(inv, "Nano Every (5 V)")
+    assert r.status_code == 303 and r.headers["location"] == f"/item/{copy.id}?saved=1"
+    assert copy.stock == () and copy.tags == ("arduino",) and copy.category == "Dev board"
+    pictures = inv.pictures(copy.id)
+    assert len(pictures) == 2                    # the chosen one (not the screw's), the new one
+    assert inv.picture_data(pictures[0].id) == inv.picture_data(keep.id)
+    assert len(inv.pictures(nano.id)) == 2        # the original keeps its own

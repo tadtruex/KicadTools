@@ -4,13 +4,18 @@ Server-rendered pages (Jinja2) with htmx for search-as-you-type and the
 quantity buttons; every page also works as plain HTML forms. Pages:
 
 - ``/`` search (the front page); the top-level location filter (the lab) is
-  remembered in a cookie;
-- ``/item/<id>`` an item: its fields, then its stock rows (location,
-  ~quantity, − / +, move, remove) and "add to another location";
-- ``/add`` quick add: name, location, quantity (``/add?location=school/C12/5``
-  from a location's page fills the location). A name or part number that
-  matches an item already known offers that item instead, so a second box of
-  something becomes a stock row, not a second item;
+  remembered in a cookie. With nothing typed it lists the first *n* items by
+  name (10, 20, 50 or all, also remembered);
+- ``/item/<id>`` an item: its pictures (drop image files on the page to add
+  some), its stock rows (location, ~quantity, − / +, move, remove), "add to
+  another location", its fields, and "copy item";
+- ``/add`` quick add: name, location, quantity, pictures
+  (``/add?location=school/C12/5`` from a location's page fills the location).
+  A name or part number that matches an item already known offers that item
+  instead, so a second box of something becomes a stock row, not a second
+  item. ``/add?copy=<id>`` starts from another item's fields and tags, with a
+  choice of its pictures, and no location or quantity;
+- ``/picture/<id>`` and ``/picture/<id>/thumb`` a stored picture;
 - ``/location/<path>`` a location: its fields, the locations inside it, the
   stock in it and in those locations (the page a QR code opens), add item
   here, add location inside;
@@ -38,13 +43,21 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from kicadtools.inventory import SearchHit, search_items
 from kicadtools.inventorydb import (SEP, InventoryDb, InventoryError, Item, Location, Stock,
                                     natural_key, path_key)
+from kicadtools.pictures import MAX_UPLOAD, PictureError
 
 HERE = Path(__file__).parent
 TOP_COOKIE = "top"
+LIST_COOKIE = "list_n"
+# How many items the front page lists with nothing typed; 0 is all of them.
+LIST_SIZES = (10, 20, 50, 0)
+LIST_DEFAULT = 20
+# A stored picture never changes under its id, so it may be cached for good.
+PICTURE_CACHE = "private, max-age=31536000, immutable"
 # Search results shown at most; the count says when there are more.
 MAX_RESULTS = 200
 ITEM_TEXT_FIELDS = ("category", "manufacturer", "mpn", "digikey_pn", "lcsc", "url",
@@ -84,6 +97,37 @@ def parse_quantity(text: Optional[str]) -> Optional[int]:
         return int(text)
     except ValueError:
         raise InventoryError(f"the quantity must be a whole number, not {text!r}") from None
+
+
+def parse_list_size(text: Optional[str]) -> int:
+    """The front page list's size: one of :data:`LIST_SIZES` (``"all"`` is
+    0), else :data:`LIST_DEFAULT`."""
+    text = (text or "").strip().lower()
+    if text == "all":
+        return 0
+    try:
+        n = int(text)
+    except ValueError:
+        return LIST_DEFAULT
+    return n if n in LIST_SIZES else LIST_DEFAULT
+
+
+async def read_uploads(form: Mapping[str, Any], key: str = "picture") -> List[Tuple[str, bytes]]:
+    """``(file name, bytes)`` of each file uploaded as *key*, skipping the
+    empty part a form sends when no file was chosen. A file over
+    :data:`~kicadtools.pictures.MAX_UPLOAD` raises :class:`PictureError`."""
+    files = []
+    for upload in form.getlist(key):
+        if not hasattr(upload, "read"):
+            continue
+        data = await upload.read(MAX_UPLOAD + 1)
+        name = upload.filename or "picture"
+        if not data:
+            continue
+        if len(data) > MAX_UPLOAD:
+            raise PictureError(f"{name} is larger than {MAX_UPLOAD // (1024 * 1024)} MB")
+        files.append((name, data))
+    return files
 
 
 def parse_tags(text: Optional[str]) -> List[str]:
@@ -175,31 +219,38 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def search_page(request: Request, q: str = "", top: Optional[str] = None,
-                    category: str = "", in_stock: str = ""):
+                    category: str = "", in_stock: str = "", n: Optional[str] = None):
         i = inv(request)
         remembered = top is None
         if remembered:
             top = request.cookies.get(TOP_COOKIE, "")
         top = top.strip()
+        n_remembered = n is None
+        list_n = parse_list_size(request.cookies.get(LIST_COOKIE) if n_remembered else n)
         stock = in_stock not in ("", "0", "false")
         filtered = bool(q.strip() or category.strip())
-        hits: List[SearchHit] = []
-        if filtered:
-            try:
-                hits = search_items(i.items(), i.locations(), q, top=top or None,
-                                    category=category or None, in_stock=stock)
-            except InventoryError:          # a remembered top that is no name now
-                top = ""
-                hits = search_items(i.items(), i.locations(), q, category=category or None,
-                                    in_stock=stock)
+        # With nothing typed, an empty query lists every item by name.
+        items, locations = i.items(), i.locations()
+        try:
+            hits = search_items(items, locations, q, top=top or None,
+                                category=category or None, in_stock=stock)
+        except InventoryError:              # a remembered top that is no name now
+            top = ""
+            hits = search_items(items, locations, q, category=category or None,
+                                in_stock=stock)
+        limit = MAX_RESULTS if filtered else (list_n or len(hits))
         context = dict(q=q, top=top, category=category, in_stock=stock,
-                       hits=hits[:MAX_RESULTS], total=len(hits), filtered=filtered)
+                       hits=hits[:limit], total=len(hits), filtered=filtered,
+                       list_n=list_n, list_sizes=LIST_SIZES)
         if is_htmx(request) and request.headers.get("hx-target") == "results":
             response = page(request, "_results.html", **context)
         else:
             response = page(request, "search.html", choices=choices(i), **context)
+        year = 365 * 24 * 3600
         if not remembered:
-            response.set_cookie(TOP_COOKIE, top, max_age=365 * 24 * 3600, samesite="lax")
+            response.set_cookie(TOP_COOKIE, top, max_age=year, samesite="lax")
+        if not n_remembered:
+            response.set_cookie(LIST_COOKIE, str(list_n), max_age=year, samesite="lax")
         return response
 
     # ----- items -----------------------------------------------------------
@@ -208,7 +259,7 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
                            saved: bool = False, error: Optional[str] = None,
                            form: Any = None) -> HTMLResponse:
         return page(request, "item.html", status, choices=choices(i), item=item, saved=saved,
-                    error=error, form=form)
+                    error=error, form=form, pictures=i.pictures(item.id))
 
     @app.get("/item/{item_id}", response_class=HTMLResponse)
     def item_page(request: Request, item_id: int, saved: str = ""):
@@ -262,6 +313,74 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
             i.delete_item(item_id)
         return back(location_url(item.locations[0]) if item and item.locations else "/")
 
+    # ----- pictures --------------------------------------------------------
+
+    async def add_uploads(i: InventoryDb, item_id: int,
+                          files: List[Tuple[str, bytes]]) -> List[str]:
+        """Add each uploaded file to the item; the errors, one per file
+        refused. Making a picture ready is slow, so it runs off the event
+        loop."""
+        errors = []
+        for name, data in files:
+            try:
+                await run_in_threadpool(i.add_picture, item_id, data)
+            except PictureError as e:
+                errors.append(f"{name}: {e}")
+        return errors
+
+    @app.post("/item/{item_id}/pictures", response_class=HTMLResponse)
+    async def item_add_pictures(request: Request, item_id: int):
+        i = inv(request)
+        item = i.item(item_id)
+        if item is None:
+            return missing(request, f"item {item_id}")
+        try:
+            files = await read_uploads(await request.form())
+        except PictureError as e:
+            return item_page_response(request, i, item, status=400, error=str(e))
+        errors = await add_uploads(i, item_id, files)
+        if errors:
+            return item_page_response(request, i, i.item(item_id), status=400,
+                                      error="Not added: " + "; ".join(errors))
+        return back(f"/item/{item_id}#pictures")
+
+    def picture_response(picture_id: int, thumb: bool) -> Response:
+        found = app.state.inv.picture_data(picture_id, thumb=thumb)
+        if found is None:
+            return Response("no such picture", status_code=404, media_type="text/plain")
+        content_type, data = found
+        return Response(data, media_type=content_type,
+                        headers={"Cache-Control": PICTURE_CACHE})
+
+    @app.get("/picture/{picture_id}")
+    def picture_full(picture_id: int) -> Response:
+        return picture_response(picture_id, thumb=False)
+
+    @app.get("/picture/{picture_id}/thumb")
+    def picture_thumb(picture_id: int) -> Response:
+        return picture_response(picture_id, thumb=True)
+
+    @app.post("/picture/{picture_id}", response_class=HTMLResponse)
+    async def picture_action(request: Request, picture_id: int):
+        """``action``: ``main`` (make it the main picture), ``delete``."""
+        i = inv(request)
+        form = await request.form()
+        target = i.picture(picture_id)
+        if target is None:
+            return missing(request, f"picture {picture_id}")
+        action = str(form.get("action", ""))
+        try:
+            if action == "main":
+                i.move_picture(picture_id, 0)
+            elif action == "delete":
+                i.delete_picture(picture_id)
+            else:
+                raise InventoryError(f"unknown action {action!r}")
+        except InventoryError as e:
+            return item_page_response(request, i, i.item(target.item_id), status=400,
+                                      error=str(e))
+        return back(f"/item/{target.item_id}#pictures")
+
     # ----- stock rows ------------------------------------------------------
 
     @app.post("/stock/{stock_id}/qty", response_class=HTMLResponse)
@@ -308,26 +427,55 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
 
     # ----- quick add -------------------------------------------------------
 
+    def add_response(request: Request, i: InventoryDb, *, status: int = 200,
+                     location: str = "", form: Any = None, error: Optional[str] = None,
+                     added: Optional[Item] = None, matches: Optional[List[Item]] = None,
+                     copy_of: Optional[Item] = None, chosen: Tuple[int, ...] = (),
+                     dropped: bool = False) -> HTMLResponse:
+        return page(request, "add.html", status, choices=choices(i), location=location,
+                    error=error, form=form or {}, added=added, matches=matches or [],
+                    copy_of=copy_of, copy_pictures=i.pictures(copy_of.id) if copy_of else [],
+                    chosen=chosen, dropped=dropped)
+
+    def copy_form(item: Item) -> Dict[str, str]:
+        """The fields of *item* as quick add's form, to start a copy."""
+        form = {f: getattr(item, f) or "" for f in ITEM_TEXT_FIELDS}
+        form.update(name=item.name, tags=", ".join(item.tags))
+        return form
+
     @app.get("/add", response_class=HTMLResponse)
-    def add_page(request: Request, location: str = "", added: Optional[int] = None):
+    def add_page(request: Request, location: str = "", added: Optional[int] = None,
+                 copy: Optional[int] = None):
         i = inv(request)
         just_added = i.item(added) if added else None
-        return page(request, "add.html", choices=choices(i), location=location, error=None,
-                    form={}, added=just_added, matches=[])
+        source = i.item(copy) if copy else None
+        if copy and source is None:
+            return missing(request, f"item {copy}")
+        return add_response(request, i, location=location, added=just_added, copy_of=source,
+                            form=copy_form(source) if source else None)
 
     @app.post("/add", response_class=HTMLResponse)
     async def add_save(request: Request):
         i = inv(request)
         form = await request.form()
         where = _text(form, "location")
+        source = None
+        copy_from = _text(form, "copy_from")
+        if copy_from and copy_from.isdigit():
+            source = i.item(int(copy_from))
+        source_pictures = {p.id for p in i.pictures(source.id)} if source else set()
+        chosen = tuple(int(v) for v in form.getlist("copy_picture")
+                       if str(v).isdigit() and int(v) in source_pictures)
+        again = dict(location=where or "", form=form, copy_of=source, chosen=chosen)
         try:
+            files = await read_uploads(form)
             quantity = parse_quantity(_text(form, "quantity"))
             if not form.get("new"):
                 matches = i.matching(name=_text(form, "name"), mpn=_text(form, "mpn"),
                                      digikey_pn=_text(form, "digikey_pn"))
                 if matches:
-                    return page(request, "add.html", choices=choices(i), location=where or "",
-                                error=None, form=form, added=None, matches=matches)
+                    return add_response(request, i, matches=matches, dropped=bool(files),
+                                        **again)
             item = i.add_item(
                 _text(form, "name") or "",
                 location=where,
@@ -335,9 +483,16 @@ def create_app(source: Union[InventoryDb, Opener]) -> FastAPI:
                 tags=parse_tags(_text(form, "tags")),
                 **{f: _text(form, f) for f in ITEM_TEXT_FIELDS},
             )
-        except InventoryError as e:
-            return page(request, "add.html", 400, choices=choices(i), location=where or "",
-                        error=str(e), form=form, added=None, matches=[])
+        except (InventoryError, PictureError) as e:
+            return add_response(request, i, status=400, error=str(e), **again)
+        for picture_id in chosen:
+            i.copy_picture(picture_id, item.id)
+        errors = await add_uploads(i, item.id, files)
+        if errors:
+            return item_page_response(request, i, i.item(item.id), status=400,
+                                      error="Saved, but not added: " + "; ".join(errors))
+        if source is not None:
+            return back(f"/item/{item.id}?saved=1")      # a copy opens to be edited
         # Back to an empty form with the same location, for the next item.
         return back("/add?" + urlencode({"location": where or "", "added": item.id}))
 

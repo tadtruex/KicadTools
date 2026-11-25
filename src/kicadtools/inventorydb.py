@@ -1014,6 +1014,23 @@ class InventoryDb:
             self._x("UPDATE item SET updated_at = ? WHERE id = ?", (stamp, target.id))
         return self.picture(new_id)
 
+    def copy_picture(self, picture_id: int, item_id: int) -> Picture:
+        """Give the item *item_id* a copy of the picture *picture_id* (of any
+        item), after its other pictures. The stored image is copied as it
+        is, not made again."""
+        with self._tx():
+            source = self._need_picture(picture_id)
+            target = self._need_item(item_id)
+            stamp = self.db._now()
+            cur = self._x(
+                "INSERT INTO item_picture (item_id, position, content_type, width, height,"
+                " data, thumb, caption, created_at) SELECT ?, ?, content_type, width, height,"
+                " data, thumb, caption, ? FROM item_picture WHERE id = ?",
+                (target.id, len(target.pictures), stamp, source.id))
+            new_id = self._new_id(cur)
+            self._x("UPDATE item SET updated_at = ? WHERE id = ?", (stamp, target.id))
+        return self.picture(new_id)
+
     def update_picture(self, picture_id: int, *, caption: Optional[str]) -> Picture:
         """Set the picture's caption; ``None`` or ``""`` clears it."""
         with self._tx():

@@ -1,0 +1,10 @@
+{# Picture files: drop them anywhere on the page, paste one, or choose them
+   (on a phone the chooser offers the camera). static/pictures.js does the
+   dropping; without it the file chooser still works. #}
+<div class="dropzone"{% if autosubmit %} data-autosubmit{% endif %}>
+  <label>
+    <span class="droptext">Drop pictures here, paste one, or <u>choose files</u></span>
+    <input type="file" name="picture" accept="image/*" multiple>
+  </label>
+  <span class="chosen muted small"></span>
+</div>

@@ -1,20 +1,29 @@
 {% if not filtered %}
 <p class="hint">Type to search names, tags, part numbers, locations and descriptions.</p>
+<form class="listhead" action="/" method="get" hx-get="/" hx-target="#results" hx-trigger="change">
+  <input type="hidden" name="top" value="{{ top }}">
+  {% if in_stock %}<input type="hidden" name="in_stock" value="1">{% endif %}
+  <span class="count">{% if hits|length < total %}First {{ hits|length }} of {{ total }} items{% else %}{{ total }} item{{ '' if total == 1 else 's' }}{% endif %}{% if top %} at {{ top }}{% endif %}</span>
+  <label class="check">Show
+    <select name="n" aria-label="How many items to list">
+      {% for size in list_sizes %}<option value="{{ size or 'all' }}" {% if size == list_n %}selected{% endif %}>{{ size or 'All' }}</option>{% endfor %}
+    </select>
+  </label>
+  <noscript><button type="submit">Show</button></noscript>
+</form>
+{% if hits %}
+<div class="scrollbox">
+<ul class="results">
+{% for h in hits %}{% include "_hit.html" %}{% endfor %}
+</ul>
+</div>
+{% endif %}
 {% elif not hits %}
 <p class="hint">Nothing found{% if top %} at {{ top }}{% endif %}.
   <a href="/add?{{ urlencode({'name': q}) }}">Add “{{ q }}”</a>{% if top %} · <a href="/?{{ urlencode({'q': q, 'top': ''}) }}">search everywhere</a>{% endif %}</p>
 {% else %}
 <p class="count">{{ total }} found{% if total > hits|length %}, first {{ hits|length }} shown{% endif %}</p>
 <ul class="results">
-{% for h in hits %}
-  <li>
-    <a class="name" href="/item/{{ h.item.id }}">{{ h.item.name }}</a>
-    <span class="qty">{{ h.on_hand|qty }}</span>
-    <div class="where">
-      {% for row in h.rows %}<span class="stock"><a href="{{ row.location_path|location_url }}">{{ row.location_path }}</a>{% if h.rows|length > 1 %} <span class="muted">{{ row.quantity|qty }}</span>{% endif %}</span>{% if not loop.last %} · {% endif %}{% else %}<span class="muted">in no location</span>{% endfor %}
-    </div>
-    {% if h.item.description %}<div class="desc">{{ h.item.description|truncate(90) }}</div>{% endif %}
-  </li>
-{% endfor %}
+{% for h in hits %}{% include "_hit.html" %}{% endfor %}
 </ul>
 {% endif %}

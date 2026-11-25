@@ -167,3 +167,21 @@ def test_pull_copies_the_pictures(inv, tmp_path):
     copy = InventoryDb(PartsDb.open_read_only(tmp_path / "copy.sqlite"))
     assert copy.item(item.id).pictures == (pic.id,)
     assert copy.picture_data(pic.id) == inv.picture_data(pic.id)
+
+
+def test_copy_picture_copies_the_stored_image_to_another_item(inv):
+    a = inv.add_item("Nano Every")
+    b = inv.add_item("Nano Every, second batch")
+    inv.add_picture(b.id, _image(color=(0, 0, 200)))
+    pic = inv.add_picture(a.id, _image(), caption="front")
+    copy = inv.copy_picture(pic.id, b.id)
+    assert (copy.item_id, copy.position, copy.caption) == (b.id, 1, "front")
+    assert (copy.width, copy.height) == (pic.width, pic.height)
+    assert inv.picture_data(copy.id) == inv.picture_data(pic.id)
+    assert inv.picture_data(copy.id, thumb=True) == inv.picture_data(pic.id, thumb=True)
+    inv.delete_item(a.id)                          # the copy is its own
+    assert inv.picture_data(copy.id) is not None
+    with pytest.raises(InventoryError):
+        inv.copy_picture(pic.id, b.id)
+    with pytest.raises(InventoryError):
+        inv.copy_picture(copy.id, 999)

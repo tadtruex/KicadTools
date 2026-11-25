@@ -2,15 +2,15 @@
 {% block main %}
 <form class="search" action="/" method="get"
       hx-get="/" hx-target="#results" hx-push-url="true"
-      hx-trigger="input changed delay:200ms from:#q, change from:select, change from:input[type=checkbox], submit">
+      hx-trigger="input changed delay:200ms from:#q, change from:select.filter, change from:input[type=checkbox], submit">
   <input id="q" type="search" name="q" value="{{ q }}" placeholder="arduino, stlink v3, m6 screw…"
          autofocus autocomplete="off" autocapitalize="off" spellcheck="false">
   <div class="filters">
-    <select name="top" aria-label="Where">
+    <select class="filter" name="top" aria-label="Where">
       <option value="">Everywhere</option>
       {% for t in choices.top %}<option value="{{ t }}" {% if t|lower == top|lower %}selected{% endif %}>{{ t }}</option>{% endfor %}
     </select>
-    <select name="category" aria-label="Category">
+    <select class="filter" name="category" aria-label="Category">
       <option value="">Any category</option>
       {% for c in choices.category %}<option value="{{ c }}" {% if c|lower == category|lower %}selected{% endif %}>{{ c }}</option>{% endfor %}
     </select>

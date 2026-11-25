@@ -20,13 +20,13 @@ On `develop` (commit e50c569, pushed). `INVENTORY_PLAN.md`, "Locations and stock
 
 1. Look at the develop app on the converted test copy (README_TEST.md),
    on the phone too. Stop it before running the copy again.
-2. Pictures in the web app (upload, show, reorder).
+2. Pictures in the web app: built (add, show, make main, delete); no
+   captions or drag to reorder yet.
 3. The cutover, as in the plan ("how the locations and stock migration
    runs"): finish a release from `develop`; stop the service;
    `kicadtools inventory migrate`; re-run the deploy script.
-4. Interface changes the user asked for (plan, "Interface to-do"):
-   item list on the landing page, whole row opens the item, copy item
-   (choose which pictures come along), drag-and-drop pictures.
+4. Interface to-do (plan): built, with pictures on the item page. Try
+   drag and drop and the phone camera in a real browser.
 
 ## Handoff: inventory web app deployed on broadpeak (2026-11-24)
 

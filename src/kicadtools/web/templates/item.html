@@ -5,6 +5,26 @@
 {% if saved %}<p class="ok">Saved.</p>{% endif %}
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
+<section id="pictures">
+{% if pictures %}
+<ul class="gallery">
+{% for p in pictures %}
+  <li{% if loop.first %} class="main"{% endif %}>
+    <a href="/picture/{{ p.id }}" target="_blank" rel="noopener"><img src="/picture/{{ p.id }}/thumb" alt="{{ p.caption or item.name }}" loading="lazy"></a>
+    <div class="pic-actions">
+      {% if not loop.first %}<form method="post" action="/picture/{{ p.id }}"><input type="hidden" name="action" value="main"><button type="submit" class="small" title="Make it the main picture">Main</button></form>{% else %}<span class="muted small">main</span>{% endif %}
+      <form method="post" action="/picture/{{ p.id }}" onsubmit="return confirm('Delete this picture?')"><input type="hidden" name="action" value="delete"><button type="submit" class="small" aria-label="Delete picture">✕</button></form>
+    </div>
+  </li>
+{% endfor %}
+</ul>
+{% endif %}
+<form method="post" action="/item/{{ item.id }}/pictures" enctype="multipart/form-data" class="pictures-form">
+  {% set autosubmit = true %}{% include "_dropzone.html" %}
+  <noscript><button type="submit">Add pictures</button></noscript>
+</form>
+</section>
+
 <h2>Where{% if item.stock|length > 1 %} <span class="muted">· {{ item.on_hand|qty }} in all</span>{% endif %}</h2>
 {% if not item.stock %}<p class="hint">In no location.</p>{% endif %}
 <ul class="stock-rows">
@@ -60,6 +80,8 @@
   {% if item.url %}<p><a href="{{ item.url }}" target="_blank" rel="noopener">Open the link ↗</a></p>{% endif %}
   <div class="actions"><button type="submit" class="primary">Save</button></div>
 </form>
+
+<p><a class="button" href="/add?copy={{ item.id }}">Copy item</a></p>
 
 <form method="post" action="/item/{{ item.id }}/delete" class="danger"
       onsubmit="return confirm('Delete {{ item.name|e }} and everywhere it is kept?')">

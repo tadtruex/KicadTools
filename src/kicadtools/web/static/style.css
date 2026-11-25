@@ -70,3 +70,36 @@ form.danger button { color: var(--err); border-color: var(--err); background: tr
 .stock-rows details { margin: 6px 0 0; }
 .matches { border: 1px solid var(--accent); border-radius: 10px; padding: 4px 12px; margin: 12px 0; }
 .bins.tree li.top { font-weight: 600; }
+/* The whole row of a result opens the item; its location links and forms stay their own. */
+.results li { position: relative; }
+.results .name::after { content: ""; position: absolute; inset: 0; border-radius: 10px; }
+.results li:hover { border-color: var(--accent); }
+.results .where a, .results form { position: relative; z-index: 1; }
+.results li.with-thumb { grid-template-columns: 56px 1fr auto; }
+.results li.with-thumb .thumb { grid-row: 1 / span 3; width: 56px; height: 56px; object-fit: cover;
+                                border-radius: 6px; align-self: start; }
+.results li.with-thumb .where, .results li.with-thumb .desc { grid-column: 2 / -1; }
+.listhead { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 12px 0 4px; }
+.listhead select { width: auto; padding: 4px 8px; }
+.scrollbox { max-height: 65vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px;
+             padding: 0 8px; background: var(--bg); }
+/* Pictures */
+.gallery { list-style: none; padding: 0; margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 10px; }
+.gallery li { width: 120px; }
+.gallery img { width: 120px; height: 120px; object-fit: cover; border-radius: 8px; display: block;
+               border: 1px solid var(--line); background: var(--card); }
+.gallery li.main img { border: 2px solid var(--accent); }
+.pic-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
+.pic-actions form { margin: 0; }
+button.small { padding: 2px 8px; font-size: 0.85rem; }
+.copy-pictures { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin: 0; }
+.copy-pictures legend { color: var(--muted); font-size: 0.9rem; padding: 0 4px; }
+.copy-pictures label { display: grid; gap: 4px; cursor: pointer; }
+.copy-pictures input { width: auto; }
+.dropzone { position: relative; border: 2px dashed var(--line); border-radius: 10px; padding: 14px; text-align: center;
+            color: var(--muted); margin: 8px 0; }
+.dropzone label { cursor: pointer; display: block; }
+.dropzone input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.dropzone.over { border-color: var(--accent); background: var(--chip); color: var(--fg); }
+.dropzone.busy { opacity: 0.6; }
+.dropzone .chosen { display: block; margin-top: 4px; }

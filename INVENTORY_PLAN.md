@@ -193,7 +193,17 @@ What follows from it:
   SQLite and MariaDB 11.8, including a MariaDB conversion stopped after
   each non-transactional step and finished by the next run.
 
-## Interface to-do (asked 2026-11-25)
+## Interface to-do (asked 2026-11-25; built 2026-11-25)
+
+Built as below on `develop`. Beyond the list: the item page shows its
+pictures (thumbnails, full size opens in a new tab, "Main", delete), and a
+result row shows the item's main picture as a thumbnail. Pasting an image
+(a screenshot) works like dropping one. The list size is remembered in the
+`list_n` cookie and follows the "Where" and "In stock" filters. A copy
+copies the stored picture as it is (`InventoryDb.copy_picture`), and opens
+the new item's page. Drag and drop (`static/pictures.js`) is not yet
+tried in a real browser.
+
 
 1. **Landing page item list.** Below the information on the search page, a
    scrollable box showing the first *n* items, with a dropdown for *n*:

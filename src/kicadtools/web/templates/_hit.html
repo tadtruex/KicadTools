@@ -1,0 +1,10 @@
+{# One item in a list of search hits; the whole row opens the item. #}
+<li{% if h.item.picture %} class="with-thumb"{% endif %}>
+  {% if h.item.picture %}<img class="thumb" src="/picture/{{ h.item.picture }}/thumb" alt="" loading="lazy">{% endif %}
+  <a class="name" href="/item/{{ h.item.id }}">{{ h.item.name }}</a>
+  <span class="qty">{{ h.on_hand|qty }}</span>
+  <div class="where">
+    {% for row in h.rows %}<span class="stock"><a href="{{ row.location_path|location_url }}">{{ row.location_path }}</a>{% if h.rows|length > 1 %} <span class="muted">{{ row.quantity|qty }}</span>{% endif %}</span>{% if not loop.last %} · {% endif %}{% else %}<span class="muted">in no location</span>{% endfor %}
+  </div>
+  {% if h.item.description %}<div class="desc">{{ h.item.description|truncate(90) }}</div>{% endif %}
+</li>
