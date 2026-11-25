@@ -167,8 +167,13 @@ $NAME {
 	reverse_proxy 127.0.0.1:$PORT
 }
 
-# Certificate from tailscaled.
+# Certificate from tailscaled. Said outright: with the tls block above in
+# the file, Caddy does not pick tailscaled for a ts.net name by itself and
+# asks Let's Encrypt, which cannot reach a tailnet-only name.
 $TS_NAME {
+	tls {
+		get_certificate tailscale
+	}
 	reverse_proxy 127.0.0.1:$PORT
 }
 EOF
