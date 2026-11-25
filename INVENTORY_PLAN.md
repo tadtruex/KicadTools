@@ -133,10 +133,10 @@ What follows from it:
   113 stock rows, 114 locations), and a run after a failure clears the
   half-built tables and starts again.
 - **Cutover on the real database, with the service stopped:** finish the
-  release that holds the migration (so `master` has it);
+  release that holds the migration (so `main` has it);
   `sudo systemctl stop kicadtools-web`; `kicadtools inventory migrate` from
   the user's checkout of that release; then the deploy script again, which
-  sets the grants (`location`, `stock`, `item_picture`), fetches `master`
+  sets the grants (`location`, `stock`, `item_picture`), fetches `main`
   and restarts the service on it (no separate `inventory-web-update`). The
   old release never runs against the new layout.
 - **Test copy:** `copy_inventory_to_test.py` copies the real database's
@@ -645,17 +645,23 @@ adding things fast; 7 is the BOM use.
 - `scripts/deploy_inventory_web.sh`, run once by the user with sudo from
   their checkout on broadpeak; safe to run again. It installs
   `scripts/inventory_web_update.sh` as `/usr/local/sbin/inventory-web-update`.
-- **Release, not develop:** the service runs `master`, the current
-  git-flow release (`kt_v0.1a` at deploy). `sudo inventory-web-update`
-  fetches `master` and its tags, reinstalls, restarts, checks `/healthz`
+- **Release, not develop:** the service runs `main` of
+  `tadtruex/KicadTools`, the current git-flow release (`kt_v0.1a` at
+  deploy, then from the Boards repo's `master`). `sudo inventory-web-update`
+  fetches `main` and its tags, reinstalls, restarts, checks `/healthz`
   and prints the release before and after.
 - **Account:** system user `inventory`, home `/srv/inventory` (mode 750,
-  closed to `tad`), no login shell. GitHub access through a read-only
-  deploy key on the Boards repo (the repo is private); GitHub's host key is
-  pinned in the script.
-- **Checkout:** `/srv/inventory/Boards`, depth 1, blobs on demand, sparse:
-  only `Code/KicadTools` (about 5 MB). `KICADTOOLS_REPO_ROOT` in the unit
-  points `repo_root()` at it, so no `Libraries` folder is needed. Venv
+  closed to `tad`), no login shell. The KicadTools repo is public, so the
+  checkout uses HTTPS and needs no deploy key.
+- **Checkout:** `/srv/inventory/KicadTools`, depth 1, `main` and its tags.
+  `KICADTOOLS_REPO_ROOT` in the unit points `repo_root()` at it, so no
+  `Libraries` folder is needed.
+- **Changed 2026-11-25:** the service used to run a sparse checkout of the
+  Boards repo (`/srv/inventory/Boards`, `master`, through a deploy key).
+  Boards now holds KicadTools as a submodule, which that checkout cannot
+  fill, so both scripts now check out KicadTools itself. The deploy script
+  names the old checkout at the end so it can be removed, along with the
+  Boards deploy key. Venv
   `/srv/inventory/venv` with the `server,inventory,web` extras.
 - **Database user** `inventory_web@localhost`, password random, in
   `/srv/inventory/.kicadtools/db_password` (0600); config beside it names

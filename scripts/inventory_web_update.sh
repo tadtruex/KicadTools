@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Update the lab inventory web app on broadpeak to the head of master
-# (git-flow: the current release).
+# Update the lab inventory web app on broadpeak to the head of main
+# (git-flow: the current release) of tadtruex/KicadTools.
 # Installed as /usr/local/sbin/inventory-web-update by
 # scripts/deploy_inventory_web.sh; run it with sudo.
 #
@@ -10,15 +10,19 @@
 set -euo pipefail
 
 SVC_USER=inventory
-CHECKOUT=/srv/inventory/Boards
+CHECKOUT=/srv/inventory/KicadTools
 VENV=/srv/inventory/venv
-BRANCH=master
+BRANCH=main
 UNIT=kicadtools-web
 PORT=8090
 
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
 as_svc() { sudo -u "$SVC_USER" -H -- "$@"; }
 cd /srv/inventory   # a working directory $SVC_USER can read
+[[ -d $CHECKOUT/.git ]] || {
+    echo "no checkout at $CHECKOUT: run scripts/deploy_inventory_web.sh with sudo first" >&2
+    exit 1
+}
 
 release() { as_svc git -C "$CHECKOUT" describe --tags --always; }
 before=$(release)
@@ -27,7 +31,7 @@ as_svc git -C "$CHECKOUT" reset --hard FETCH_HEAD
 after=$(release)
 echo "checkout: $before -> $after"
 
-as_svc "$VENV/bin/pip" install --quiet -e "$CHECKOUT/Code/KicadTools[server,inventory,web]"
+as_svc "$VENV/bin/pip" install --quiet -e "$CHECKOUT[server,inventory,web]"
 systemctl restart "$UNIT"
 
 for _ in $(seq 1 30); do

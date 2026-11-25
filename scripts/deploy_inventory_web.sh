@@ -7,10 +7,10 @@
 # step checks what is already there. What it sets up:
 #
 #   1. a system account `inventory` (home /srv/inventory, no login shell);
-#   2. a read-only GitHub deploy key for that account (you add it on GitHub
-#      when the script prints it; the script waits);
-#   3. a shallow, sparse checkout of master (git-flow: the current
-#      release) in /srv/inventory/Boards and a
+#   2. (no step: the KicadTools repo is public, so the checkout needs no
+#      deploy key);
+#   3. a shallow checkout of main (git-flow: the current release) of
+#      tadtruex/KicadTools in /srv/inventory/KicadTools and a
 #      venv in /srv/inventory/venv with the server, inventory and web extras;
 #   4. a backup of tadtruex_inventory (mariadb-dump) before the app can
 #      write to it;
@@ -29,8 +29,13 @@
 #      for a development run);
 #   7. `tailscale serve`: https://<broadpeak's tailnet name>/ forwards to it
 #      (skipped once deploy_inventory_https.sh has put Caddy on port 443);
-#   8. /usr/local/sbin/inventory-web-update: pull master, reinstall,
+#   8. /usr/local/sbin/inventory-web-update: pull main, reinstall,
 #      restart, check.
+#
+# Until 2026-11-25 the service ran from a sparse checkout of the Boards repo
+# (/srv/inventory/Boards, branch master). Boards now holds KicadTools as a
+# submodule, so the service checks out KicadTools itself. The old checkout
+# is no longer used; the script names it at the end so it can be removed.
 #
 # After a schema change that adds a column (inventorydb._ADDED_COLUMNS),
 # open the database once with your own account (any kicadtools command, or
@@ -41,20 +46,18 @@ set -euo pipefail
 
 SVC_USER=inventory
 SVC_HOME=/srv/inventory
-CHECKOUT=$SVC_HOME/Boards
+CHECKOUT=$SVC_HOME/KicadTools
+OLD_CHECKOUT=$SVC_HOME/Boards   # before 2026-11-25; no longer used
 VENV=$SVC_HOME/venv
 KT_DIR=$SVC_HOME/.kicadtools
-REPO_URL=git@github.com:tadtruex/Boards
-BRANCH=master   # git-flow: master is the current release
+REPO_URL=https://github.com/tadtruex/KicadTools.git   # public: no key needed
+BRANCH=main   # git-flow: main is the current release
 DATABASE=tadtruex_inventory
 DB_USER=inventory_web
 PORT=8090
 UNIT=kicadtools-web
 UPDATE_CMD=/usr/local/sbin/inventory-web-update
 BACKUP_DIR=$SVC_HOME/backups
-# GitHub's published SSH host key (docs.github.com, "GitHub's SSH key
-# fingerprints"), pinned so the first clone does not trust whatever answers.
-GITHUB_HOST_KEY='github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
 
 say()  { printf '\n==> %s\n' "$*"; }
 fail() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
@@ -80,46 +83,22 @@ chmod 750 "$SVC_HOME"
 # Every later step runs from here: started from your checkout, commands run
 # as $SVC_USER would have a working directory they cannot read.
 cd "$SVC_HOME"
-install -d -m 700 -o "$SVC_USER" -g "$SVC_USER" "$SVC_HOME/.ssh" "$KT_DIR"
+install -d -m 700 -o "$SVC_USER" -g "$SVC_USER" "$KT_DIR"
 install -d -m 750 -o root -g root "$BACKUP_DIR"
 
-# --- 2. deploy key -------------------------------------------------------
-say "GitHub deploy key"
-KEY=$SVC_HOME/.ssh/id_ed25519
-if [[ ! -f $KEY ]]; then
-    as_svc ssh-keygen -q -t ed25519 -N '' -C "inventory@broadpeak (deploy, read-only)" -f "$KEY"
-fi
-KNOWN=$SVC_HOME/.ssh/known_hosts
-grep -qxF "$GITHUB_HOST_KEY" "$KNOWN" 2>/dev/null || echo "$GITHUB_HOST_KEY" >> "$KNOWN"
-chown "$SVC_USER:$SVC_USER" "$KNOWN"; chmod 644 "$KNOWN"
-
-repo_readable() {
-    as_svc env GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes" \
-        git ls-remote --heads "$REPO_URL" "$BRANCH" >/dev/null 2>&1
-}
-until repo_readable; do
-    cat <<EOF
-
-The account cannot read $REPO_URL yet. Add this key on GitHub:
-  https://github.com/tadtruex/Boards/settings/keys -> Add deploy key
-  Title: broadpeak inventory     Allow write access: leave unchecked
-
-$(cat "$KEY.pub")
-
-EOF
-    read -r -p "Press Enter once the key is added (Ctrl-C to stop) " _
-done
-echo "the account can read the repository"
+# --- 2. repository access ----------------------------------------------
+say "repository $REPO_URL ($BRANCH)"
+as_svc git ls-remote --exit-code --heads "$REPO_URL" "$BRANCH" >/dev/null \
+    || fail "cannot read $BRANCH from $REPO_URL"
+echo "readable"
 
 # --- 3. checkout and venv ------------------------------------------------
 say "checkout $CHECKOUT ($BRANCH)"
 if [[ ! -d $CHECKOUT/.git ]]; then
-    as_svc git clone --depth 1 --filter=blob:none --sparse --branch "$BRANCH" \
-        "$REPO_URL" "$CHECKOUT"
-    # Only Code/KicadTools is checked out; the unit sets
-    # KICADTOOLS_REPO_ROOT, so repo_root() needs no Libraries folder.
-    as_svc git -C "$CHECKOUT" sparse-checkout set Code/KicadTools
+    as_svc git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$CHECKOUT"
+    as_svc git -C "$CHECKOUT" fetch --depth 1 --tags origin "$BRANCH"
 else
+    as_svc git -C "$CHECKOUT" remote set-url origin "$REPO_URL"
     as_svc git -C "$CHECKOUT" fetch --depth 1 --tags origin "$BRANCH"
     as_svc git -C "$CHECKOUT" reset --hard FETCH_HEAD
 fi
@@ -129,7 +108,7 @@ echo "release $RELEASE"
 say "venv $VENV"
 [[ -x $VENV/bin/python ]] || as_svc python3 -m venv "$VENV"
 as_svc "$VENV/bin/pip" install --quiet --upgrade pip
-as_svc "$VENV/bin/pip" install --quiet -e "$CHECKOUT/Code/KicadTools[server,inventory,web]"
+as_svc "$VENV/bin/pip" install --quiet -e "$CHECKOUT[server,inventory,web]"
 "$VENV/bin/kicadtools-web" --help >/dev/null
 
 # --- 4. backup -----------------------------------------------------------
@@ -198,6 +177,8 @@ User=$SVC_USER
 Group=$SVC_USER
 WorkingDirectory=$SVC_HOME
 Environment=KICADTOOLS_CONFIG=$KT_DIR/config.toml
+# No Boards checkout here: point repo_root() at the KicadTools checkout,
+# so nothing looks for a Libraries folder.
 Environment=KICADTOOLS_REPO_ROOT=$CHECKOUT
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV/bin/kicadtools-web --host 127.0.0.1 --port $PORT
@@ -233,6 +214,8 @@ else
 fi
 
 # --- 7. tailscale serve --------------------------------------------------
+# Matched as written in /etc/caddy/Caddyfile by deploy_inventory_https.sh;
+# keep it as it is, old path and all.
 HTTPS_MARKER="# Written by Code/KicadTools/scripts/deploy_inventory_https.sh"
 if grep -qxF "$HTTPS_MARKER" /etc/caddy/Caddyfile 2>/dev/null; then
     say "HTTPS: Caddy (deploy_inventory_https.sh), not tailscale serve"
@@ -247,7 +230,7 @@ fi
 
 # --- 8. update command ---------------------------------------------------
 say "update command $UPDATE_CMD"
-install -m 755 -o root -g root "$CHECKOUT/Code/KicadTools/scripts/inventory_web_update.sh" "$UPDATE_CMD"
+install -m 755 -o root -g root "$CHECKOUT/scripts/inventory_web_update.sh" "$UPDATE_CMD"
 
 TS_NAME=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
 say "done"
@@ -258,3 +241,12 @@ Release: $RELEASE
 Update:  sudo $(basename "$UPDATE_CMD")
 Backup:  $DUMP
 EOF
+if [[ -d $OLD_CHECKOUT ]]; then
+    cat <<EOF
+
+The old Boards checkout $OLD_CHECKOUT is no longer used.
+Once the app is working, remove it with:  sudo rm -rf $OLD_CHECKOUT
+(and the deploy key "broadpeak inventory" on the Boards repo, and
+$SVC_HOME/.ssh, which held that key)
+EOF
+fi

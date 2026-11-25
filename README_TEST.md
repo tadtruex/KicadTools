@@ -5,7 +5,7 @@ broadpeak at the same time. They share the MariaDB server and nothing else.
 
 | | Released | Develop |
 |---|---|---|
-| Code | `/srv/inventory/Boards` (`master`) | `~/Documents/Code/Boards` (`develop`) |
+| Code | `/srv/inventory/KicadTools` (`main`) | `~/Documents/Code/Boards` (`develop`) |
 | Port | 127.0.0.1:8090 | 127.0.0.1:8080 |
 | Database | `tadtruex_inventory` (real) | `tadtruex_inventory_test` |
 | Config | `/srv/inventory/.kicadtools/config.toml` | `~/.kicadtools/config_test.toml` |
@@ -86,5 +86,5 @@ connection.
 
 | Task | Command |
 |---|---|
-| Update to the head of `master` | `sudo inventory-web-update` |
+| Update to the head of `main` | `sudo inventory-web-update` |
 | Status, log | `systemctl status kicadtools-web`, `journalctl -u kicadtools-web -f` |
